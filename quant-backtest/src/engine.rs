@@ -123,8 +123,7 @@ pub struct BacktestConfig {
 }
 
 /// Per-position risk management
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RiskControlConfig {
     /// Hard stop-loss: sell if loss exceeds this % from buy price (e.g. 0.10 = 10%)
     #[serde(default)]
@@ -189,7 +188,6 @@ pub struct RiskControlConfig {
     pub portfolio_sharpe_min_exposure: Option<Decimal>,
 }
 
-
 impl Default for BacktestConfig {
     fn default() -> Self {
         Self {
@@ -239,7 +237,6 @@ pub enum BacktestPersistenceMode {
     SummaryOnly,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionTiming {
@@ -266,7 +263,6 @@ pub enum ExecutionScheduleProfile {
     Twap15dV1,
     Twap20dV1,
 }
-
 
 impl ExecutionScheduleProfile {
     pub fn parse(value: &str) -> Result<Self, String> {
@@ -316,7 +312,6 @@ pub enum ExecutionCarryPolicy {
     Expire,
     RollForwardV1,
 }
-
 
 impl ExecutionCarryPolicy {
     pub fn parse(value: &str) -> Result<Self, String> {
@@ -766,7 +761,7 @@ impl BacktestEngine {
             .filter(|amount| !amount.is_zero())
             // bar 表 amount 为 Tushare 千元单位,order_amount 为元——此前直接相除
             // 参与率被放大 1000 倍(小盘股虚算至 300%+,冲击成本 9%/边,2026-08-20
-        // 定位:含成本回测全灭的根因)。统一换算到元再求比值。
+            // 定位:含成本回测全灭的根因)。统一换算到元再求比值。
             .map(|amount| order_amount / (amount * Decimal::from(1000u32)))
             .unwrap_or_default()
     }
@@ -1467,7 +1462,8 @@ impl BacktestEngine {
             }
             // A股/ETF 买入必须按100股/份向下取整(1手=100)。
             // 卖出允许零头清仓不取整(见下方 sell 段),仅买入取整。
-            let qty = round_down_to_lot(capped_amount / price, quant_common::trading_rules::LOT_SIZE);
+            let qty =
+                round_down_to_lot(capped_amount / price, quant_common::trading_rules::LOT_SIZE);
             if !qty.is_zero() {
                 // Pre-check for constraint violations
                 let participation_rate = self.participation_rate_for(market, sym, qty * *price);
@@ -1754,7 +1750,12 @@ mod tests {
         use ExecutionScheduleProfile::*;
         // off/空串/immediate → Immediate
         for s in ["", "off", "immediate"] {
-            assert_eq!(ExecutionScheduleProfile::parse(s).unwrap(), Immediate, "{}", s);
+            assert_eq!(
+                ExecutionScheduleProfile::parse(s).unwrap(),
+                Immediate,
+                "{}",
+                s
+            );
         }
         // 带与不带 _v1 后缀的别名等价
         for (a, b) in [
@@ -1774,7 +1775,10 @@ mod tests {
         }
         // 未知值 → Err(防配置静默降级)
         assert!(ExecutionScheduleProfile::parse("twap_7d").is_err());
-        assert!(ExecutionScheduleProfile::parse("TWAP_3D_V1").is_err(), "大小写敏感");
+        assert!(
+            ExecutionScheduleProfile::parse("TWAP_3D_V1").is_err(),
+            "大小写敏感"
+        );
     }
 
     #[test]

@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::engine::{BacktestConfig, BacktestEngine, BacktestOutput, MarketDay};
-use crate::signal_generator::matrix_view::ReturnHistoryMatrixView;
 use crate::metrics::BacktestMetrics;
+use crate::signal_generator::matrix_view::ReturnHistoryMatrixView;
 
 #[test]
 fn score_day_uses_previous_trading_day_by_default() {
@@ -60,8 +60,7 @@ fn pit_average_amounts_by_date_never_uses_future_amount_rows() {
         ),
     ]);
 
-    let average_amounts_by_date =
-        build_pit_average_amounts_by_date(&amount_history, &[as_of], 2);
+    let average_amounts_by_date = build_pit_average_amounts_by_date(&amount_history, &[as_of], 2);
     let average_amounts = average_amounts_by_date
         .get(&as_of)
         .expect("as-of liquidity snapshot");
@@ -520,36 +519,34 @@ fn completed_oos_no_drift_smoke_for_stats_matrix_signal_builder(
         (
             "AAA".to_string(),
             dated_returns(&[
-                0.010, -0.010, 0.015, -0.005, 0.020, 0.011, -0.006, 0.014, 0.008, -0.003,
-                0.012, 0.004,
+                0.010, -0.010, 0.015, -0.005, 0.020, 0.011, -0.006, 0.014, 0.008, -0.003, 0.012,
+                0.004,
             ]),
         ),
         (
             "BBB".to_string(),
             dated_returns(&[
-                0.006, 0.004, 0.005, 0.007, 0.006, 0.005, 0.004, 0.006, 0.005, 0.007, 0.006,
-                0.005,
+                0.006, 0.004, 0.005, 0.007, 0.006, 0.005, 0.004, 0.006, 0.005, 0.007, 0.006, 0.005,
             ]),
         ),
         (
             "CCC".to_string(),
             dated_returns(&[
-                -0.012, 0.009, -0.010, 0.011, -0.008, 0.010, -0.006, 0.009, -0.005, 0.008,
-                -0.004, 0.007,
+                -0.012, 0.009, -0.010, 0.011, -0.008, 0.010, -0.006, 0.009, -0.005, 0.008, -0.004,
+                0.007,
             ]),
         ),
         (
             "DDD".to_string(),
             dated_returns(&[
-                0.080, -0.070, 0.090, -0.085, 0.075, -0.065, 0.070, -0.060, 0.065, -0.055,
-                0.060, -0.050,
+                0.080, -0.070, 0.090, -0.085, 0.075, -0.065, 0.070, -0.060, 0.065, -0.055, 0.060,
+                -0.050,
             ]),
         ),
         (
             "EEE".to_string(),
             dated_returns(&[
-                0.004, 0.006, 0.005, 0.004, 0.006, 0.005, 0.006, 0.004, 0.005, 0.006, 0.004,
-                0.005,
+                0.004, 0.006, 0.005, 0.004, 0.006, 0.005, 0.006, 0.004, 0.005, 0.006, 0.004, 0.005,
             ]),
         ),
     ]);
@@ -1712,8 +1709,7 @@ fn score_date_return_risk_matrix_matches_raw_trailing_stats_and_ignores_future_r
         ),
     ]);
 
-    let matrix =
-        build_score_date_return_risk_matrix(&return_history, &[score_day], &symbols, 3);
+    let matrix = build_score_date_return_risk_matrix(&return_history, &[score_day], &symbols, 3);
     let raw_returns = trailing_returns(&return_history, "AAA", score_day, 3);
     let matrix_returns = matrix.returns(score_day, "AAA");
 
@@ -1757,8 +1753,7 @@ fn score_date_return_risk_matrix_matches_raw_correlation_and_risk_penalty() {
         ..Default::default()
     };
 
-    let matrix =
-        build_score_date_return_risk_matrix(&return_history, &[score_day], &symbols, 5);
+    let matrix = build_score_date_return_risk_matrix(&return_history, &[score_day], &symbols, 5);
     let aaa_returns = trailing_returns(&return_history, "AAA", score_day, 5);
     let bbb_returns = trailing_returns(&return_history, "BBB", score_day, 5);
 
@@ -1913,13 +1908,7 @@ fn score_date_return_risk_matrix_matches_raw_portfolio_consumers_across_score_da
             )
         );
         assert_eq!(
-            select_uncorrelated_candidates(
-                score_day,
-                &candidates,
-                &correlation_matrix,
-                &config,
-                4,
-            ),
+            select_uncorrelated_candidates(score_day, &candidates, &correlation_matrix, &config, 4,),
             select_uncorrelated_candidates(
                 score_day,
                 &candidates,
@@ -2236,13 +2225,7 @@ fn stats_matrix_correlation_consumers_match_raw_portfolio_helpers() {
         build_score_date_return_risk_stats_matrix(&return_history, &[score_day], &symbols, 5);
 
     assert_eq!(
-        select_uncorrelated_candidates(
-            score_day,
-            &candidates,
-            &stats_matrix,
-            &config,
-            4,
-        ),
+        select_uncorrelated_candidates(score_day, &candidates, &stats_matrix, &config, 4,),
         select_uncorrelated_candidates(
             score_day,
             &candidates,
@@ -2326,13 +2309,9 @@ fn return_risk_stats_matrix_rows_round_trip_single_and_pairwise_stats() {
     assert_eq!(stats_rows.len(), symbols.len());
     assert_eq!(pair_rows.len(), 3);
 
-    let restored = return_risk_stats_feature_matrix_from_rows(
-        &[score_day],
-        &symbols,
-        stats_rows,
-        pair_rows,
-    )
-    .expect("restored stats matrix");
+    let restored =
+        return_risk_stats_feature_matrix_from_rows(&[score_day], &symbols, stats_rows, pair_rows)
+            .expect("restored stats matrix");
 
     assert_eq!(
         restored.total_return(score_day, "AAA"),
@@ -2483,13 +2462,7 @@ fn return_risk_stats_feature_matrix_rows_match_raw_matrix_consumers() {
         relative_strength_rank_scores(&candidates, &raw_matrix, score_day)
     );
     assert_eq!(
-        filter_candidate_risk_pool(
-            score_day,
-            &candidates,
-            &restored,
-            &average_amounts,
-            &config,
-        ),
+        filter_candidate_risk_pool(score_day, &candidates, &restored, &average_amounts, &config,),
         filter_candidate_risk_pool(
             score_day,
             &candidates,
@@ -2499,56 +2472,20 @@ fn return_risk_stats_feature_matrix_rows_match_raw_matrix_consumers() {
         )
     );
     assert_eq!(
-        select_uncorrelated_candidates(
-            score_day,
-            &candidates,
-            &restored,
-            &config,
-            5,
-        ),
-        select_uncorrelated_candidates(
-            score_day,
-            &candidates,
-            &raw_matrix,
-            &config,
-            5,
-        )
+        select_uncorrelated_candidates(score_day, &candidates, &restored, &config, 5,),
+        select_uncorrelated_candidates(score_day, &candidates, &raw_matrix, &config, 5,)
     );
     assert_eq!(
         build_kelly_raw_weights(score_day, &symbols, &restored, &config),
         build_kelly_raw_weights(score_day, &symbols, &raw_matrix, &config)
     );
     assert_eq!(
-        build_risk_budget_raw_weights(
-            score_day,
-            &symbols,
-            &restored,
-            &average_amounts,
-            &config,
-        ),
-        build_risk_budget_raw_weights(
-            score_day,
-            &symbols,
-            &raw_matrix,
-            &average_amounts,
-            &config,
-        )
+        build_risk_budget_raw_weights(score_day, &symbols, &restored, &average_amounts, &config,),
+        build_risk_budget_raw_weights(score_day, &symbols, &raw_matrix, &average_amounts, &config,)
     );
     assert_eq!(
-        build_min_variance_raw_weights(
-            score_day,
-            &symbols,
-            &restored,
-            &average_amounts,
-            &config,
-        ),
-        build_min_variance_raw_weights(
-            score_day,
-            &symbols,
-            &raw_matrix,
-            &average_amounts,
-            &config,
-        )
+        build_min_variance_raw_weights(score_day, &symbols, &restored, &average_amounts, &config,),
+        build_min_variance_raw_weights(score_day, &symbols, &raw_matrix, &average_amounts, &config,)
     );
 }
 
@@ -2677,11 +2614,8 @@ fn sparse_return_risk_stats_payload_profile_allows_full_universe_stats_with_cand
         .map(|idx| format!("S{idx:04}"))
         .collect::<Vec<_>>();
     let candidate_symbols = symbols.iter().take(50).cloned().collect::<Vec<_>>();
-    let plan = return_risk_stats_pairwise_scope_from_symbols(
-        &score_days,
-        &symbols,
-        &candidate_symbols,
-    );
+    let plan =
+        return_risk_stats_pairwise_scope_from_symbols(&score_days, &symbols, &candidate_symbols);
     let profile = return_risk_stats_feature_matrix_payload_profile(
         &score_days,
         &symbols,
@@ -3178,8 +3112,7 @@ fn risk_contribution_control_uses_score_date_return_risk_matrix() {
         top_n: 3,
         max_position_pct: Decimal::new(80, 2),
         risk_budget_lookback_days: 5,
-        risk_contribution_control_profile:
-            RiskContributionControlProfile::SoftSingleName20PctV1,
+        risk_contribution_control_profile: RiskContributionControlProfile::SoftSingleName20PctV1,
         ..Default::default()
     };
 
@@ -3370,8 +3303,7 @@ fn stress_participation_target_scale_reduces_target_gross_to_capacity() {
         max_gross_exposure: 0.90,
         portfolio_notional_cny: Some(100_000_000.0),
         max_participation_rate: Some(0.05),
-        capacity_risk_budget_profile:
-            CapacityRiskBudgetProfile::StressParticipationTargetScaleV1,
+        capacity_risk_budget_profile: CapacityRiskBudgetProfile::StressParticipationTargetScaleV1,
         ..Default::default()
     };
 
@@ -4209,12 +4141,8 @@ fn build_portfolio_weights_prefers_preloaded_return_risk_matrix() {
         .iter()
         .map(|(symbol, _)| symbol.clone())
         .collect::<Vec<_>>();
-    let risk_matrix = build_score_date_return_risk_matrix(
-        &preloaded_return_history,
-        &[score_day],
-        &symbols,
-        5,
-    );
+    let risk_matrix =
+        build_score_date_return_risk_matrix(&preloaded_return_history, &[score_day], &symbols, 5);
     let preloaded_matrices = HashMap::from([(5, Arc::new(risk_matrix))]);
     let config = PortfolioConstructionConfig {
         top_n: 2,
@@ -4270,8 +4198,7 @@ fn candidate_risk_filter_can_prefer_low_correlation_candidate_over_cluster() {
         top_n: 1,
         max_position_pct: Decimal::ONE,
         risk_budget_lookback_days: 5,
-        candidate_risk_filter_profile:
-            CandidateRiskFilterProfile::LowVolatilityLowCorrelationV1,
+        candidate_risk_filter_profile: CandidateRiskFilterProfile::LowVolatilityLowCorrelationV1,
         ..Default::default()
     };
 
@@ -4370,8 +4297,7 @@ fn risk_contribution_control_scales_dominant_risk_name() {
         max_position_pct: Decimal::ONE,
         max_gross_exposure: 1.0,
         risk_budget_lookback_days: 5,
-        risk_contribution_control_profile:
-            RiskContributionControlProfile::SoftSingleName20PctV1,
+        risk_contribution_control_profile: RiskContributionControlProfile::SoftSingleName20PctV1,
         ..Default::default()
     };
 
@@ -4600,27 +4526,17 @@ fn signal_data_cache_records_persistent_market_feature_telemetry_by_kind() {
     cache.record_persistent_market_feature_hit(PersistentMarketFeatureKind::ReturnHistory);
     cache.record_persistent_market_feature_miss(PersistentMarketFeatureKind::ReturnHistory);
     cache.record_persistent_market_feature_write(PersistentMarketFeatureKind::ReturnHistory);
-    cache.record_persistent_market_feature_hit(
-        PersistentMarketFeatureKind::AverageAmountHistory,
-    );
-    cache.record_persistent_market_feature_miss(
-        PersistentMarketFeatureKind::AverageAmountHistory,
-    );
-    cache.record_persistent_market_feature_write(
-        PersistentMarketFeatureKind::AverageAmountHistory,
-    );
-    cache.record_persistent_market_feature_hit(
-        PersistentMarketFeatureKind::PitAverageAmountMatrix,
-    );
-    cache.record_persistent_market_feature_miss(
-        PersistentMarketFeatureKind::PitAverageAmountMatrix,
-    );
+    cache.record_persistent_market_feature_hit(PersistentMarketFeatureKind::AverageAmountHistory);
+    cache.record_persistent_market_feature_miss(PersistentMarketFeatureKind::AverageAmountHistory);
+    cache.record_persistent_market_feature_write(PersistentMarketFeatureKind::AverageAmountHistory);
+    cache.record_persistent_market_feature_hit(PersistentMarketFeatureKind::PitAverageAmountMatrix);
+    cache
+        .record_persistent_market_feature_miss(PersistentMarketFeatureKind::PitAverageAmountMatrix);
     cache.record_persistent_market_feature_write(
         PersistentMarketFeatureKind::PitAverageAmountMatrix,
     );
-    cache.record_persistent_market_feature_hit(
-        PersistentMarketFeatureKind::ReturnRiskFeatureMatrix,
-    );
+    cache
+        .record_persistent_market_feature_hit(PersistentMarketFeatureKind::ReturnRiskFeatureMatrix);
     cache.record_persistent_market_feature_miss(
         PersistentMarketFeatureKind::ReturnRiskFeatureMatrix,
     );
@@ -6582,11 +6498,8 @@ fn liquidity_filter_uses_cached_average_amount_inputs() {
         ("THIN".to_string(), 1_000.0),
     ]);
 
-    let stats = retain_scores_with_min_average_amount(
-        &mut scores_by_date,
-        3_000_000.0,
-        &average_amounts,
-    );
+    let stats =
+        retain_scores_with_min_average_amount(&mut scores_by_date, 3_000_000.0, &average_amounts);
 
     assert_eq!(stats.before, 3);
     assert_eq!(stats.after, 1);
@@ -7052,8 +6965,7 @@ fn quality_event_window_return_sharpe_router_frontier_interpolates_exposure() {
         score_direction: ScoreDirection::Ascending,
         ..Default::default()
     };
-    let balanced =
-        MarketRegimePolicy::quality_event_window_return_sharpe_router_v3("000300.SH");
+    let balanced = MarketRegimePolicy::quality_event_window_return_sharpe_router_v3("000300.SH");
     let tighter = MarketRegimePolicy::quality_event_window_return_sharpe_router_v4("000300.SH");
 
     let balanced_bear = balanced.apply(&base, MarketRegime::Bear);
@@ -7320,8 +7232,7 @@ fn quality_mixed_orthogonal_risk_memory_reuses_cc_risk_shell() {
         score_direction: ScoreDirection::Ascending,
         ..Default::default()
     };
-    let policy =
-        MarketRegimePolicy::quality_mixed_orthogonal_risk_memory_router_v2("000300.SH");
+    let policy = MarketRegimePolicy::quality_mixed_orthogonal_risk_memory_router_v2("000300.SH");
 
     let mixed = policy.apply(&base, MarketRegime::Mixed);
     let bull = policy.apply(&base, MarketRegime::Bull);
@@ -7361,8 +7272,7 @@ fn regime_rules_never_relax_search_level_exposure_caps() {
         score_direction: ScoreDirection::Ascending,
         ..Default::default()
     };
-    let policy =
-        MarketRegimePolicy::quality_mixed_orthogonal_risk_memory_router_v3("000300.SH");
+    let policy = MarketRegimePolicy::quality_mixed_orthogonal_risk_memory_router_v3("000300.SH");
 
     let mixed = policy.apply(&base, MarketRegime::Mixed);
     let bull = policy.apply(&base, MarketRegime::Bull);
@@ -7490,8 +7400,7 @@ fn quality_nonlinear_alpha_risk_memory_relaxed_routers_bridge_return_without_dat
         ..Default::default()
     };
     let strict = MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v1("000300.SH");
-    let relaxed =
-        MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v2("000300.SH");
+    let relaxed = MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v2("000300.SH");
     let overlay_relaxed =
         MarketRegimePolicy::quality_nonlinear_alpha_risk_memory_router_v3("000300.SH");
 
@@ -7945,10 +7854,9 @@ fn quality_regime_alpha_portfolio_sleeve_can_allocate_event_sleeve() {
         max_gross_exposure: 1.0,
         ..Default::default()
     };
-    let policy =
-        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1(
-            "000300.SH",
-        );
+    let policy = MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1(
+        "000300.SH",
+    );
 
     let bull = policy.apply(&base, MarketRegime::Bull);
     let bear = policy.apply(&base, MarketRegime::Bear);
@@ -7978,10 +7886,9 @@ fn quality_regime_alpha_portfolio_sleeve_can_allocate_fractional_event_window_sl
         max_gross_exposure: 1.0,
         ..Default::default()
     };
-    let policy =
-        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1(
-            "000300.SH",
-        );
+    let policy = MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_125pct_v1(
+        "000300.SH",
+    );
 
     let bear = policy.apply(&base, MarketRegime::Bear);
 
@@ -8000,10 +7907,9 @@ fn quality_regime_alpha_portfolio_sleeve_can_allocate_upper_bound_event_window_s
         max_gross_exposure: 1.0,
         ..Default::default()
     };
-    let policy =
-        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1(
-            "000300.SH",
-        );
+    let policy = MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1(
+        "000300.SH",
+    );
 
     let bear = policy.apply(&base, MarketRegime::Bear);
 
@@ -8022,8 +7928,7 @@ fn quality_all_regime_event_window_sleeve_allocates_event_flow_in_every_state() 
         max_gross_exposure: 1.0,
         ..Default::default()
     };
-    let policy =
-        MarketRegimePolicy::quality_all_regime_event_window_sleeve_10pct_v1("000300.SH");
+    let policy = MarketRegimePolicy::quality_all_regime_event_window_sleeve_10pct_v1("000300.SH");
 
     for regime in [
         MarketRegime::Bull,
@@ -8116,10 +8021,9 @@ fn quality_regime_alpha_portfolio_sleeve_can_select_event_quality_segment() {
         MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1(
             "000300.SH",
         );
-    let confirm =
-        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1(
-            "000300.SH",
-        );
+    let confirm = MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1(
+        "000300.SH",
+    );
 
     let surprise_sleeve = surprise
         .rules
@@ -8150,10 +8054,10 @@ fn symbol_return_history_query_uses_daily_bar_pct_change_without_adjustment_view
 
 #[test]
 fn pct_change_decimal_is_already_fractional_daily_return() {
-    let positive = daily_return_from_pct_change(Decimal::new(2352, 6))
-        .expect("positive fractional return");
-    let negative = daily_return_from_pct_change(Decimal::new(-11612, 6))
-        .expect("negative fractional return");
+    let positive =
+        daily_return_from_pct_change(Decimal::new(2352, 6)).expect("positive fractional return");
+    let negative =
+        daily_return_from_pct_change(Decimal::new(-11612, 6)).expect("negative fractional return");
 
     assert!((positive - 0.002352).abs() < 1e-12);
     assert!((negative + 0.011612).abs() < 1e-12);

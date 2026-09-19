@@ -1,15 +1,9 @@
 /// 数据同步路由
-use axum::{
-    extract::State,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, response::IntoResponse, Json};
 use chrono::NaiveDate;
 use serde::Deserialize;
 use serde_json::json;
-use std::{
-    sync::Arc,
-};
+use std::sync::Arc;
 use uuid::Uuid;
 
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
@@ -52,15 +46,12 @@ pub struct DataSyncTaskReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct CleanupStaleSyncTasksReq {
     #[serde(default)]
     pub dry_run: bool,
     pub default_timeout_seconds: Option<i64>,
     pub limit: Option<i64>,
 }
-
-
 
 pub async fn create_sync_task(
     State(state): State<Arc<AppState>>,
@@ -123,7 +114,6 @@ pub async fn create_sync_task(
 }
 
 /// POST /api/v1/quant/data/sync/stock-basic
-
 
 pub async fn sync_task_status(
     State(state): State<Arc<AppState>>,
@@ -205,7 +195,6 @@ pub async fn sync_task_status(
 /// 将 heartbeat 超时的 running 同步任务标记为 failed，将超时的 cancel_requested
 /// 任务收敛为 cancelled。默认 dry-run=false；可用 dry_run=true 先查看候选任务，
 /// 避免误伤仍在正常推进的后台任务。
-
 
 pub async fn cleanup_stale_sync_tasks(
     State(state): State<Arc<AppState>>,
@@ -327,8 +316,6 @@ pub async fn cleanup_stale_sync_tasks(
     }
 }
 
-
-
 pub async fn cancel_sync_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -404,5 +391,3 @@ pub async fn cancel_sync_task(
         })),
     }
 }
-
-

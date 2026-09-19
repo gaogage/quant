@@ -138,7 +138,10 @@ pub async fn run_daily_simulation(
     .map_err(|e| format!("query account: {}", e))?
     .ok_or_else(|| "account not found".to_string())?;
     if strategy_version_id.as_deref().unwrap_or("").is_empty() {
-        return Err(format!("账号 {} 未挂策略（strategy_version_id 空）", account_id));
+        return Err(format!(
+            "账号 {} 未挂策略（strategy_version_id 空）",
+            account_id
+        ));
     }
     let init_cap_f: f64 = init_cap.to_string().parse().unwrap_or(1_000_000.0);
 
@@ -152,11 +155,14 @@ pub async fn run_daily_simulation(
             "paper_replay",
             "paper_margin_trade",
         ] {
-            sqlx::query(&format!("DELETE FROM {} WHERE paper_account_id = $1", table))
-                .bind(account_id)
-                .execute(db)
-                .await
-                .map_err(|e| format!("clean {}: {}", table, e))?;
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE paper_account_id = $1",
+                table
+            ))
+            .bind(account_id)
+            .execute(db)
+            .await
+            .map_err(|e| format!("clean {}: {}", table, e))?;
         }
         sqlx::query(
             "UPDATE paper_account SET current_nav=$1, peak_nav=$1, cash=$1, max_drawdown_pct=0, margin_amount=0, total_trades=0 WHERE paper_account_id=$2",
@@ -185,7 +191,10 @@ pub async fn run_daily_simulation(
     .await
     .map_err(|e| format!("load dates: {}", e))?;
     if dates.is_empty() {
-        return Err(format!("交易日序列为空（task={}, {}~{}）", a_task_id, start, end));
+        return Err(format!(
+            "交易日序列为空（task={}, {}~{}）",
+            a_task_id, start, end
+        ));
     }
 
     // 2.1 预加载 CSI300 日线到内存(detect_regime_exposure 每天查 252 天,改内存读省 ~N 次 DB)
@@ -202,9 +211,11 @@ pub async fn run_daily_simulation(
     .fetch_all(db)
     .await
     .map_err(|e| format!("load csi300: {}", e))?;
-    let csi300_map: std::collections::HashMap<NaiveDate, f64> =
-        csi300_rows.into_iter().collect();
-    tracing::info!(days = csi300_map.len(), "CSI300 预加载完成(detect_regime 缓存)");
+    let csi300_map: std::collections::HashMap<NaiveDate, f64> = csi300_rows.into_iter().collect();
+    tracing::info!(
+        days = csi300_map.len(),
+        "CSI300 预加载完成(detect_regime 缓存)"
+    );
 
     // 3. 逐日
     let mut prev_nav = init_cap_f;
@@ -270,10 +281,14 @@ pub async fn run_daily_simulation(
         } else {
             0.002
         };
-        let (liq_n, _warn_block) =
-            crate::routes::rebalance::check_maintenance_after_mark(db, account_id, d, maint_slippage)
-                .await
-                .unwrap_or((0, false));
+        let (liq_n, _warn_block) = crate::routes::rebalance::check_maintenance_after_mark(
+            db,
+            account_id,
+            d,
+            maint_slippage,
+        )
+        .await
+        .unwrap_or((0, false));
         // P1-A:仅强平日(liq_n>0)才重算 NAV,未强平用第1次值(省 ~N 次 DB)
         let nav = if liq_n > 0 {
             update_current_nav(db, account_id).await?
@@ -392,8 +407,7 @@ mod tests {
         let rs = crate::routes::strategy::load_resolved_strategy(&db, "v19")
             .await
             .unwrap();
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
             None::<crate::routes::shared::MvoWeightCache>,
         ));
@@ -487,8 +501,7 @@ mod tests {
         let rs = crate::routes::strategy::load_resolved_strategy(&db, "v19")
             .await
             .unwrap();
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
             None::<crate::routes::shared::MvoWeightCache>,
         ));
@@ -518,7 +531,10 @@ mod tests {
             )
             .await
             .expect("u");
-            let mu = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_v.mvo.as_ref().unwrap().risk_free_rate);
+            let mu = compute_metrics(
+                &u.iter().map(|d| d.net_return).collect::<Vec<_>>(),
+                rs_v.mvo.as_ref().unwrap().risk_free_rate,
+            );
             let l = run_daily_simulation(
                 &db,
                 "pa-v19-active-full-lev-20260615",
@@ -535,7 +551,10 @@ mod tests {
             )
             .await
             .expect("l");
-            let ml = compute_metrics(&l.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_v.mvo.as_ref().unwrap().risk_free_rate);
+            let ml = compute_metrics(
+                &l.iter().map(|d| d.net_return).collect::<Vec<_>>(),
+                rs_v.mvo.as_ref().unwrap().risk_free_rate,
+            );
             println!(
                 "{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2} | {:>4.1}% {:>4.1}% {:>5.2}",
                 cap,
@@ -562,8 +581,7 @@ mod tests {
         let rs = crate::routes::strategy::load_resolved_strategy(&db, "v19")
             .await
             .unwrap();
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
             None::<crate::routes::shared::MvoWeightCache>,
         ));
@@ -609,7 +627,10 @@ mod tests {
                 )
                 .await
                 .expect("u");
-                let m = compute_metrics(&u.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_c.mvo.as_ref().unwrap().risk_free_rate);
+                let m = compute_metrics(
+                    &u.iter().map(|d| d.net_return).collect::<Vec<_>>(),
+                    rs_c.mvo.as_ref().unwrap().risk_free_rate,
+                );
                 println!(
                     "{:>6} | {:>4.1}% {:>4.1}% {:>5.2} {:>5.2} {:>5.2}",
                     cap,
@@ -636,8 +657,7 @@ mod tests {
         let rs = crate::routes::strategy::load_resolved_strategy(&db, "v19")
             .await
             .unwrap();
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
             None::<crate::routes::shared::MvoWeightCache>,
         ));
@@ -682,7 +702,10 @@ mod tests {
                 )
                 .await
                 .expect("is");
-                let mis = compute_metrics(&is_u.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_c.mvo.as_ref().unwrap().risk_free_rate);
+                let mis = compute_metrics(
+                    &is_u.iter().map(|d| d.net_return).collect::<Vec<_>>(),
+                    rs_c.mvo.as_ref().unwrap().risk_free_rate,
+                );
                 let oos_u = run_daily_simulation(
                     &db,
                     "pa-v19-active-full-unlev-20260615",
@@ -699,7 +722,10 @@ mod tests {
                 )
                 .await
                 .expect("oos");
-                let moos = compute_metrics(&oos_u.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_c.mvo.as_ref().unwrap().risk_free_rate);
+                let moos = compute_metrics(
+                    &oos_u.iter().map(|d| d.net_return).collect::<Vec<_>>(),
+                    rs_c.mvo.as_ref().unwrap().risk_free_rate,
+                );
                 let oos_l = run_daily_simulation(
                     &db,
                     "pa-v19-active-full-lev-20260615",
@@ -716,7 +742,10 @@ mod tests {
                 )
                 .await
                 .expect("oosl");
-                let mlev = compute_metrics(&oos_l.iter().map(|d| d.net_return).collect::<Vec<_>>(), rs_c.mvo.as_ref().unwrap().risk_free_rate);
+                let mlev = compute_metrics(
+                    &oos_l.iter().map(|d| d.net_return).collect::<Vec<_>>(),
+                    rs_c.mvo.as_ref().unwrap().risk_free_rate,
+                );
                 println!("{:>4} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2} | {:>4.1}%/{:>4.1}%/{:>4.2}",
                          cap,
                          mis.annual_return*100.0, mis.max_drawdown*100.0, mis.sharpe,
@@ -738,8 +767,7 @@ mod tests {
         let rs = crate::routes::strategy::load_resolved_strategy(&db, "v19")
             .await
             .unwrap();
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
             None::<crate::routes::shared::MvoWeightCache>,
         ));
@@ -831,8 +859,7 @@ mod tests {
         let rs = crate::routes::strategy::load_resolved_strategy(&db, "v19")
             .await
             .unwrap();
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
             None::<crate::routes::shared::MvoWeightCache>,
         ));
@@ -889,8 +916,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("connect db");
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let start = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
         let account = "pa-v26ms-lev";
@@ -948,8 +974,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("connect db");
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
 
@@ -1022,8 +1047,7 @@ mod tests {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("connect db");
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
         let account = "pa-v26ms-lev";
@@ -1088,8 +1112,7 @@ mod v28dd_tests {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("connect db");
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
         // 1.5x 版暴露强平记账 bug（margin 膨胀→维保击穿），先用 1.0x 验证
@@ -1098,31 +1121,31 @@ mod v28dd_tests {
             ("unlev-1.0x", "pa-v28dd-unlev", false, 1.0),
             ("lev-1.5x", "pa-v28dd-lev", true, 1.5),
         ] {
-        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v28dd")
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v28dd")
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                account,
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                lev_on,
+                mult,
+                "fixed",
+            )
             .await
-            .unwrap();
-        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
-            None::<crate::routes::shared::MvoWeightCache>,
-        ));
-        let sim = run_daily_simulation(
-            &db,
-            account,
-            &rs,
-            start,
-            end,
-            crate::routes::rebalance::PriceSource::EodClose,
-            &cache,
-            &tushare,
-            true,
-            lev_on,
-            mult,
-            "fixed",
-        )
-        .await
-        .expect("sim");
-        let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
-        let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-        println!(
+            .expect("sim");
+            let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
+            let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
+            println!(
             "[v28dd-{}] AR={:.2}% DD={:.2}% Sharpe={:.2} Calmar={:.2} cum={:.0}% days={} (新基准: unlev 7.65%/11.02%/0.66, lev 12.43%/34.34%/0.61)",
             label,
             m.annual_return * 100.0,
@@ -1150,8 +1173,7 @@ mod v29ra_tests {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("connect db");
-        let tushare = quant_data::tushare::client::TushareClient::from_env()
-            .expect("tushare env");
+        let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare env");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
 
@@ -1217,15 +1239,38 @@ mod etf_expand_rerun {
             ("E1-+4分散", "v27e1"),
             ("E2-+2分散", "v27e2"),
         ] {
-            let rs = crate::routes::strategy::load_resolved_strategy(&db, sid).await.unwrap();
-            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-            let sim = run_daily_simulation(&db, "pa-v26ms-lev", &rs, start, end,
-                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                true, true, 1.5, "fixed").await.expect("sim");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, sid)
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                "pa-v26ms-lev",
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                1.5,
+                "fixed",
+            )
+            .await
+            .expect("sim");
             let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
             let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%", label,
-                m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+            println!(
+                "[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                label,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.cumulative_return * 100.0
+            );
         }
     }
 }
@@ -1245,11 +1290,28 @@ mod v30dd_tests {
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
-        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v30dd").await.unwrap();
-        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-        let sim = run_daily_simulation(&db, "pa-v30dd-lev", &rs, start, end,
-            crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-            true, true, 1.5, "fixed").await.expect("sim");
+        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v30dd")
+            .await
+            .unwrap();
+        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            None::<crate::routes::shared::MvoWeightCache>,
+        ));
+        let sim = run_daily_simulation(
+            &db,
+            "pa-v30dd-lev",
+            &rs,
+            start,
+            end,
+            crate::routes::rebalance::PriceSource::EodClose,
+            &cache,
+            &tushare,
+            true,
+            true,
+            1.5,
+            "fixed",
+        )
+        .await
+        .expect("sim");
         let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
         let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
         println!("[v30dd-lev] AR={:.2}% DD={:.2}% Sharpe={:.2} Calmar={:.2} cum={:.0}% (真实基线: 10.31%/24.98%/0.60)",
@@ -1271,11 +1333,28 @@ mod v31fx_tests {
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
-        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31fx").await.unwrap();
-        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-        let sim = run_daily_simulation(&db, "pa-v31fx-lev", &rs, start, end,
-            crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-            true, true, 1.5, "fixed").await.expect("sim");
+        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31fx")
+            .await
+            .unwrap();
+        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            None::<crate::routes::shared::MvoWeightCache>,
+        ));
+        let sim = run_daily_simulation(
+            &db,
+            "pa-v31fx-lev",
+            &rs,
+            start,
+            end,
+            crate::routes::rebalance::PriceSource::EodClose,
+            &cache,
+            &tushare,
+            true,
+            true,
+            1.5,
+            "fixed",
+        )
+        .await
+        .expect("sim");
         let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
         let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
         println!("[v31fx-lev] AR={:.2}% DD={:.2}% Sharpe={:.2} Calmar={:.2} cum={:.0}% (目标: 14%+/0.9+/-18%)",
@@ -1301,15 +1380,38 @@ mod v31_dual_tests {
             ("v31fx-11资产", "v31fx", "pa-v31fx-lev"),
             ("v31f7-7资产", "v31f7", "pa-v31f7-lev"),
         ] {
-            let rs = crate::routes::strategy::load_resolved_strategy(&db, sid).await.unwrap();
-            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-            let sim = run_daily_simulation(&db, acct, &rs, start, end,
-                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                true, true, 1.5, "fixed").await.expect("sim");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, sid)
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                acct,
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                1.5,
+                "fixed",
+            )
+            .await
+            .expect("sim");
             let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
             let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%", label,
-                m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+            println!(
+                "[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                label,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.cumulative_return * 100.0
+            );
         }
     }
 }
@@ -1332,16 +1434,42 @@ mod v31_freq_tests {
 
         for freq in ["quarterly", "monthly", "biweekly"] {
             sqlx::query("UPDATE strategy_config SET rebalance_freq=$1 WHERE strategy_id='v31f7'")
-                .bind(freq).execute(&db).await.expect("upd");
-            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
-                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                true, true, 1.5, "fixed").await.expect("sim");
+                .bind(freq)
+                .execute(&db)
+                .await
+                .expect("upd");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7")
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                "pa-v31f7-lev",
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                1.5,
+                "fixed",
+            )
+            .await
+            .expect("sim");
             let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
             let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
-                freq, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+            println!(
+                "[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                freq,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.cumulative_return * 100.0
+            );
         }
     }
 }
@@ -1352,18 +1480,40 @@ mod weekly_test {
     #[tokio::test]
     #[ignore]
     async fn v31_weekly() {
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("db");
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
-        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-        let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs,
-            chrono::NaiveDate::from_ymd_opt(2016,1,4).unwrap(), chrono::NaiveDate::from_ymd_opt(2026,9,2).unwrap(),
-            crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-            true, true, 1.5, "fixed").await.expect("sim");
+        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7")
+            .await
+            .unwrap();
+        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            None::<crate::routes::shared::MvoWeightCache>,
+        ));
+        let sim = run_daily_simulation(
+            &db,
+            "pa-v31f7-lev",
+            &rs,
+            chrono::NaiveDate::from_ymd_opt(2016, 1, 4).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 2).unwrap(),
+            crate::routes::rebalance::PriceSource::EodClose,
+            &cache,
+            &tushare,
+            true,
+            true,
+            1.5,
+            "fixed",
+        )
+        .await
+        .expect("sim");
         let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
         let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-        println!("[weekly] AR={:.2}% DD={:.2}% Sharpe={:.2}", m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+        println!(
+            "[weekly] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+            m.annual_return * 100.0,
+            m.max_drawdown * 100.0,
+            m.sharpe
+        );
     }
 }
 
@@ -1376,7 +1526,8 @@ mod freq_final {
     #[tokio::test]
     #[ignore]
     async fn freq_final_clean() {
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("db");
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
@@ -1385,15 +1536,38 @@ mod freq_final {
         for freq in ["quarterly", "monthly", "biweekly", "weekly"] {
             sqlx::query("UPDATE strategy_config SET rebalance_freq=$1, status='active' WHERE strategy_id='v31f7' OR parent_strategy_id='v31f7'")
                 .bind(freq).execute(&db).await.expect("upd");
-            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
-                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                true, true, 1.5, "fixed").await.expect("sim");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7")
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                "pa-v31f7-lev",
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                1.5,
+                "fixed",
+            )
+            .await
+            .expect("sim");
             let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
             let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
-                freq, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+            println!(
+                "[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                freq,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.cumulative_return * 100.0
+            );
         }
         // 清理
         sqlx::query("UPDATE strategy_config SET status='inactive' WHERE strategy_id='v31f7' OR parent_strategy_id='v31f7'").execute(&db).await.ok();
@@ -1408,7 +1582,8 @@ mod final_optimization {
     #[tokio::test]
     #[ignore]
     async fn final_weight_scan() {
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("db");
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
@@ -1417,20 +1592,56 @@ mod final_optimization {
         for aw in [0.20f64, 0.25, 0.30, 0.35, 0.40, 0.45] {
             // 更新权重
             let etf_w = 1.0 - aw;
-            let weights = format!("[{:.2}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
-                aw, etf_w*0.31, etf_w*0.40, etf_w*0.07, etf_w*0.14, etf_w*0.03, etf_w*0.03, etf_w*0.02);
-            sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
-                .bind(&weights).execute(&db).await.expect("upd");
+            let weights = format!(
+                "[{:.2}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+                aw,
+                etf_w * 0.31,
+                etf_w * 0.40,
+                etf_w * 0.07,
+                etf_w * 0.14,
+                etf_w * 0.03,
+                etf_w * 0.03,
+                etf_w * 0.02
+            );
+            sqlx::query(
+                "UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'",
+            )
+            .bind(&weights)
+            .execute(&db)
+            .await
+            .expect("upd");
 
-            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
-                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                true, true, 1.5, "fixed").await.expect("sim");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7")
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                "pa-v31f7-lev",
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                1.5,
+                "fixed",
+            )
+            .await
+            .expect("sim");
             let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
             let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-            println!("[A={:.0}%] AR={:.2}% DD={:.2}% Sharpe={:.2}",
-                aw*100.0, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+            println!(
+                "[A={:.0}%] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+                aw * 100.0,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe
+            );
         }
     }
 
@@ -1440,7 +1651,8 @@ mod final_optimization {
     #[tokio::test]
     #[ignore]
     async fn etf_weight_structure_scan() {
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("db");
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
@@ -1448,26 +1660,68 @@ mod final_optimization {
 
         // 顺序: [A股, 黄金518880, 国债511010, 标普513500, 纳指513100, 有色159980, 豆粕159985, 原油501018]
         let plans: Vec<(&str, Vec<f64>)> = vec![
-            ("BASE 现行", vec![0.20, 0.248, 0.320, 0.056, 0.112, 0.024, 0.024, 0.016]),
-            ("EQ 等权", vec![0.20, 0.1143, 0.1143, 0.1143, 0.1143, 0.1143, 0.1143, 0.1143]),
-            ("GROW 增长倾斜", vec![0.20, 0.18, 0.10, 0.14, 0.24, 0.04, 0.06, 0.04]),
-            ("HALF 半防御", vec![0.20, 0.16, 0.18, 0.12, 0.20, 0.04, 0.06, 0.04]),
+            (
+                "BASE 现行",
+                vec![0.20, 0.248, 0.320, 0.056, 0.112, 0.024, 0.024, 0.016],
+            ),
+            (
+                "EQ 等权",
+                vec![0.20, 0.1143, 0.1143, 0.1143, 0.1143, 0.1143, 0.1143, 0.1143],
+            ),
+            (
+                "GROW 增长倾斜",
+                vec![0.20, 0.18, 0.10, 0.14, 0.24, 0.04, 0.06, 0.04],
+            ),
+            (
+                "HALF 半防御",
+                vec![0.20, 0.16, 0.18, 0.12, 0.20, 0.04, 0.06, 0.04],
+            ),
         ];
 
         for (name, w) in &plans {
-            let weights = format!("[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
-                w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
-            sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
-                .bind(&weights).execute(&db).await.expect("upd");
-            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
-                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                true, true, 1.5, "fixed").await.expect("sim");
+            let weights = format!(
+                "[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+                w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]
+            );
+            sqlx::query(
+                "UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'",
+            )
+            .bind(&weights)
+            .execute(&db)
+            .await
+            .expect("upd");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7")
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                "pa-v31f7-lev",
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                1.5,
+                "fixed",
+            )
+            .await
+            .expect("sim");
             let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
             let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-            println!("[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
-                name, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+            println!(
+                "[{}] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                name,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.cumulative_return * 100.0
+            );
         }
     }
 
@@ -1477,7 +1731,8 @@ mod final_optimization {
     #[tokio::test]
     #[ignore]
     async fn leverage_scan() {
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("db");
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
@@ -1486,24 +1741,58 @@ mod final_optimization {
         let weights = std::env::var("LEV_SCAN_WEIGHTS")
             .unwrap_or_else(|_| "0.20,0.248,0.320,0.056,0.112,0.024,0.024,0.016".into());
         let w: Vec<&str> = weights.split(',').collect();
-        let weights = format!("[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
-            w[0].trim().parse::<f64>().unwrap(), w[1].trim().parse::<f64>().unwrap(),
-            w[2].trim().parse::<f64>().unwrap(), w[3].trim().parse::<f64>().unwrap(),
-            w[4].trim().parse::<f64>().unwrap(), w[5].trim().parse::<f64>().unwrap(),
-            w[6].trim().parse::<f64>().unwrap(), w[7].trim().parse::<f64>().unwrap());
-        sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
-            .bind(&weights).execute(&db).await.expect("upd");
+        let weights = format!(
+            "[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+            w[0].trim().parse::<f64>().unwrap(),
+            w[1].trim().parse::<f64>().unwrap(),
+            w[2].trim().parse::<f64>().unwrap(),
+            w[3].trim().parse::<f64>().unwrap(),
+            w[4].trim().parse::<f64>().unwrap(),
+            w[5].trim().parse::<f64>().unwrap(),
+            w[6].trim().parse::<f64>().unwrap(),
+            w[7].trim().parse::<f64>().unwrap()
+        );
+        sqlx::query(
+            "UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'",
+        )
+        .bind(&weights)
+        .execute(&db)
+        .await
+        .expect("upd");
 
         for lev in [1.5f64, 1.8, 2.0, 2.2, 2.5] {
-            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
-                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                true, true, lev, "fixed").await.expect("sim");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7")
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                "pa-v31f7-lev",
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                lev,
+                "fixed",
+            )
+            .await
+            .expect("sim");
             let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
             let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-            println!("[lev={:.1}x] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
-                lev, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe, m.cumulative_return*100.0);
+            println!(
+                "[lev={:.1}x] AR={:.2}% DD={:.2}% Sharpe={:.2} cum={:.0}%",
+                lev,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe,
+                m.cumulative_return * 100.0
+            );
         }
     }
 
@@ -1512,7 +1801,8 @@ mod final_optimization {
     #[tokio::test]
     #[ignore]
     async fn a_weight_scan_equal_weight() {
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("db");
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
@@ -1520,19 +1810,48 @@ mod final_optimization {
 
         for aw in [0.15f64, 0.20, 0.25, 0.30] {
             let etf_w = (1.0 - aw) / 7.0;
-            let weights = format!("[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
-                aw, etf_w, etf_w, etf_w, etf_w, etf_w, etf_w, etf_w);
-            sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
-                .bind(&weights).execute(&db).await.expect("upd");
-            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
-                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                true, true, 2.2, "fixed").await.expect("sim");
+            let weights = format!(
+                "[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+                aw, etf_w, etf_w, etf_w, etf_w, etf_w, etf_w, etf_w
+            );
+            sqlx::query(
+                "UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'",
+            )
+            .bind(&weights)
+            .execute(&db)
+            .await
+            .expect("upd");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7")
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                "pa-v31f7-lev",
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                2.2,
+                "fixed",
+            )
+            .await
+            .expect("sim");
             let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
             let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-            println!("[A={:.0}% EW] AR={:.2}% DD={:.2}% Sharpe={:.2}",
-                aw*100.0, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+            println!(
+                "[A={:.0}% EW] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+                aw * 100.0,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe
+            );
         }
     }
 
@@ -1543,18 +1862,54 @@ mod final_optimization {
     #[tokio::test]
     #[ignore]
     async fn pool_expansion_scan() {
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("db");
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
 
-        let base_etf = vec!["518880.SH","511010.SH","513500.SH","513100.SH","159980.SZ","159985.SZ","501018.SH"];
+        let base_etf = vec![
+            "518880.SH",
+            "511010.SH",
+            "513500.SH",
+            "513100.SH",
+            "159980.SZ",
+            "159985.SZ",
+            "501018.SH",
+        ];
         let plans: Vec<(&str, Vec<&str>)> = vec![
             ("X0 现行7ETF", base_etf.clone()),
-            ("X1 +红利+创业板+德国", [base_etf.clone(), vec!["510880.SH","159915.SZ","513030.SH"]].concat()),
-            ("X2 +可转债(11)", [base_etf.clone(), vec!["510880.SH","159915.SZ","513030.SH","511380.SH"]].concat()),
-            ("X3 +日经(12)", [base_etf.clone(), vec!["510880.SH","159915.SZ","513030.SH","511380.SH","513520.SH"]].concat()),
+            (
+                "X1 +红利+创业板+德国",
+                [
+                    base_etf.clone(),
+                    vec!["510880.SH", "159915.SZ", "513030.SH"],
+                ]
+                .concat(),
+            ),
+            (
+                "X2 +可转债(11)",
+                [
+                    base_etf.clone(),
+                    vec!["510880.SH", "159915.SZ", "513030.SH", "511380.SH"],
+                ]
+                .concat(),
+            ),
+            (
+                "X3 +日经(12)",
+                [
+                    base_etf.clone(),
+                    vec![
+                        "510880.SH",
+                        "159915.SZ",
+                        "513030.SH",
+                        "511380.SH",
+                        "513520.SH",
+                    ],
+                ]
+                .concat(),
+            ),
         ];
 
         for (name, etf) in &plans {
@@ -1562,21 +1917,46 @@ mod final_optimization {
             let aw = 0.15f64;
             let etf_w = (1.0 - aw) / etf.len() as f64;
             let mut ws = vec![format!("{:.4}", aw)];
-            for _ in 0..etf.len() { ws.push(format!("{:.4}", etf_w)); }
+            for _ in 0..etf.len() {
+                ws.push(format!("{:.4}", etf_w));
+            }
             let weights = format!("[{}]", ws.join(", "));
             sqlx::query("UPDATE strategy_config SET etf_symbols=$1::jsonb, default_weights=$2::jsonb WHERE strategy_id='v31f7'")
                 .bind(&etf_json).bind(&weights).execute(&db).await.expect("upd etf+w");
 
             for lev in [2.2f64, 1.0] {
-                let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-                let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-                let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
-                    crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                    true, true, lev, "fixed").await.expect("sim");
+                let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7")
+                    .await
+                    .unwrap();
+                let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                    None::<crate::routes::shared::MvoWeightCache>,
+                ));
+                let sim = run_daily_simulation(
+                    &db,
+                    "pa-v31f7-lev",
+                    &rs,
+                    start,
+                    end,
+                    crate::routes::rebalance::PriceSource::EodClose,
+                    &cache,
+                    &tushare,
+                    true,
+                    true,
+                    lev,
+                    "fixed",
+                )
+                .await
+                .expect("sim");
                 let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
                 let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-                println!("[{} @{:.1}x] AR={:.2}% DD={:.2}% Sharpe={:.2}",
-                    name, lev, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+                println!(
+                    "[{} @{:.1}x] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+                    name,
+                    lev,
+                    m.annual_return * 100.0,
+                    m.max_drawdown * 100.0,
+                    m.sharpe
+                );
             }
         }
     }
@@ -1587,7 +1967,8 @@ mod final_optimization {
     #[tokio::test]
     #[ignore]
     async fn unlev_boost_scan() {
-        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = PgPool::connect(&url).await.expect("db");
         let tushare = quant_data::tushare::client::TushareClient::from_env().expect("tushare");
         let start = NaiveDate::from_ymd_opt(2016, 1, 4).unwrap();
@@ -1597,25 +1978,66 @@ mod final_optimization {
         // 从结构入手——等权基础上黄金/国债 +5pp、美股扣减。找 DD<=26% 且 AR>=14% 的点。
         // [A股, 黄金, 国债, 标普, 纳指, 有色, 豆粕, 原油]
         let plans: Vec<(&str, Vec<f64>)> = vec![
-            ("EQ 等权基准", vec![0.15, 0.1214, 0.1214, 0.1214, 0.1214, 0.1214, 0.1214, 0.1214]),
-            ("DEF5 黄金+5", vec![0.15, 0.1714, 0.1214, 0.0964, 0.0964, 0.1214, 0.1214, 0.1214]),
-            ("DEF5B 国债+5", vec![0.15, 0.1214, 0.1714, 0.0964, 0.0964, 0.1214, 0.1214, 0.1214]),
-            ("DEF10 双+5", vec![0.15, 0.1714, 0.1714, 0.0964, 0.0964, 0.0964, 0.0964, 0.0964]),
+            (
+                "EQ 等权基准",
+                vec![0.15, 0.1214, 0.1214, 0.1214, 0.1214, 0.1214, 0.1214, 0.1214],
+            ),
+            (
+                "DEF5 黄金+5",
+                vec![0.15, 0.1714, 0.1214, 0.0964, 0.0964, 0.1214, 0.1214, 0.1214],
+            ),
+            (
+                "DEF5B 国债+5",
+                vec![0.15, 0.1214, 0.1714, 0.0964, 0.0964, 0.1214, 0.1214, 0.1214],
+            ),
+            (
+                "DEF10 双+5",
+                vec![0.15, 0.1714, 0.1714, 0.0964, 0.0964, 0.0964, 0.0964, 0.0964],
+            ),
         ];
         for (name, w) in &plans {
-            let weights = format!("[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
-                w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
-            sqlx::query("UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'")
-                .bind(&weights).execute(&db).await.expect("upd");
-            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7").await.unwrap();
-            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(None::<crate::routes::shared::MvoWeightCache>));
-            let sim = run_daily_simulation(&db, "pa-v31f7-lev", &rs, start, end,
-                crate::routes::rebalance::PriceSource::EodClose, &cache, &tushare,
-                true, true, 2.2, "fixed").await.expect("sim");
+            let weights = format!(
+                "[{:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}, {:.4}]",
+                w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]
+            );
+            sqlx::query(
+                "UPDATE strategy_config SET default_weights=$1::jsonb WHERE strategy_id='v31f7'",
+            )
+            .bind(&weights)
+            .execute(&db)
+            .await
+            .expect("upd");
+            let rs = crate::routes::strategy::load_resolved_strategy(&db, "v31f7")
+                .await
+                .unwrap();
+            let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<crate::routes::shared::MvoWeightCache>,
+            ));
+            let sim = run_daily_simulation(
+                &db,
+                "pa-v31f7-lev",
+                &rs,
+                start,
+                end,
+                crate::routes::rebalance::PriceSource::EodClose,
+                &cache,
+                &tushare,
+                true,
+                true,
+                2.2,
+                "fixed",
+            )
+            .await
+            .expect("sim");
             let rets: Vec<f64> = sim.iter().map(|d| d.net_return).collect();
             let m = compute_metrics(&rets, rs.mvo.as_ref().unwrap().risk_free_rate);
-            println!("[{} @2.2x] AR={:.2}% DD={:.2}% Sharpe={:.2}",
-                name, m.annual_return*100.0, m.max_drawdown*100.0, m.sharpe);
+            println!(
+                "[{} @2.2x] AR={:.2}% DD={:.2}% Sharpe={:.2}",
+                name,
+                m.annual_return * 100.0,
+                m.max_drawdown * 100.0,
+                m.sharpe
+            );
         }
     }
 }

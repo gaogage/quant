@@ -13,12 +13,12 @@
 //! 纯 move，零行为变更。
 
 mod breakthrough;
-mod regime;
 mod event;
 mod execution;
 mod prediction;
-mod v19_series;
+mod regime;
 mod sharpe_frontier;
+mod v19_series;
 
 // 子主题函数声明为 pub(crate)（对 strategy_discovery 可见）；
 // 此处 pub(crate) use 重导出，让兄弟子模块通过 `use super::*` 互相可见。
@@ -32,8 +32,9 @@ pub(crate) use sharpe_frontier::*;
 pub(crate) use v19_series::*;
 
 use super::profiles::ScoreDirection;
-use super::{decimal_f64, decimal_string, insert_execution_rule_value,
-    is_phase7_base_trainable_alpha};
+use super::{
+    decimal_f64, decimal_string, insert_execution_rule_value, is_phase7_base_trainable_alpha,
+};
 
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
@@ -118,7 +119,6 @@ pub(crate) fn finalize_return_distribution_seed(seed: Value) -> Value {
         "soft_single_name_20pct_v1",
     )
 }
-
 
 // ============================================================
 // with_*_seed builder
@@ -346,7 +346,10 @@ pub(crate) fn with_sharpe_off_seed(mut seed: Value) -> Value {
     seed
 }
 
-pub(crate) fn with_candidate_risk_filter_seed(mut seed: Value, candidate_risk_filter: &str) -> Value {
+pub(crate) fn with_candidate_risk_filter_seed(
+    mut seed: Value,
+    candidate_risk_filter: &str,
+) -> Value {
     seed["candidate_risk_filter"] = json!(candidate_risk_filter);
     seed
 }
@@ -356,7 +359,10 @@ pub(crate) fn with_candidate_ranking_seed(mut seed: Value, candidate_ranking: &s
     seed
 }
 
-pub(crate) fn with_risk_contribution_control_seed(mut seed: Value, risk_contribution_control: &str) -> Value {
+pub(crate) fn with_risk_contribution_control_seed(
+    mut seed: Value,
+    risk_contribution_control: &str,
+) -> Value {
     seed["risk_contribution_control"] = json!(risk_contribution_control);
     seed
 }
@@ -371,12 +377,18 @@ pub(crate) fn with_cash_utilization_seed(mut seed: Value, cash_utilization: &str
     seed
 }
 
-pub(crate) fn with_execution_impact_budget_seed(mut seed: Value, execution_impact_budget: &str) -> Value {
+pub(crate) fn with_execution_impact_budget_seed(
+    mut seed: Value,
+    execution_impact_budget: &str,
+) -> Value {
     seed["execution_impact_budget"] = json!(execution_impact_budget);
     seed
 }
 
-pub(crate) fn with_execution_schedule_seed(mut seed: Value, execution_schedule_profile: &str) -> Value {
+pub(crate) fn with_execution_schedule_seed(
+    mut seed: Value,
+    execution_schedule_profile: &str,
+) -> Value {
     seed["execution_schedule_profile"] = json!(execution_schedule_profile);
     insert_execution_rule_value(
         &mut seed,
@@ -405,7 +417,10 @@ pub(crate) fn with_execution_schedule_control_seed(
     seed
 }
 
-pub(crate) fn with_execution_carry_policy_seed(mut seed: Value, execution_carry_policy: &str) -> Value {
+pub(crate) fn with_execution_carry_policy_seed(
+    mut seed: Value,
+    execution_carry_policy: &str,
+) -> Value {
     let policy = execution_carry_policy.trim();
     if policy.is_empty() || policy == "expire" || policy == "off" || policy == "default" {
         if let Some(object) = seed.as_object_mut() {
@@ -452,7 +467,11 @@ pub(crate) fn with_stop_loss_cooldown_seed(
     seed
 }
 
-pub(crate) fn with_rebalance_days_seed(mut seed: Value, rebalance_days: usize, profile_name: &str) -> Value {
+pub(crate) fn with_rebalance_days_seed(
+    mut seed: Value,
+    rebalance_days: usize,
+    profile_name: &str,
+) -> Value {
     seed["rebalance"] = json!(rebalance_days.to_string());
     seed["rebalance_profile"] = json!(profile_name);
     seed
@@ -516,7 +535,11 @@ pub(crate) fn with_max_gross_exposure_seed(
     seed
 }
 
-pub(crate) fn with_event_sleeve_seed(mut seed: Value, market_regime: &str, sleeve_profile: &str) -> Value {
+pub(crate) fn with_event_sleeve_seed(
+    mut seed: Value,
+    market_regime: &str,
+    sleeve_profile: &str,
+) -> Value {
     seed["event_sleeve_profile"] = json!(sleeve_profile);
     seed["market_regime"] = json!(market_regime);
     seed
@@ -1672,7 +1695,9 @@ pub(crate) fn with_v19_train_window_ml_h120_low_impact_rebuild_seed(seed: Value)
     )
 }
 
-pub(crate) fn with_v19_train_window_ml_rae_h120_residual_capacity_rebuild_seed(seed: Value) -> Value {
+pub(crate) fn with_v19_train_window_ml_rae_h120_residual_capacity_rebuild_seed(
+    seed: Value,
+) -> Value {
     let mut seed = with_v19_train_window_ml_alpha_rebuild_seed_for_label(
         seed,
         "v19_p3_3_train_window_ml_rae_h120_residual_capacity_rebuild_v1",
@@ -2284,7 +2309,6 @@ pub(crate) fn with_return_first_fill_repair_seed(
     seed
 }
 
-
 // ============================================================
 // SeedTrialGenerator trait 骨架（后续批次接入，当前仅声明）
 // ============================================================
@@ -2296,4 +2320,3 @@ pub(crate) trait SeedTrialGenerator {
     /// 生成种子试验列表。
     fn generate_seed_trials(&self) -> Vec<serde_json::Value>;
 }
-

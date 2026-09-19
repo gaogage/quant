@@ -2294,31 +2294,11 @@ impl MarketRegimePolicy {
         Self::quality_state_alpha_selector(
             benchmark,
             StateAlphaSelectorSpec {
-                bull_sleeve: (
-                    "full_pit_icir_37f",
-                    0.10,
-                    ScoreDirection::Descending,
-                ),
-                bear_sleeve: (
-                    "full_pit_icir_37f_h20",
-                    0.15,
-                    ScoreDirection::Ascending,
-                ),
-                high_volatility_sleeve: (
-                    "full_pit_icir_37f_h20",
-                    0.125,
-                    ScoreDirection::Ascending,
-                ),
-                sideways_sleeve: (
-                    "full_pit_icir_37f_h20",
-                    0.10,
-                    ScoreDirection::Ascending,
-                ),
-                mixed_sleeve: (
-                    "full_pit_icir_37f_h20",
-                    0.10,
-                    ScoreDirection::Ascending,
-                ),
+                bull_sleeve: ("full_pit_icir_37f", 0.10, ScoreDirection::Descending),
+                bear_sleeve: ("full_pit_icir_37f_h20", 0.15, ScoreDirection::Ascending),
+                high_volatility_sleeve: ("full_pit_icir_37f_h20", 0.125, ScoreDirection::Ascending),
+                sideways_sleeve: ("full_pit_icir_37f_h20", 0.10, ScoreDirection::Ascending),
+                mixed_sleeve: ("full_pit_icir_37f_h20", 0.10, ScoreDirection::Ascending),
                 bear_exposure: 0.72,
                 high_volatility_exposure: 0.58,
                 bear_max_position_pct: Decimal::new(10, 2),

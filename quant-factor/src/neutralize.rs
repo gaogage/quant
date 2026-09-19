@@ -214,18 +214,31 @@ mod tests {
     }
 
     fn industries(map: &[(&str, &str)]) -> HashMap<String, String> {
-        map.iter().map(|(s, i)| (s.to_string(), i.to_string())).collect()
+        map.iter()
+            .map(|(s, i)| (s.to_string(), i.to_string()))
+            .collect()
     }
 
     #[test]
     fn industry_neutral_demeans_within_groups() {
         // 两行业各 3 只：组内减均值后均值≈0，组间差异保留
         let output = make_output(vec![
-            ("A1", 1.0), ("A2", 2.0), ("A3", 3.0),   // 行业 X 均值 2
-            ("B1", 10.0), ("B2", 20.0), ("B3", 30.0), // 行业 Y 均值 20
+            ("A1", 1.0),
+            ("A2", 2.0),
+            ("A3", 3.0), // 行业 X 均值 2
+            ("B1", 10.0),
+            ("B2", 20.0),
+            ("B3", 30.0), // 行业 Y 均值 20
         ]);
         let config = NeutralizeConfig {
-            industries: industries(&[("A1", "X"), ("A2", "X"), ("A3", "X"), ("B1", "Y"), ("B2", "Y"), ("B3", "Y")]),
+            industries: industries(&[
+                ("A1", "X"),
+                ("A2", "X"),
+                ("A3", "X"),
+                ("B1", "Y"),
+                ("B2", "Y"),
+                ("B3", "Y"),
+            ]),
             size_proxy: HashMap::new(),
         };
         let (out, res) = neutralize(&output, &config, true, false);
@@ -286,10 +299,7 @@ mod tests {
         let mut size_proxy: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
         let date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
         for i in 0..n {
-            size_proxy.insert(
-                LEAK[i].to_string(),
-                vec![(date, 100.0 + i as f64 * 10.0)],
-            );
+            size_proxy.insert(LEAK[i].to_string(), vec![(date, 100.0 + i as f64 * 10.0)]);
         }
         let config = NeutralizeConfig {
             industries: HashMap::new(),
@@ -347,8 +357,8 @@ mod tests {
 
     /// 测试专用 symbol 池（size_neutral 需 ≥20 只）
     const LEAK: [&str; 20] = [
-        "S01", "S02", "S03", "S04", "S05", "S06", "S07", "S08", "S09", "S10",
-        "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18", "S19", "S20",
+        "S01", "S02", "S03", "S04", "S05", "S06", "S07", "S08", "S09", "S10", "S11", "S12", "S13",
+        "S14", "S15", "S16", "S17", "S18", "S19", "S20",
     ];
 
     impl NeutralizeConfig {

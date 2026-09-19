@@ -1434,20 +1434,20 @@ impl BacktestRunner {
                 // 此前用 CROSS JOIN × LATERAL（3080 日 × 500 股 = 150 万组合），查询超时
                 // 被 unwrap_or_default 静默吞掉 → adj_factor_map 恒空 → 停牌股 fallback
                 // 全部走 unwrap_or(ONE) → 复权价直接写入（价格空间切换 BUG 的真正根因）。
-                let adj_rows: Vec<(String, NaiveDate, Decimal)> =
-                    sqlx::query_as(
-                        "SELECT symbol, trade_date, adj_factor::numeric FROM market_adjustment_factor
+                let adj_rows: Vec<(String, NaiveDate, Decimal)> = sqlx::query_as(
+                    "SELECT symbol, trade_date, adj_factor::numeric FROM market_adjustment_factor
                          WHERE symbol = ANY($1) AND trade_date BETWEEN $2 AND $3
                          ORDER BY symbol, trade_date",
-                    )
-                    .bind(&symbols)
-                    .bind(min_d)
-                    .bind(max_d)
-                    .fetch_all(&self.pool)
-                    .await
-                    .unwrap_or_default();
+                )
+                .bind(&symbols)
+                .bind(min_d)
+                .bind(max_d)
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default();
                 // 构建 (symbol → [(date, factor)]) 索引，查询时二分/线性找 <= pos_date 的最近因子
-                let mut factor_by_symbol: HashMap<String, Vec<(NaiveDate, Decimal)>> = HashMap::new();
+                let mut factor_by_symbol: HashMap<String, Vec<(NaiveDate, Decimal)>> =
+                    HashMap::new();
                 for (sym, d, f) in adj_rows {
                     factor_by_symbol.entry(sym).or_default().push((d, f));
                 }
@@ -1464,10 +1464,7 @@ impl BacktestRunner {
                     for sym in &symbols {
                         if let Some(factors) = factor_by_symbol.get(sym) {
                             // 找 <= pd 的最近因子（factors 已按 date 排序）
-                            let best = factors.iter()
-                                .rev()
-                                .find(|(d, _)| d <= pd)
-                                .map(|(_, f)| *f);
+                            let best = factors.iter().rev().find(|(d, _)| d <= pd).map(|(_, f)| *f);
                             if let Some(f) = best {
                                 adj_factor_map.insert((*pd, sym.clone()), f);
                             }

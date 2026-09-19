@@ -25,12 +25,11 @@ use quant_backtest::signal_generator::{
     prewarm_market_feature_cache, score_days_for_signal_dates, CandidateRankingProfile,
     CandidateRiskFilterProfile, CapacityRiskBudgetProfile, CashUtilizationProfile, EventGateConfig,
     EventGateMode, ExecutionImpactBudgetProfile, FactorScoreOverlayConfig,
-    FactorSignalBatchPrewarmReport,
-    FactorSignalFeaturePrewarmSpec, MarketFeaturePrewarmReport, MarketFeatureSnapshotScope,
-    MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod, PredictionBlendConfig,
-    ReturnRiskFeatureCacheMode, RiskContributionControlProfile, ScoreDirection, SignalConfig,
-    SignalDataCache, StressFillConfidenceExposureProfile, StyleRiskBudgetProfile,
-    TradableUniverseProfile,
+    FactorSignalBatchPrewarmReport, FactorSignalFeaturePrewarmSpec, MarketFeaturePrewarmReport,
+    MarketFeatureSnapshotScope, MarketRegime, MarketRegimePolicy, PortfolioConstructionMethod,
+    PredictionBlendConfig, ReturnRiskFeatureCacheMode, RiskContributionControlProfile,
+    ScoreDirection, SignalConfig, SignalDataCache, StressFillConfidenceExposureProfile,
+    StyleRiskBudgetProfile, TradableUniverseProfile,
 };
 
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
@@ -1519,7 +1518,9 @@ fn build_score_overlay_config(
         return Ok(None);
     }
     let direction = parse_score_direction(
-        req.overlay_score_direction.as_deref().unwrap_or("descending"),
+        req.overlay_score_direction
+            .as_deref()
+            .unwrap_or("descending"),
     )?;
     let weight = req.overlay_weight.unwrap_or(0.3).clamp(0.0, 1.0);
     Ok(Some(FactorScoreOverlayConfig {
@@ -4375,7 +4376,10 @@ mod h20_regime_tests {
             ("drawdown_control_v1", Some("drawdown_control_v1")),
             ("drawdown_control_v2", Some("drawdown_control_v2")),
             ("quality_crash_guard_v2", Some("quality_crash_guard_v2")),
-            ("quality_bear_window_guard_v1", Some("quality_bear_window_guard_v1")),
+            (
+                "quality_bear_window_guard_v1",
+                Some("quality_bear_window_guard_v1"),
+            ),
         ];
 
         for (label, policy) in policies {
@@ -4406,8 +4410,7 @@ mod h20_regime_tests {
                     "benchmark": "000300.SH"
                 });
             }
-            let req: RunFactorBacktestReq =
-                serde_json::from_value(req_json).expect("req");
+            let req: RunFactorBacktestReq = serde_json::from_value(req_json).expect("req");
             let task = format!("fbt-h20-rg-{}-20260904", label);
             let out = execute_factor_backtest(&db, &task, req)
                 .await
@@ -4442,37 +4445,46 @@ mod f1_22f_tests {
         let db = sqlx::PgPool::connect(&url).await.expect("db");
 
         for (label, combo, task) in [
-            ("21f-iso-无F1", "full_pit_icir_indneutral_val_v1", "fbt-rebuild79-0905"),
-            ("23f-iso-含F1", "full_pit_icir_23f_indneutral_v2", "fbt-rebuild48b-0905"),
+            (
+                "21f-iso-无F1",
+                "full_pit_icir_indneutral_val_v1",
+                "fbt-rebuild79-0905",
+            ),
+            (
+                "23f-iso-含F1",
+                "full_pit_icir_23f_indneutral_v2",
+                "fbt-rebuild48b-0905",
+            ),
         ] {
-        let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
-            "combo_name": combo,
-            "version": "1.0.0",
-            "strategy_version_id": "factor-combo-v1",
-            "data_version_id": "dv-eod-20260901",
-            "top_n": 40,
-            "rebalance": "10",
-            "start_date": "20140102",
-            "end_date": "20260903",
-            "entry_delay": 0,
-            "min_amount": 0,
-            "skip_top_pct": 0.0,
-            "kelly_fraction": 0.25,
-            "max_position_pct": 0.1,
-            "max_gross_exposure": 0.95,
-            "score_direction": "descending",
-            "portfolio_method": "heuristic",
-            "universe_profile": "main_board_non_st",
-            "benchmark": "000300.SH"
-        })).expect("req");
+            let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
+                "combo_name": combo,
+                "version": "1.0.0",
+                "strategy_version_id": "factor-combo-v1",
+                "data_version_id": "dv-eod-20260901",
+                "top_n": 40,
+                "rebalance": "10",
+                "start_date": "20140102",
+                "end_date": "20260903",
+                "entry_delay": 0,
+                "min_amount": 0,
+                "skip_top_pct": 0.0,
+                "kelly_fraction": 0.25,
+                "max_position_pct": 0.1,
+                "max_gross_exposure": 0.95,
+                "score_direction": "descending",
+                "portfolio_method": "heuristic",
+                "universe_profile": "main_board_non_st",
+                "benchmark": "000300.SH"
+            }))
+            .expect("req");
 
-        let out = execute_factor_backtest(&db, task, req)
-            .await
-            .expect("backtest");
-        println!(
-            "[{}] trades={} turnover={:.1} (旧引擎21f基线: ann 11.14%/sharpe 0.595)",
-            label, out.metrics.num_trades, out.metrics.turnover
-        );
+            let out = execute_factor_backtest(&db, task, req)
+                .await
+                .expect("backtest");
+            println!(
+                "[{}] trades={} turnover={:.1} (旧引擎21f基线: ann 11.14%/sharpe 0.595)",
+                label, out.metrics.num_trades, out.metrics.turnover
+            );
         }
     }
 }
@@ -4499,11 +4511,15 @@ mod iso23_solo {
             "kelly_fraction": 0.25, "max_position_pct": 0.1, "max_gross_exposure": 0.95,
             "score_direction": "descending", "portfolio_method": "heuristic",
             "universe_profile": "main_board_non_st", "benchmark": "000300.SH"
-        })).expect("req");
+        }))
+        .expect("req");
         let out = execute_factor_backtest(&db, "fbt-iso23-solo-2230", req)
             .await
             .expect("backtest");
-        println!("[23f-solo] trades={} turnover={:.1}", out.metrics.num_trades, out.metrics.turnover);
+        println!(
+            "[23f-solo] trades={} turnover={:.1}",
+            out.metrics.num_trades, out.metrics.turnover
+        );
     }
 }
 
@@ -4520,10 +4536,38 @@ mod f1_quarterly_rerun {
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = sqlx::PgPool::connect(&url).await.expect("db");
         for (label, combo, ver, rebal, kelly, task) in [
-            ("F1-Q60-k0", "ar_consensus_eps_rev_solo", "v1", "quarterly", 0.0, "fbt-f1q60-k0-0907"),
-            ("F1-Q60-k025", "ar_consensus_eps_rev_solo", "v1", "quarterly", 0.25, "fbt-f1q60-k025-0907"),
-            ("72f-Q60-k025(基线)", "full_pit_icir_indneutral_val_v1", "1.0.0", "quarterly", 0.25, "fbt-72fq60-k025-0907"),
-            ("72f-10d-k025(原参)", "full_pit_icir_indneutral_val_v1", "1.0.0", "10", 0.25, "fbt-72f10d-k025-0907"),
+            (
+                "F1-Q60-k0",
+                "ar_consensus_eps_rev_solo",
+                "v1",
+                "quarterly",
+                0.0,
+                "fbt-f1q60-k0-0907",
+            ),
+            (
+                "F1-Q60-k025",
+                "ar_consensus_eps_rev_solo",
+                "v1",
+                "quarterly",
+                0.25,
+                "fbt-f1q60-k025-0907",
+            ),
+            (
+                "72f-Q60-k025(基线)",
+                "full_pit_icir_indneutral_val_v1",
+                "1.0.0",
+                "quarterly",
+                0.25,
+                "fbt-72fq60-k025-0907",
+            ),
+            (
+                "72f-10d-k025(原参)",
+                "full_pit_icir_indneutral_val_v1",
+                "1.0.0",
+                "10",
+                0.25,
+                "fbt-72f10d-k025-0907",
+            ),
         ] {
             let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
                 "combo_name": combo, "version": ver,
@@ -4534,9 +4578,13 @@ mod f1_quarterly_rerun {
                 "kelly_fraction": kelly, "max_position_pct": 0.1, "max_gross_exposure": 0.95,
                 "score_direction": "descending", "portfolio_method": "heuristic",
                 "universe_profile": "main_board_non_st", "benchmark": "000300.SH"
-            })).expect("req");
+            }))
+            .expect("req");
             let out = execute_factor_backtest(&db, &task, req).await.expect("bt");
-            println!("[{}] trades={} turnover={:.1}", label, out.metrics.num_trades, out.metrics.turnover);
+            println!(
+                "[{}] trades={} turnover={:.1}",
+                label, out.metrics.num_trades, out.metrics.turnover
+            );
         }
     }
 }
@@ -4553,8 +4601,28 @@ mod ddctrl_mu_rerun {
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = sqlx::PgPool::connect(&url).await.expect("db");
         for (label, policy, task) in [
-            ("72f-base-none", None::<&str>, format!("fbt-72f-v3-none-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())),
-            ("72f-dd_ctrl_v1", Some("drawdown_control_v1"), format!("fbt-72f-v3-ddv1-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())),
+            (
+                "72f-base-none",
+                None::<&str>,
+                format!(
+                    "fbt-72f-v3-none-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                ),
+            ),
+            (
+                "72f-dd_ctrl_v1",
+                Some("drawdown_control_v1"),
+                format!(
+                    "fbt-72f-v3-ddv1-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                ),
+            ),
         ] {
             let mut rj = serde_json::json!({
                 "combo_name": "full_pit_icir_indneutral_val_v1", "version": "1.0.0",
@@ -4566,10 +4634,15 @@ mod ddctrl_mu_rerun {
                 "score_direction": "descending", "portfolio_method": "heuristic",
                 "universe_profile": "main_board_non_st", "benchmark": "000300.SH"
             });
-            if let Some(p) = policy { rj["market_regime"] = serde_json::json!({"enabled": true, "policy": p}); }
+            if let Some(p) = policy {
+                rj["market_regime"] = serde_json::json!({"enabled": true, "policy": p});
+            }
             let req: RunFactorBacktestReq = serde_json::from_value(rj).expect("req");
             let out = execute_factor_backtest(&db, &task, req).await.expect("bt");
-            println!("[{}] trades={} turnover={:.1}", label, out.metrics.num_trades, out.metrics.turnover);
+            println!(
+                "[{}] trades={} turnover={:.1}",
+                label, out.metrics.num_trades, out.metrics.turnover
+            );
         }
     }
 }
@@ -4589,8 +4662,14 @@ mod sleeve_freq_scan {
         for rebal in ["5", "10", "20", "40"] {
             let task = format!("fbt-sleeve-freq-{}-0907", rebal);
             // 清旧
-            let _ = sqlx::query("DELETE FROM backtest_task WHERE task_id=$1").bind(&task).execute(&db).await;
-            let _ = sqlx::query("DELETE FROM backtest_equity_curve WHERE task_id=$1").bind(&task).execute(&db).await;
+            let _ = sqlx::query("DELETE FROM backtest_task WHERE task_id=$1")
+                .bind(&task)
+                .execute(&db)
+                .await;
+            let _ = sqlx::query("DELETE FROM backtest_equity_curve WHERE task_id=$1")
+                .bind(&task)
+                .execute(&db)
+                .await;
             let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
                 "combo_name": "full_pit_icir_indneutral_val_v1", "version": "1.0.0",
                 "strategy_version_id": "factor-combo-v1", "data_version_id": "dv-eod-20260901",
@@ -4601,7 +4680,8 @@ mod sleeve_freq_scan {
                 "score_direction": "descending", "portfolio_method": "heuristic",
                 "universe_profile": "main_board_non_st", "benchmark": "000300.SH",
                 "market_regime": {"enabled": true, "policy": "drawdown_control_v1"}
-            })).expect("req");
+            }))
+            .expect("req");
             let out = execute_factor_backtest(&db, &task, req).await.expect("bt");
             println!("[sleeve-{}] trades={}", rebal, out.metrics.num_trades);
         }
@@ -4620,11 +4700,14 @@ mod sleeve_param_grid {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
         let db = sqlx::PgPool::connect(&url).await.expect("db");
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         for top_n in [20usize, 30, 40, 50] {
             for kelly in [0.0f64, 0.15, 0.25, 0.50] {
-                let task = format!("fbt-grid-{}-{}-{}", top_n, (kelly*100.0) as u64, ts);
+                let task = format!("fbt-grid-{}-{}-{}", top_n, (kelly * 100.0) as u64, ts);
                 let req: RunFactorBacktestReq = serde_json::from_value(serde_json::json!({
                     "combo_name": "full_pit_icir_indneutral_val_v1", "version": "1.0.0",
                     "strategy_version_id": "factor-combo-v1", "data_version_id": "dv-eod-20260901",
@@ -4635,12 +4718,19 @@ mod sleeve_param_grid {
                     "score_direction": "descending", "portfolio_method": "heuristic",
                     "universe_profile": "main_board_non_st", "benchmark": "000300.SH",
                     "market_regime": {"enabled": true, "policy": "drawdown_control_v1"}
-                })).expect("req");
+                }))
+                .expect("req");
                 let out = match execute_factor_backtest(&db, &task, req).await {
                     Ok(o) => o,
-                    Err(e) => { println!("[grid] top_n={} kelly={} ERR: {}", top_n, kelly, e); continue; }
+                    Err(e) => {
+                        println!("[grid] top_n={} kelly={} ERR: {}", top_n, kelly, e);
+                        continue;
+                    }
                 };
-                println!("[grid] top_n={} kelly={:.2} trades={}", top_n, kelly, out.metrics.num_trades);
+                println!(
+                    "[grid] top_n={} kelly={:.2} trades={}",
+                    top_n, kelly, out.metrics.num_trades
+                );
             }
         }
     }

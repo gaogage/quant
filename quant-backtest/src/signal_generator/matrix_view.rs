@@ -34,12 +34,7 @@ pub(crate) trait MatrixView {
         fraction: f64,
     ) -> Option<f64>;
     /// 两 symbol 间的 Pearson 相关系数。
-    fn pearson_correlation(
-        &self,
-        score_day: NaiveDate,
-        left: &str,
-        right: &str,
-    ) -> Option<f64>;
+    fn pearson_correlation(&self, score_day: NaiveDate, left: &str, right: &str) -> Option<f64>;
     /// 某 symbol 相对参考集的平均绝对相关。
     fn average_abs_correlation_to_reference(
         &self,
@@ -72,12 +67,7 @@ impl<T: MatrixView + ?Sized> MatrixView for Arc<T> {
     ) -> Option<f64> {
         (**self).fractional_kelly_weight(score_day, symbol, fraction)
     }
-    fn pearson_correlation(
-        &self,
-        score_day: NaiveDate,
-        left: &str,
-        right: &str,
-    ) -> Option<f64> {
+    fn pearson_correlation(&self, score_day: NaiveDate, left: &str, right: &str) -> Option<f64> {
         (**self).pearson_correlation(score_day, left, right)
     }
     fn average_abs_correlation_to_reference(
@@ -114,12 +104,7 @@ impl MatrixView for ScoreDateReturnRiskMatrix {
     ) -> Option<f64> {
         ScoreDateReturnRiskMatrix::fractional_kelly_weight(self, score_day, symbol, fraction)
     }
-    fn pearson_correlation(
-        &self,
-        score_day: NaiveDate,
-        left: &str,
-        right: &str,
-    ) -> Option<f64> {
+    fn pearson_correlation(&self, score_day: NaiveDate, left: &str, right: &str) -> Option<f64> {
         ScoreDateReturnRiskMatrix::pearson_correlation(self, score_day, left, right)
     }
     fn average_abs_correlation_to_reference(
@@ -141,7 +126,9 @@ impl MatrixView for ScoreDateReturnRiskMatrix {
         symbol: &str,
         symbols: &[String],
     ) -> f64 {
-        ScoreDateReturnRiskMatrix::covariance_concentration_penalty(self, score_day, symbol, symbols)
+        ScoreDateReturnRiskMatrix::covariance_concentration_penalty(
+            self, score_day, symbol, symbols,
+        )
     }
 }
 
@@ -161,12 +148,7 @@ impl MatrixView for ScoreDateReturnRiskStatsMatrix {
     ) -> Option<f64> {
         ScoreDateReturnRiskStatsMatrix::fractional_kelly_weight(self, score_day, symbol, fraction)
     }
-    fn pearson_correlation(
-        &self,
-        score_day: NaiveDate,
-        left: &str,
-        right: &str,
-    ) -> Option<f64> {
+    fn pearson_correlation(&self, score_day: NaiveDate, left: &str, right: &str) -> Option<f64> {
         ScoreDateReturnRiskStatsMatrix::pearson_correlation(self, score_day, left, right)
     }
     fn average_abs_correlation_to_reference(
@@ -189,10 +171,7 @@ impl MatrixView for ScoreDateReturnRiskStatsMatrix {
         symbols: &[String],
     ) -> f64 {
         ScoreDateReturnRiskStatsMatrix::covariance_concentration_penalty(
-            self,
-            score_day,
-            symbol,
-            symbols,
+            self, score_day, symbol, symbols,
         )
     }
 }
@@ -236,13 +215,9 @@ impl<'a> MatrixView for ReturnHistoryMatrixView<'a> {
         let returns = trailing_returns(self.return_history, symbol, score_day, self.lookback_days);
         fractional_kelly_weight(&returns, fraction)
     }
-    fn pearson_correlation(
-        &self,
-        score_day: NaiveDate,
-        left: &str,
-        right: &str,
-    ) -> Option<f64> {
-        let left_returns = trailing_returns(self.return_history, left, score_day, self.lookback_days);
+    fn pearson_correlation(&self, score_day: NaiveDate, left: &str, right: &str) -> Option<f64> {
+        let left_returns =
+            trailing_returns(self.return_history, left, score_day, self.lookback_days);
         let right_returns =
             trailing_returns(self.return_history, right, score_day, self.lookback_days);
         pearson_correlation(&left_returns, &right_returns)

@@ -9,12 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 use std::env;
-use std::{
-    collections::BTreeSet,
-    path::Path,
-    sync::Arc,
-    time::Duration as StdDuration,
-};
+use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration as StdDuration};
 use tokio::{process::Command, time::timeout};
 
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
@@ -43,7 +38,6 @@ pub struct ExchangeAnnouncementOrderCapacitySmokeReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct ExchangeAnnouncementOrderCapacityDetailAuditReq {
     #[serde(default)]
     pub announcement_links: Vec<String>,
@@ -55,14 +49,12 @@ pub struct ExchangeAnnouncementOrderCapacityDetailAuditReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct ExchangeAnnouncementOrderCapacityPdfParserReadinessReq {
     #[serde(default)]
     pub python: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct ExchangeAnnouncementOrderCapacityPdfDetailAuditReq {
     #[serde(default)]
@@ -74,7 +66,6 @@ pub struct ExchangeAnnouncementOrderCapacityPdfDetailAuditReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq {
     #[serde(default)]
@@ -90,7 +81,6 @@ pub struct ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct ExchangeAnnouncementOrderCapacitySyncPlanReq {
     #[serde(default)]
@@ -108,7 +98,6 @@ pub struct ExchangeAnnouncementOrderCapacitySyncPlanReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct ExchangeAnnouncementOrderCapacitySyncReq {
     #[serde(default)]
@@ -133,7 +122,6 @@ pub struct ExchangeAnnouncementOrderCapacitySyncReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -143,7 +131,6 @@ pub struct ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct ExchangeAnnouncementOrderCapacityAdmissionReadinessAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -152,7 +139,6 @@ pub struct ExchangeAnnouncementOrderCapacityAdmissionReadinessAuditReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq {
     #[serde(default)]
@@ -166,7 +152,6 @@ pub struct ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct ExchangeAnnouncementOrderCapacityBoundedSyncReq {
     #[serde(default)]
@@ -217,19 +202,16 @@ impl ExchangeAnnouncementOrderCapacitySyncReq {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-
-
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub(crate) struct ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
-    pub(crate) table_exists:bool,
-    pub(crate) row_count:i64,
-    pub(crate) distinct_symbol_count:i64,
-    pub(crate) distinct_category_count:i64,
-    pub(crate) pit_violation_rows:i64,
-    pub(crate) missing_available_at_rows:i64,
+    pub(crate) table_exists: bool,
+    pub(crate) row_count: i64,
+    pub(crate) distinct_symbol_count: i64,
+    pub(crate) distinct_category_count: i64,
+    pub(crate) pit_violation_rows: i64,
+    pub(crate) missing_available_at_rows: i64,
     pub(crate) missing_source_published_at_quality_rows: i64,
-    pub(crate) duplicate_announcement_id_rows:i64,
+    pub(crate) duplicate_announcement_id_rows: i64,
     pub(crate) duplicate_raw_payload_hash_groups: i64,
     pub(crate) evidence_span_rows: i64,
     pub(crate) target_event_rows: i64,
@@ -246,9 +228,9 @@ pub(crate) struct ExchangeAnnouncementOrderCapacityCoverageQualityMetrics {
     pub(crate) excluded_unsupported_category_failed_attempts: i64,
 }
 
-
-
-pub(crate) fn exchange_announcement_order_capacity_pdf_audit_python_path(requested: Option<String>) -> String {
+pub(crate) fn exchange_announcement_order_capacity_pdf_audit_python_path(
+    requested: Option<String>,
+) -> String {
     requested
         .filter(|path| !path.trim().is_empty())
         .or_else(|| env::var("QUANT_PDF_AUDIT_PYTHON").ok())
@@ -258,15 +240,11 @@ pub(crate) fn exchange_announcement_order_capacity_pdf_audit_python_path(request
         })
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_row_limit(limit: Option<usize>) -> usize {
     limit
         .unwrap_or(PHASE7_PERMISSION_SMOKE_MAX_ROWS)
         .clamp(1, EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_ROWS)
 }
-
-
 
 fn exchange_announcement_order_capacity_symbol(value: &str) -> String {
     value
@@ -276,8 +254,6 @@ fn exchange_announcement_order_capacity_symbol(value: &str) -> String {
         .unwrap_or(value.trim())
         .to_string()
 }
-
-
 
 pub(crate) fn exchange_announcement_order_capacity_symbols(symbols: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
@@ -290,9 +266,9 @@ pub(crate) fn exchange_announcement_order_capacity_symbols(symbols: &[String]) -
         .collect()
 }
 
-
-
-pub(crate) fn exchange_announcement_order_capacity_csv_values(value: Option<String>) -> Vec<String> {
+pub(crate) fn exchange_announcement_order_capacity_csv_values(
+    value: Option<String>,
+) -> Vec<String> {
     value
         .unwrap_or_default()
         .split(',')
@@ -301,9 +277,9 @@ pub(crate) fn exchange_announcement_order_capacity_csv_values(value: Option<Stri
         .collect()
 }
 
-
-
-pub(crate) fn exchange_announcement_order_capacity_categories(categories: &[String]) -> Vec<String> {
+pub(crate) fn exchange_announcement_order_capacity_categories(
+    categories: &[String],
+) -> Vec<String> {
     let raw_categories = if categories.is_empty() {
         EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_DEFAULT_CATEGORIES
             .iter()
@@ -325,8 +301,6 @@ pub(crate) fn exchange_announcement_order_capacity_categories(categories: &[Stri
         .collect()
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_date_range(
     req: &ExchangeAnnouncementOrderCapacitySmokeReq,
 ) -> Result<(String, String), String> {
@@ -344,8 +318,6 @@ pub(crate) fn exchange_announcement_order_capacity_date_range(
     }
     Ok((start_date, end_date))
 }
-
-
 
 fn cninfo_percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
@@ -370,8 +342,6 @@ fn cninfo_percent_decode(value: &str) -> String {
     String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
 }
 
-
-
 pub(crate) fn cninfo_query_param(link: &str, key: &str) -> Option<String> {
     let query = link.split_once('?')?.1;
     for pair in query.split('&') {
@@ -382,8 +352,6 @@ pub(crate) fn cninfo_query_param(link: &str, key: &str) -> Option<String> {
     }
     None
 }
-
-
 
 pub(crate) fn cninfo_announcement_id_from_path(link: &str) -> Option<String> {
     let path = link.split('?').next().unwrap_or(link);
@@ -400,8 +368,6 @@ pub(crate) fn cninfo_announcement_id_from_path(link: &str) -> Option<String> {
     }
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_detail_links(
     links: &[String],
     limit: Option<usize>,
@@ -417,18 +383,14 @@ pub(crate) fn exchange_announcement_order_capacity_detail_links(
         .collect()
 }
 
-
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExchangeAnnouncementDetailProbeSummary {
-    pub(crate) fetched_text_count:usize,
-    pub(crate) text_hash_count:usize,
+    pub(crate) fetched_text_count: usize,
+    pub(crate) text_hash_count: usize,
     pub(crate) source_published_at_count: usize,
-    pub(crate) incomplete_link_metadata_count:usize,
-    pub(crate) pdf_parser_required_count:usize,
+    pub(crate) incomplete_link_metadata_count: usize,
+    pub(crate) pdf_parser_required_count: usize,
 }
-
-
 
 #[derive(Debug, Clone, Copy)]
 struct ExchangeAnnouncementPdfDetailProbeSummary {
@@ -445,7 +407,6 @@ struct ExchangeAnnouncementPdfDetailProbeSummary {
 
 #[derive(Debug, Clone, Copy)]
 
-
 struct ExchangeAnnouncementOcrBlockedRowProbeSummary {
     ocr_text_count: usize,
     stable_hash_count: usize,
@@ -460,22 +421,20 @@ struct ExchangeAnnouncementOcrBlockedRowProbeSummary {
 
 #[derive(Debug, Clone)]
 
-
 pub(crate) struct ExchangeAnnouncementOrderCapacityValidatedSyncRequest {
-    pub(crate) symbols:Vec<String>,
-    pub(crate) categories:Vec<String>,
-    pub(crate) market:String,
-    pub(crate) start:NaiveDate,
-    pub(crate) end:NaiveDate,
-    pub(crate) calendar_day_count:i64,
-    pub(crate) query_count:usize,
-    pub(crate) data_version_id:String,
+    pub(crate) symbols: Vec<String>,
+    pub(crate) categories: Vec<String>,
+    pub(crate) market: String,
+    pub(crate) start: NaiveDate,
+    pub(crate) end: NaiveDate,
+    pub(crate) calendar_day_count: i64,
+    pub(crate) query_count: usize,
+    pub(crate) data_version_id: String,
     pub(crate) python: String,
     pub(crate) pdf_python: String,
 }
 
 #[derive(Debug, Clone)]
-
 
 pub(crate) struct ExchangeAnnouncementOrderCapacityTinySlice {
     pub(crate) label: String,
@@ -486,16 +445,15 @@ pub(crate) struct ExchangeAnnouncementOrderCapacityTinySlice {
 
 #[derive(Debug, Clone)]
 
-
 pub(crate) struct ExchangeAnnouncementOrderCapacityValidatedBoundedSyncRequest {
-    pub(crate) symbols:Vec<String>,
-    pub(crate) categories:Vec<String>,
-    pub(crate) market:String,
-    pub(crate) start:NaiveDate,
-    pub(crate) end:NaiveDate,
-    pub(crate) calendar_day_count:i64,
-    pub(crate) batch_mode:String,
-    pub(crate) slices:Vec<ExchangeAnnouncementOrderCapacityTinySlice>,
+    pub(crate) symbols: Vec<String>,
+    pub(crate) categories: Vec<String>,
+    pub(crate) market: String,
+    pub(crate) start: NaiveDate,
+    pub(crate) end: NaiveDate,
+    pub(crate) calendar_day_count: i64,
+    pub(crate) batch_mode: String,
+    pub(crate) slices: Vec<ExchangeAnnouncementOrderCapacityTinySlice>,
     pub(crate) total_query_units: usize,
     pub(crate) data_version_id: String,
     pub(crate) python: String,
@@ -505,16 +463,15 @@ pub(crate) struct ExchangeAnnouncementOrderCapacityValidatedBoundedSyncRequest {
 
 #[derive(Debug, Clone)]
 
-
 pub(crate) struct ExchangeAnnouncementOrderCapacityRawRow {
-    pub(crate) vendor:String,
-    pub(crate) vendor_endpoint:String,
-    pub(crate) request_key:String,
-    pub(crate) symbol:String,
-    pub(crate) symbol_name:Option<String>,
-    pub(crate) announcement_id:String,
-    pub(crate) org_id:String,
-    pub(crate) announcement_category:String,
+    pub(crate) vendor: String,
+    pub(crate) vendor_endpoint: String,
+    pub(crate) request_key: String,
+    pub(crate) symbol: String,
+    pub(crate) symbol_name: Option<String>,
+    pub(crate) announcement_id: String,
+    pub(crate) org_id: String,
+    pub(crate) announcement_category: String,
     pub(crate) announcement_title: String,
     pub(crate) announcement_time: NaiveDate,
     pub(crate) source_published_at: String,
@@ -538,8 +495,6 @@ pub(crate) struct ExchangeAnnouncementOrderCapacityRawRow {
     pub(crate) evidence_spans: Value,
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_tiny_slices(
     start: NaiveDate,
     end: NaiveDate,
@@ -560,8 +515,6 @@ pub(crate) fn exchange_announcement_order_capacity_tiny_slices(
     }
     slices
 }
-
-
 
 pub(crate) fn exchange_announcement_order_capacity_validate_bounded_window(
     start: NaiveDate,
@@ -594,8 +547,6 @@ pub(crate) fn exchange_announcement_order_capacity_validate_bounded_window(
     Ok(())
 }
 
-
-
 pub(crate) fn parse_exchange_announcement_date(value: &str) -> Option<NaiveDate> {
     let decoded = cninfo_percent_decode(value);
     let trimmed = decoded.trim();
@@ -611,8 +562,6 @@ pub(crate) fn parse_exchange_announcement_date(value: &str) -> Option<NaiveDate>
         .or_else(|| parse_exchange_announcement_local_datetime(trimmed).map(|value| value.date()))
 }
 
-
-
 fn parse_exchange_announcement_local_datetime(value: &str) -> Option<NaiveDateTime> {
     let normalized = value.trim().replace('T', " ");
     [
@@ -627,8 +576,6 @@ fn parse_exchange_announcement_local_datetime(value: &str) -> Option<NaiveDateTi
     .find_map(|format| NaiveDateTime::parse_from_str(&normalized, format).ok())
 }
 
-
-
 pub(crate) fn parse_exchange_announcement_timestamp(value: &str) -> Option<DateTime<Utc>> {
     let decoded = cninfo_percent_decode(value);
     let trimmed = decoded.trim();
@@ -640,8 +587,6 @@ pub(crate) fn parse_exchange_announcement_timestamp(value: &str) -> Option<DateT
                 .map(|value| value.and_utc() - Duration::hours(8))
         })
 }
-
-
 
 async fn load_exchange_announcement_next_open_dates(
     db: &sqlx::PgPool,
@@ -664,8 +609,6 @@ async fn load_exchange_announcement_next_open_dates(
     .await
 }
 
-
-
 pub(crate) fn exchange_announcement_next_open_date(
     announcement_time: NaiveDate,
     open_dates: &[NaiveDate],
@@ -676,8 +619,6 @@ pub(crate) fn exchange_announcement_next_open_date(
         .find(|date| *date > announcement_time)
         .unwrap_or_else(|| announcement_time + Duration::days(1))
 }
-
-
 
 pub(crate) fn exchange_announcement_event_type_from_spans(spans: &Value) -> Option<String> {
     let spans = spans.as_array()?;
@@ -703,8 +644,6 @@ pub(crate) fn exchange_announcement_event_type_from_spans(spans: &Value) -> Opti
     }
 }
 
-
-
 pub(crate) fn exchange_announcement_pdf_parse_status(probe: &Value) -> String {
     match probe.get("status").and_then(Value::as_str) {
         Some("ok") => "ok",
@@ -719,22 +658,24 @@ pub(crate) fn exchange_announcement_pdf_parse_status(probe: &Value) -> String {
     .to_string()
 }
 
-pub(crate) fn exchange_announcement_order_capacity_json_path_i64(value: &Value, path: &[&str]) -> i64 {
+pub(crate) fn exchange_announcement_order_capacity_json_path_i64(
+    value: &Value,
+    path: &[&str],
+) -> i64 {
     path.iter()
         .try_fold(value, |current, key| current.get(*key))
         .and_then(Value::as_i64)
         .unwrap_or(0)
 }
 
-
-
-pub(crate) fn exchange_announcement_order_capacity_json_path_f64(value: &Value, path: &[&str]) -> Option<f64> {
+pub(crate) fn exchange_announcement_order_capacity_json_path_f64(
+    value: &Value,
+    path: &[&str],
+) -> Option<f64> {
     path.iter()
         .try_fold(value, |current, key| current.get(*key))
         .and_then(Value::as_f64)
 }
-
-
 
 pub(crate) fn exchange_announcement_order_capacity_array_len(value: &Value, key: &str) -> usize {
     value
@@ -743,8 +684,6 @@ pub(crate) fn exchange_announcement_order_capacity_array_len(value: &Value, key:
         .map(Vec::len)
         .unwrap_or(0)
 }
-
-
 
 async fn upsert_exchange_announcement_order_capacity_raw_rows(
     db: &sqlx::PgPool,
@@ -839,8 +778,6 @@ async fn upsert_exchange_announcement_order_capacity_raw_rows(
 
     Ok(saved)
 }
-
-
 
 async fn run_exchange_announcement_order_capacity_tiny_sync(
     state: &AppState,
@@ -1217,8 +1154,6 @@ async fn run_exchange_announcement_order_capacity_tiny_sync(
     }))
 }
 
-
-
 async fn run_exchange_announcement_order_capacity_bounded_sync(
     state: &AppState,
     req: ExchangeAnnouncementOrderCapacityBoundedSyncReq,
@@ -1388,8 +1323,6 @@ async fn run_exchange_announcement_order_capacity_bounded_sync(
         }
     }))
 }
-
-
 
 async fn build_exchange_announcement_order_capacity_coverage_quality_audit(
     state: &AppState,
@@ -2197,8 +2130,6 @@ async fn build_exchange_announcement_order_capacity_coverage_quality_audit(
     }))
 }
 
-
-
 async fn build_exchange_announcement_order_capacity_manual_precision_sample_audit(
     state: &AppState,
     req: ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq,
@@ -2575,8 +2506,6 @@ async fn build_exchange_announcement_order_capacity_manual_precision_sample_audi
     Ok(report)
 }
 
-
-
 fn summarize_exchange_announcement_pdf_detail_probes(
     probes: &[Value],
 ) -> ExchangeAnnouncementPdfDetailProbeSummary {
@@ -2662,8 +2591,6 @@ fn summarize_exchange_announcement_pdf_detail_probes(
         runtime_not_configured_count,
     }
 }
-
-
 
 fn summarize_exchange_announcement_ocr_blocked_row_probes(
     probes: &[Value],
@@ -2771,8 +2698,6 @@ fn summarize_exchange_announcement_ocr_blocked_row_probes(
     }
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_sync_plan_batches(
     start: NaiveDate,
     end: NaiveDate,
@@ -2785,8 +2710,6 @@ pub(crate) fn exchange_announcement_order_capacity_sync_plan_batches(
         )
     })
 }
-
-
 
 async fn run_exchange_announcement_order_capacity_probe(
     python: &str,
@@ -2986,9 +2909,9 @@ except Exception as error:
     attach_exchange_announcement_link_metadata(payload)
 }
 
-
-
-pub(crate) fn exchange_announcement_order_capacity_is_akshare_empty_dataframe_key_error(error: &str) -> bool {
+pub(crate) fn exchange_announcement_order_capacity_is_akshare_empty_dataframe_key_error(
+    error: &str,
+) -> bool {
     error.contains("None of [Index([")
         && error.contains("'代码'")
         && error.contains("'简称'")
@@ -2998,8 +2921,6 @@ pub(crate) fn exchange_announcement_order_capacity_is_akshare_empty_dataframe_ke
         && error.contains("'orgId'")
         && error.contains("are in the [columns]")
 }
-
-
 
 fn attach_exchange_announcement_link_metadata(mut payload: Value) -> Value {
     let sample_rows = payload
@@ -3039,8 +2960,6 @@ fn attach_exchange_announcement_link_metadata(mut payload: Value) -> Value {
     }
     payload
 }
-
-
 
 async fn run_exchange_announcement_detail_probe(python: &str, link: &str) -> Value {
     let metadata = parse_cninfo_announcement_link_metadata(link);
@@ -3221,8 +3140,6 @@ except Exception as error:
     }
     payload
 }
-
-
 
 async fn run_exchange_announcement_pdf_detail_probe(python: &str, link: &str) -> Value {
     let metadata = parse_cninfo_announcement_link_metadata(link);
@@ -3560,8 +3477,6 @@ except Exception as error:
     payload
 }
 
-
-
 async fn probe_exchange_announcement_order_capacity_pdf_parsers(python: &str) -> Vec<Value> {
     let mut checks = vec![json!({
         "tool": "pdftotext",
@@ -3642,8 +3557,6 @@ print(json.dumps([
     }
     checks
 }
-
-
 
 async fn run_exchange_announcement_ocr_blocked_row_probe(python: &str, row: Value) -> Value {
     let pdf_url = row
@@ -3890,8 +3803,6 @@ except Exception as error:
     payload
 }
 
-
-
 pub(crate) fn cninfo_operator_evidence_required_categories() -> [&'static str; 7] {
     [
         "terms_review_attestation",
@@ -3903,8 +3814,6 @@ pub(crate) fn cninfo_operator_evidence_required_categories() -> [&'static str; 7
         "rate_limit_cost_refresh_latency_budget",
     ]
 }
-
-
 
 pub(crate) fn cninfo_operator_evidence_required_fields() -> [&'static str; 12] {
     [
@@ -3922,8 +3831,6 @@ pub(crate) fn cninfo_operator_evidence_required_fields() -> [&'static str; 12] {
         "notes",
     ]
 }
-
-
 
 fn cninfo_operator_evidence_forbidden_keys() -> [&'static str; 13] {
     [
@@ -3943,16 +3850,12 @@ fn cninfo_operator_evidence_forbidden_keys() -> [&'static str; 13] {
     ]
 }
 
-
-
 pub(crate) fn cninfo_operator_evidence_string_present(value: Option<&Value>) -> bool {
     value
         .and_then(Value::as_str)
         .map(|item| !item.trim().is_empty())
         .unwrap_or(false)
 }
-
-
 
 pub(crate) fn collect_cninfo_operator_forbidden_manifest_keys(
     value: &Value,
@@ -3980,8 +3883,6 @@ pub(crate) fn collect_cninfo_operator_forbidden_manifest_keys(
     }
 }
 
-
-
 pub(crate) fn phase7_cninfo_operator_evidence_promotion_gate(permission_smoke: &str) -> Value {
     json!({
         "permission_smoke": permission_smoke,
@@ -3994,8 +3895,6 @@ pub(crate) fn phase7_cninfo_operator_evidence_promotion_gate(permission_smoke: &
     })
 }
 
-
-
 pub(crate) fn phase7_cninfo_operator_evidence_runtime_actions() -> Value {
     json!({
         "network_enabled": false,
@@ -4006,8 +3905,6 @@ pub(crate) fn phase7_cninfo_operator_evidence_runtime_actions() -> Value {
     })
 }
 
-
-
 pub(crate) fn phase7_cninfo_operator_evidence_privacy_guards() -> Value {
     json!({
         "echo_manifest_content": false,
@@ -4017,8 +3914,6 @@ pub(crate) fn phase7_cninfo_operator_evidence_privacy_guards() -> Value {
         "return_only_counts_missing_fields_and_forbidden_key_names": true
     })
 }
-
-
 
 pub(crate) fn exchange_announcement_order_capacity_sync_plan_response(
     start: NaiveDate,
@@ -4145,8 +4040,6 @@ pub(crate) fn exchange_announcement_order_capacity_sync_plan_response(
     })
 }
 
-
-
 pub async fn exchange_announcement_order_capacity_schema_contract() -> impl IntoResponse {
     Json(json!({
         "code": 0,
@@ -4155,7 +4048,6 @@ pub async fn exchange_announcement_order_capacity_schema_contract() -> impl Into
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/next-source-admission-plan
-
 
 pub async fn exchange_announcement_order_capacity_next_source_admission_plan() -> impl IntoResponse
 {
@@ -4167,7 +4059,6 @@ pub async fn exchange_announcement_order_capacity_next_source_admission_plan() -
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/source-contract
 
-
 pub async fn structured_order_capacity_price_chain_cninfo_access_smoke_contract(
 ) -> impl IntoResponse {
     Json(json!({
@@ -4178,7 +4069,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_access_smoke_contract(
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-contract
 
-
 pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_contract(
 ) -> impl IntoResponse {
     Json(json!({
@@ -4188,7 +4078,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_cont
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-audit
-
 
 pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_audit(
 ) -> impl IntoResponse {
@@ -4217,7 +4106,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_audi
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-permission-sample-smoke-plan
 
-
 pub async fn structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan(
 ) -> impl IntoResponse {
     Json(json!({
@@ -4227,7 +4115,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_permission_sample_smok
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-operator-evidence-manifest-template
-
 
 pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template(
 ) -> impl IntoResponse {
@@ -4239,7 +4126,6 @@ pub async fn structured_order_capacity_price_chain_cninfo_operator_evidence_mani
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/manual-schema-review
 
-
 pub async fn exchange_announcement_order_capacity_manual_schema_review() -> impl IntoResponse {
     Json(json!({
         "code": 0,
@@ -4248,7 +4134,6 @@ pub async fn exchange_announcement_order_capacity_manual_schema_review() -> impl
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/sync-plan
-
 
 pub async fn exchange_announcement_order_capacity_sync_plan(
     Query(req): Query<ExchangeAnnouncementOrderCapacitySyncPlanReq>,
@@ -4261,7 +4146,6 @@ pub async fn exchange_announcement_order_capacity_sync_plan(
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/coverage-quality-audit-contract
 
-
 pub async fn exchange_announcement_order_capacity_coverage_quality_audit_contract(
 ) -> impl IntoResponse {
     Json(json!({
@@ -4271,7 +4155,6 @@ pub async fn exchange_announcement_order_capacity_coverage_quality_audit_contrac
 }
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/permission-smoke
-
 
 pub async fn exchange_announcement_order_capacity_permission_smoke(
     State(state): State<Arc<AppState>>,
@@ -4285,7 +4168,6 @@ pub async fn exchange_announcement_order_capacity_permission_smoke(
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/detail-audit
 
-
 pub async fn exchange_announcement_order_capacity_detail_audit(
     Json(req): Json<ExchangeAnnouncementOrderCapacityDetailAuditReq>,
 ) -> impl IntoResponse {
@@ -4296,7 +4178,6 @@ pub async fn exchange_announcement_order_capacity_detail_audit(
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/pdf-parser-readiness
-
 
 pub async fn exchange_announcement_order_capacity_pdf_parser_readiness(
     Query(req): Query<ExchangeAnnouncementOrderCapacityPdfParserReadinessReq>,
@@ -4311,7 +4192,6 @@ pub async fn exchange_announcement_order_capacity_pdf_parser_readiness(
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/pdf-detail-audit
 
-
 pub async fn exchange_announcement_order_capacity_pdf_detail_audit(
     Json(req): Json<ExchangeAnnouncementOrderCapacityPdfDetailAuditReq>,
 ) -> impl IntoResponse {
@@ -4322,7 +4202,6 @@ pub async fn exchange_announcement_order_capacity_pdf_detail_audit(
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/ocr-blocked-row-audit
-
 
 pub async fn exchange_announcement_order_capacity_ocr_blocked_row_audit(
     State(state): State<Arc<AppState>>,
@@ -4336,7 +4215,6 @@ pub async fn exchange_announcement_order_capacity_ocr_blocked_row_audit(
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/sync
 
-
 pub async fn exchange_announcement_order_capacity_sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExchangeAnnouncementOrderCapacitySyncReq>,
@@ -4348,7 +4226,6 @@ pub async fn exchange_announcement_order_capacity_sync(
 }
 
 /// POST /api/v1/quant/data/exchange-announcement-order-capacity/bounded-sync
-
 
 pub async fn exchange_announcement_order_capacity_bounded_sync(
     State(state): State<Arc<AppState>>,
@@ -4362,7 +4239,6 @@ pub async fn exchange_announcement_order_capacity_bounded_sync(
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/coverage-quality-audit
 
-
 pub async fn exchange_announcement_order_capacity_coverage_quality_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq>,
@@ -4374,7 +4250,6 @@ pub async fn exchange_announcement_order_capacity_coverage_quality_audit(
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/admission-readiness-audit
-
 
 pub async fn exchange_announcement_order_capacity_admission_readiness_audit(
     State(state): State<Arc<AppState>>,
@@ -4397,7 +4272,6 @@ pub async fn exchange_announcement_order_capacity_admission_readiness_audit(
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/manual-precision-sample-audit
 
-
 pub async fn exchange_announcement_order_capacity_manual_precision_sample_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq>,
@@ -4411,7 +4285,6 @@ pub async fn exchange_announcement_order_capacity_manual_precision_sample_audit(
 }
 
 /// GET /api/v1/quant/data/futures-price-chain/readiness-audit
-
 
 async fn build_exchange_announcement_order_capacity_permission_smoke(
     state: &AppState,
@@ -4575,8 +4448,6 @@ async fn build_exchange_announcement_order_capacity_permission_smoke(
     }))
 }
 
-
-
 async fn build_exchange_announcement_order_capacity_detail_audit(
     req: ExchangeAnnouncementOrderCapacityDetailAuditReq,
 ) -> Result<Value, String> {
@@ -4641,8 +4512,6 @@ async fn build_exchange_announcement_order_capacity_detail_audit(
         ],
     }))
 }
-
-
 
 async fn build_exchange_announcement_order_capacity_pdf_detail_audit(
     req: ExchangeAnnouncementOrderCapacityPdfDetailAuditReq,
@@ -4713,8 +4582,6 @@ async fn build_exchange_announcement_order_capacity_pdf_detail_audit(
         ],
     }))
 }
-
-
 
 async fn build_exchange_announcement_order_capacity_ocr_blocked_row_audit(
     state: &AppState,
@@ -4905,6 +4772,3 @@ async fn build_exchange_announcement_order_capacity_ocr_blocked_row_audit(
         ],
     }))
 }
-
-
-

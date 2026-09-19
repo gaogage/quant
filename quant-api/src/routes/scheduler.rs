@@ -481,7 +481,10 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                     .and_then(|v| v.as_str())
                     .unwrap_or("20160104")
                     .to_string();
-                let end_date = chrono::Local::now().date_naive().format("%Y%m%d").to_string();
+                let end_date = chrono::Local::now()
+                    .date_naive()
+                    .format("%Y%m%d")
+                    .to_string();
                 let leverage_multiplier = params
                     .get("leverage_multiplier")
                     .and_then(|v| v.as_f64())
@@ -540,10 +543,15 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                 let date = chrono::Local::now().date_naive();
                 tokio::spawn(async move {
                     let t0 = std::time::Instant::now();
-                    let sd = (date - chrono::Duration::days(190)).format("%Y%m%d").to_string();
+                    let sd = (date - chrono::Duration::days(190))
+                        .format("%Y%m%d")
+                        .to_string();
                     let ed = date.format("%Y%m%d").to_string();
                     trigger_v24_backfill_routes(&db2, &sd, &ed).await;
-                    info!("[夜间预备] phase7 因子回补完成 累计{}s", t0.elapsed().as_secs());
+                    info!(
+                        "[夜间预备] phase7 因子回补完成 累计{}s",
+                        t0.elapsed().as_secs()
+                    );
                     let wl: Option<Vec<String>> = sqlx::query_scalar(
                         "SELECT factor_whitelist FROM strategy_config WHERE strategy_id='v24' AND status='active'",
                     )
@@ -573,32 +581,60 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                             factor_whitelist: wl.as_deref(),
                             ind_neutral: ind_neut,
                         },
-                    ).await {
-                        Ok(rows) => info!("[夜间预备] PIT 物化 {} 行 累计{}s", rows, t0.elapsed().as_secs()),
-                        Err(e) => { error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e); }
+                    )
+                    .await
+                    {
+                        Ok(rows) => info!(
+                            "[夜间预备] PIT 物化 {} 行 累计{}s",
+                            rows,
+                            t0.elapsed().as_secs()
+                        ),
+                        Err(e) => {
+                            error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e);
+                        }
                     }
                     // 2026-09-18: 原写法 `results => for r in results` 实为迭代
                     // Result<SyncResult,String> —— Err 分支零次迭代被静默吞掉,
                     // 曲线同步异常时只打"更新完成"。改为显式三分支。
                     match crate::routes::equity_curve_sync::sync_strategy_equity_curve(
-                        &db2, "v24", date - chrono::Duration::days(10), date, false,
-                    ).await {
+                        &db2,
+                        "v24",
+                        date - chrono::Duration::days(10),
+                        date,
+                        false,
+                    )
+                    .await
+                    {
                         Ok(r) if r.status != "success" => {
-                            warn!("[夜间预备] 曲线同步未成功 {} {}: {:?}", r.strategy_id, r.status, r.error);
+                            warn!(
+                                "[夜间预备] 曲线同步未成功 {} {}: {:?}",
+                                r.strategy_id, r.status, r.error
+                            );
                         }
                         Ok(_) => {}
                         Err(e) => warn!("[夜间预备] 曲线同步异常: {}", e),
                     }
-                    info!("[夜间预备] sleeve 曲线更新完成 累计{}s", t0.elapsed().as_secs());
+                    info!(
+                        "[夜间预备] sleeve 曲线更新完成 累计{}s",
+                        t0.elapsed().as_secs()
+                    );
                     // 基金净值增量(2026-09-17, ETF 溢价门禁数据源): 每标的增量秒级完成。
                     // 门禁对缺数据降级放行, 此处失败不阻断 23:30 信号(告警留痕)。
                     let etf_syms = load_active_etf_symbols_union(&db2).await;
                     match quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await {
-                        Ok(n) => info!("[夜间预备] fund_nav 净值同步 {} 行 累计{}s", n, t0.elapsed().as_secs()),
+                        Ok(n) => info!(
+                            "[夜间预备] fund_nav 净值同步 {} 行 累计{}s",
+                            n,
+                            t0.elapsed().as_secs()
+                        ),
                         Err(e) => warn!("[夜间预备] fund_nav 净值同步失败(门禁将降级放行): {}", e),
                     }
                     match quant_data::sync::sync_fund_div(&db2, &tushare2, &etf_syms).await {
-                        Ok(n) => info!("[夜间预备] fund_div 分红同步 {} 条 累计{}s", n, t0.elapsed().as_secs()),
+                        Ok(n) => info!(
+                            "[夜间预备] fund_div 分红同步 {} 条 累计{}s",
+                            n,
+                            t0.elapsed().as_secs()
+                        ),
                         Err(e) => warn!("[夜间预备] fund_div 分红同步失败(ETF分红不入账): {}", e),
                     }
                 });
@@ -615,10 +651,14 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                     // 溢价门禁净值兜底(2026-09-17): 22:10 链失败/EOD 拖延时补拉,
                     // 增量幂等秒级; 再失败则门禁降级放行(signal_export 内置)。
                     let etf_syms = load_active_etf_symbols_union(&db2).await;
-                    if let Err(e) = quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await {
+                    if let Err(e) =
+                        quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await
+                    {
                         warn!("[PTrade信号] fund_nav 兜底同步失败(门禁降级放行): {}", e);
                     }
-                    if let Err(e) = quant_data::sync::sync_fund_div(&db2, &tushare2, &etf_syms).await {
+                    if let Err(e) =
+                        quant_data::sync::sync_fund_div(&db2, &tushare2, &etf_syms).await
+                    {
                         warn!("[PTrade信号] fund_div 兜底同步失败: {}", e);
                     }
                     crate::routes::signal_export::run_ptrade_signal_export(&db2, &params2).await;
@@ -695,7 +735,10 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                     )
                     .await
                     {
-                        Ok(rows) => info!("[scheduler] PIT combo {} 保鲜完成: {} 行", cfg.combo_name, rows),
+                        Ok(rows) => info!(
+                            "[scheduler] PIT combo {} 保鲜完成: {} 行",
+                            cfg.combo_name, rows
+                        ),
                         Err(e) => warn!("[scheduler] PIT combo {} 保鲜失败: {}", cfg.combo_name, e),
                     }
                 }
@@ -822,7 +865,10 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
 }
 
 /// 获取当前日期对应的最优 WFA 参数（从已完成的实验中提取）
-pub(crate) async fn get_current_wfa_params(db: &PgPool, date: NaiveDate) -> Result<serde_json::Value, String> {
+pub(crate) async fn get_current_wfa_params(
+    db: &PgPool,
+    date: NaiveDate,
+) -> Result<serde_json::Value, String> {
     let row = sqlx::query_as::<_, (serde_json::Value,)>(
         "SELECT parameters FROM wfa_strategy_params
          WHERE test_start <= $1 AND test_end >= $1
@@ -1224,9 +1270,10 @@ async fn run_tick(
                         recovered.len(),
                         sync_date
                     );
-                    if let Err(e) =
-                        crate::routes::report::resend_daily_performance_report(db, sync_date, &recovered)
-                            .await
+                    if let Err(e) = crate::routes::report::resend_daily_performance_report(
+                        db, sync_date, &recovered,
+                    )
+                    .await
                     {
                         warn!("[scheduler] T+1 补发昨日绩效失败: {}", e);
                     }
@@ -2425,8 +2472,8 @@ pub async fn generate_paper_signals_for_all(
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<f64>().ok());
         // sleeve 调仓频率默认 40 交易日(2026-08-20 网格实验:indneutral_val_v1 组合 10/20/40 日频
-// 实测年化 8.3%/10.8%/10.4%,40 日频回撤 24.4% vs 20 日 31.4%,换手 69x vs 131x,
-// 风险调整后最优;原 v24 蓝图 task 参数为 rebalance="10")。
+        // 实测年化 8.3%/10.8%/10.4%,40 日频回撤 24.4% vs 20 日 31.4%,换手 69x vs 131x,
+        // 风险调整后最优;原 v24 蓝图 task 参数为 rebalance="10")。
         // 历史注:2026-07-20 P0 修复曾强制 daily——因当时 30 天短窗口 + 非日频会导致
         // 当日无信号截面 → 误清仓。现窗口已拉长到 90 天,覆盖多个 10 日信号周期,
         // 当日截面恒非空(2026-08-20 实测:90 天窗口 + 10 日频,当日截面 8 只、
@@ -2719,7 +2766,8 @@ mod forecast_backfill_byday_tests {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
-        ).await
+        )
+        .await
         .expect("db");
         let tok = std::env::var("TUSHARE_TOKEN_ALT").expect("TUSHARE_TOKEN_ALT");
         let mut cfg = quant_data::tushare::client::TushareConfig::default();
@@ -2735,7 +2783,13 @@ mod forecast_backfill_byday_tests {
         while d <= end {
             let ds = d.format("%Y%m%d").to_string();
             match quant_data::sync::sync_forecast_by_day(
-                &db, &client, &ds, &format!("fc-bf-{}", ds)).await {
+                &db,
+                &client,
+                &ds,
+                &format!("fc-bf-{}", ds),
+            )
+            .await
+            {
                 Ok(n) => println!("[fc-bf] {} -> {} 条", ds, n),
                 Err(e) => println!("[fc-bf] {} 失败: {}", ds, e),
             }
@@ -2766,13 +2820,26 @@ mod forecast_daily_tests {
         let empty: Vec<String> = vec![];
         // 按月分块（forecast 单次上限同量级）
         let windows = [
-            ("20260429", "20260531"), ("20260601", "20260630"),
-            ("20260701", "20260731"), ("20260801", "20260831"),
+            ("20260429", "20260531"),
+            ("20260601", "20260630"),
+            ("20260701", "20260731"),
+            ("20260801", "20260831"),
             ("20260901", "20260905"),
         ];
         for (s, e) in windows {
-            let n = quant_data::sync::sync_forecast(&db, &tushare, &empty, s, e, &format!("dv-fc-bf-{}", s))
-                .await.unwrap_or_else(|err| { println!("[fc-bf] {}..{} err: {}", s, e, err); 0 });
+            let n = quant_data::sync::sync_forecast(
+                &db,
+                &tushare,
+                &empty,
+                s,
+                e,
+                &format!("dv-fc-bf-{}", s),
+            )
+            .await
+            .unwrap_or_else(|err| {
+                println!("[fc-bf] {}..{} err: {}", s, e, err);
+                0
+            });
             println!("[fc-bf] {}..{} rows={}", s, e, n);
         }
     }

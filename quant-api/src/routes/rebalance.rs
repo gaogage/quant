@@ -37,7 +37,11 @@ pub enum PriceSource {
 
 /// 执行取价列:EodOpen 用当日开盘价,其余收盘价(盯市一律收盘)。
 fn exec_price_col(ps: PriceSource) -> &'static str {
-    if matches!(ps, PriceSource::EodOpen) { "open" } else { "close" }
+    if matches!(ps, PriceSource::EodOpen) {
+        "open"
+    } else {
+        "close"
+    }
 }
 
 /// 日线条材表:统一真实价(market_stock_daily_bar)。基准与实盘必须同真实价口径——
@@ -315,199 +319,83 @@ pub async fn rebalance_account(
     let trade_block_map =
         crate::routes::shared::preload_trade_block_map(db, date, &block_symbols).await;
     for pass in 0..2 {
-    for p in &positions {
-        if warn_no_buy {
-            // 警戒禁买:不建仓,仅记录目标集(清仓段仍可减仓)
+        for p in &positions {
+            if warn_no_buy {
+                // 警戒禁买:不建仓,仅记录目标集(清仓段仍可减仓)
+                target_symbols.insert(p.symbol.clone());
+                continue;
+            }
+            if p.quantity <= Decimal::ZERO || p.market_value <= Decimal::ZERO {
+                continue;
+            }
+            let price = p.market_value / p.quantity;
+            if price <= Decimal::ZERO {
+                continue;
+            }
             target_symbols.insert(p.symbol.clone());
-            continue;
-        }
-        if p.quantity <= Decimal::ZERO || p.market_value <= Decimal::ZERO {
-            continue;
-        }
-        let price = p.market_value / p.quantity;
-        if price <= Decimal::ZERO {
-            continue;
-        }
-        target_symbols.insert(p.symbol.clone());
-        // 目标数量 = A股资本 × 截面 weight × 杠杆 / 现价（weight 含减仓语义；
-        // weight=0 的历史截面兜底用市值占比，避免退化成 0 仓）
-        let weight_d = if p.weight > Decimal::ZERO {
-            p.weight
-        } else if total_stock_mv > Decimal::ZERO {
-            p.market_value / total_stock_mv * Decimal::from_f64_retain(mvo_a_pct).unwrap_or(Decimal::ZERO)
-        } else {
-            Decimal::ZERO
-        };
-        let target_qty = a_share_capital * weight_d * leverage_d / price;
-        let cur_qty = current_positions
-            .get(&p.symbol)
-            .map(|(q, _)| *q)
-            .unwrap_or(Decimal::ZERO);
-        let delta = target_qty - cur_qty;
-        if delta.abs() < Decimal::new(1, 2) {
-            // |delta| < 0.01,忽略
-            continue;
-        }
-        let (side, mut qty) = if delta > Decimal::ZERO {
-            // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
-            (
-                "buy",
-                quant_common::trading_rules::round_down_to_lot(
-                    delta,
-                    quant_common::trading_rules::LOT_SIZE,
-                ),
-            )
-        } else {
-            // 卖出:
-            // - 全仓清仓(target_qty == 0):允许零头一次性清光
-            // - 部分减仓:卖出量向下取整到100股(1手),保证剩余持仓仍为100整数倍
-            let sell_qty = -delta;
-            if target_qty > Decimal::ZERO {
+            // 目标数量 = A股资本 × 截面 weight × 杠杆 / 现价（weight 含减仓语义；
+            // weight=0 的历史截面兜底用市值占比，避免退化成 0 仓）
+            let weight_d = if p.weight > Decimal::ZERO {
+                p.weight
+            } else if total_stock_mv > Decimal::ZERO {
+                p.market_value / total_stock_mv
+                    * Decimal::from_f64_retain(mvo_a_pct).unwrap_or(Decimal::ZERO)
+            } else {
+                Decimal::ZERO
+            };
+            let target_qty = a_share_capital * weight_d * leverage_d / price;
+            let cur_qty = current_positions
+                .get(&p.symbol)
+                .map(|(q, _)| *q)
+                .unwrap_or(Decimal::ZERO);
+            let delta = target_qty - cur_qty;
+            if delta.abs() < Decimal::new(1, 2) {
+                // |delta| < 0.01,忽略
+                continue;
+            }
+            let (side, mut qty) = if delta > Decimal::ZERO {
+                // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
                 (
-                    "sell",
+                    "buy",
                     quant_common::trading_rules::round_down_to_lot(
-                        sell_qty,
+                        delta,
                         quant_common::trading_rules::LOT_SIZE,
                     ),
                 )
             } else {
-                ("sell", sell_qty)
-            }
-        };
-        // 取整后 qty 为 0 则跳过（不足 1 手不产生交易）
-        if qty <= Decimal::ZERO {
-            continue;
-        }
-        // 两遍过滤:pass 0 只执行卖出(先释放资金),pass 1 只执行买入
-        if (pass == 0) != (side == "sell") {
-            continue;
-        }
-        // A 股交易阻断(停牌/涨跌停)——按 side 区分(P2-A 批量预加载):
-        // 涨停('U')禁买可卖、跌停('D')禁卖可买、停牌买卖都禁。方向未知(NULL)保守都禁。
-        if let Some(block) = trade_block_map.get(&p.symbol) {
-            if block.blocks_side(side) {
-                let dir = block.limit_type.map(|c| c.to_string()).unwrap_or_default();
-                warn!(
-                    "[rebalance] 跳过 A股{}: {} {}({})",
-                    side,
-                    p.symbol,
-                    block.reason,
-                    if dir.is_empty() {
-                        "方向未知"
-                    } else {
-                        dir.as_str()
-                    }
-                );
-                send_quality_alert(
-                    db,
-                    &[format!(
-                        "{}: {} {} {}{}",
-                        account_id,
-                        p.symbol,
-                        side,
-                        block.reason,
-                        if dir.is_empty() {
-                            String::new()
-                        } else {
-                            format!("({})", dir)
-                        }
-                    )],
-                )
-                .await;
+                // 卖出:
+                // - 全仓清仓(target_qty == 0):允许零头一次性清光
+                // - 部分减仓:卖出量向下取整到100股(1手),保证剩余持仓仍为100整数倍
+                let sell_qty = -delta;
+                if target_qty > Decimal::ZERO {
+                    (
+                        "sell",
+                        quant_common::trading_rules::round_down_to_lot(
+                            sell_qty,
+                            quant_common::trading_rules::LOT_SIZE,
+                        ),
+                    )
+                } else {
+                    ("sell", sell_qty)
+                }
+            };
+            // 取整后 qty 为 0 则跳过（不足 1 手不产生交易）
+            if qty <= Decimal::ZERO {
                 continue;
             }
-        }
-        let mut target_value = qty * price;
-        if side == "buy" && target_value < Decimal::ONE {
-            continue;
-        }
-        // 授信预算：买入不得超预算池（cash+剩余授信），超出则缩量到预算内整手；
-        // 卖出回款回流预算池（供后续买入 pass 使用）。
-        if side == "buy" {
-            if buy_budget < target_value {
-                let allowed_qty = quant_common::trading_rules::round_down_to_lot(
-                    buy_budget / price,
-                    quant_common::trading_rules::LOT_SIZE,
-                );
-                if allowed_qty <= Decimal::ZERO {
-                    warn!(
-                        "[rebalance] 授信预算不足，跳过买入 {} 需 {:.0} 池余 {:.0}",
-                        p.symbol, target_value, buy_budget
-                    );
-                    continue;
-                }
-                qty = allowed_qty;
-                target_value = qty * price;
+            // 两遍过滤:pass 0 只执行卖出(先释放资金),pass 1 只执行买入
+            if (pass == 0) != (side == "sell") {
+                continue;
             }
-            buy_budget -= target_value;
-        } else {
-            buy_budget += target_value;
-        }
-        let trade = crate::routes::trading::PlannedTrade {
-            account_id: account_id.to_string(),
-            symbol: p.symbol.clone(),
-            side: side.into(),
-            target_quantity: qty,
-            target_price: price,
-            price_upper_limit: None,
-            price_lower_limit: None,
-            slippage_pct: slippage,
-            target_value,
-            reason: Some(format!("调仓 A股 regime={:.0}%", regime * 100.0)),
-            strategy_version_id: Some(sc.strategy_id.clone()),
-            trade_date: Some(date),
-        };
-        match execute_simulated_trade(db, &trade).await {
-            Ok((order_id, _)) => {
-                // 实际成交价(含滑点)用于更新持仓
-                let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
-                let mult = if side == "sell" {
-                    Decimal::ONE - slip_d
-                } else {
-                    Decimal::ONE + slip_d
-                };
-                let fill_price = price * mult;
-                if apply_fill_to_position(
-                    db,
-                    account_id,
-                    &p.symbol,
-                    side,
-                    qty,
-                    fill_price,
-                    leverage_enabled,
-                    date,
-                )
-                .await
-                {
-                    n += 1;
-                } else {
-                    // 资金不足等被跳过:回写 skipped,避免 fill 记录与持仓脱节
-                    mark_fill_skipped(db, &order_id).await;
-                }
-            }
-            Err(e) => warn!("[rebalance] A股 {} {} 下单失败: {}", p.symbol, side, e),
-        }
-    }
-
-    // 7b. 清仓:当前持仓中【不在 A 股目标集 且 属于 A 股】的 symbol。
-    // 在 pass 0(卖出遍)之后、pass 1(买入遍)之前执行,清仓资金当轮可用于买入。
-    // ETF 不在此清——ETF 减仓由 ETF 段增量调仓处理(delta=target_qty-cur_qty)。
-    // 若在此清 ETF,清仓段改 DB 但 current_positions 内存快照不更新,
-    // ETF 段会读到旧 cur_qty 导致 delta 反向(应 buy 却 sell),持仓 quantity 错乱、nav 跳变。
-    if pass == 0 {
-    for (sym, (qty, _)) in &current_positions {
-        // 仅清 A股:排除策略配置的 ETF 列表(ETF 由 ETF 段管理)
-        if sc.etf_symbols.iter().any(|e| e == sym) {
-            continue;
-        }
-        if !target_symbols.contains(sym) && *qty > Decimal::ZERO {
-            // 清仓是卖出:跌停('D')禁卖,跳过该股(留待次日或涨跌停解除再清)。
-            if let Some(block) = trade_block_map.get(sym) {
-                if block.blocks_side("sell") {
+            // A 股交易阻断(停牌/涨跌停)——按 side 区分(P2-A 批量预加载):
+            // 涨停('U')禁买可卖、跌停('D')禁卖可买、停牌买卖都禁。方向未知(NULL)保守都禁。
+            if let Some(block) = trade_block_map.get(&p.symbol) {
+                if block.blocks_side(side) {
                     let dir = block.limit_type.map(|c| c.to_string()).unwrap_or_default();
                     warn!(
-                        "[rebalance] 清仓跳过 A股sell: {} {}({})",
-                        sym,
+                        "[rebalance] 跳过 A股{}: {} {}({})",
+                        side,
+                        p.symbol,
                         block.reason,
                         if dir.is_empty() {
                             "方向未知"
@@ -515,38 +403,81 @@ pub async fn rebalance_account(
                             dir.as_str()
                         }
                     );
+                    send_quality_alert(
+                        db,
+                        &[format!(
+                            "{}: {} {} {}{}",
+                            account_id,
+                            p.symbol,
+                            side,
+                            block.reason,
+                            if dir.is_empty() {
+                                String::new()
+                            } else {
+                                format!("({})", dir)
+                            }
+                        )],
+                    )
+                    .await;
                     continue;
                 }
             }
-            let price = fetch_eod_price(db, sym, date, price_source).await;
-            if price <= 0.0 {
+            let mut target_value = qty * price;
+            if side == "buy" && target_value < Decimal::ONE {
                 continue;
+            }
+            // 授信预算：买入不得超预算池（cash+剩余授信），超出则缩量到预算内整手；
+            // 卖出回款回流预算池（供后续买入 pass 使用）。
+            if side == "buy" {
+                if buy_budget < target_value {
+                    let allowed_qty = quant_common::trading_rules::round_down_to_lot(
+                        buy_budget / price,
+                        quant_common::trading_rules::LOT_SIZE,
+                    );
+                    if allowed_qty <= Decimal::ZERO {
+                        warn!(
+                            "[rebalance] 授信预算不足，跳过买入 {} 需 {:.0} 池余 {:.0}",
+                            p.symbol, target_value, buy_budget
+                        );
+                        continue;
+                    }
+                    qty = allowed_qty;
+                    target_value = qty * price;
+                }
+                buy_budget -= target_value;
+            } else {
+                buy_budget += target_value;
             }
             let trade = crate::routes::trading::PlannedTrade {
                 account_id: account_id.to_string(),
-                symbol: sym.clone(),
-                side: "sell".into(),
-                target_quantity: *qty,
-                target_price: Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
+                symbol: p.symbol.clone(),
+                side: side.into(),
+                target_quantity: qty,
+                target_price: price,
                 price_upper_limit: None,
                 price_lower_limit: None,
                 slippage_pct: slippage,
-                target_value: *qty * Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
-                reason: Some("清仓(A股不在目标集)".into()),
+                target_value,
+                reason: Some(format!("调仓 A股 regime={:.0}%", regime * 100.0)),
                 strategy_version_id: Some(sc.strategy_id.clone()),
                 trade_date: Some(date),
             };
             match execute_simulated_trade(db, &trade).await {
                 Ok((order_id, _)) => {
+                    // 实际成交价(含滑点)用于更新持仓
                     let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
-                    let fill_price = Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO)
-                        * (Decimal::ONE - slip_d);
+                    let mult = if side == "sell" {
+                        Decimal::ONE - slip_d
+                    } else {
+                        Decimal::ONE + slip_d
+                    };
+                    let fill_price = price * mult;
                     if apply_fill_to_position(
                         db,
                         account_id,
-                        sym,
-                        "sell",
-                        *qty,
+                        &p.symbol,
+                        side,
+                        qty,
                         fill_price,
                         leverage_enabled,
                         date,
@@ -555,14 +486,91 @@ pub async fn rebalance_account(
                     {
                         n += 1;
                     } else {
+                        // 资金不足等被跳过:回写 skipped,避免 fill 记录与持仓脱节
                         mark_fill_skipped(db, &order_id).await;
                     }
                 }
-                Err(e) => warn!("[rebalance] 清仓 {} 下单失败: {}", sym, e),
+                Err(e) => warn!("[rebalance] A股 {} {} 下单失败: {}", p.symbol, side, e),
             }
         }
-    }
-    } // end if pass == 0(清仓段)
+
+        // 7b. 清仓:当前持仓中【不在 A 股目标集 且 属于 A 股】的 symbol。
+        // 在 pass 0(卖出遍)之后、pass 1(买入遍)之前执行,清仓资金当轮可用于买入。
+        // ETF 不在此清——ETF 减仓由 ETF 段增量调仓处理(delta=target_qty-cur_qty)。
+        // 若在此清 ETF,清仓段改 DB 但 current_positions 内存快照不更新,
+        // ETF 段会读到旧 cur_qty 导致 delta 反向(应 buy 却 sell),持仓 quantity 错乱、nav 跳变。
+        if pass == 0 {
+            for (sym, (qty, _)) in &current_positions {
+                // 仅清 A股:排除策略配置的 ETF 列表(ETF 由 ETF 段管理)
+                if sc.etf_symbols.iter().any(|e| e == sym) {
+                    continue;
+                }
+                if !target_symbols.contains(sym) && *qty > Decimal::ZERO {
+                    // 清仓是卖出:跌停('D')禁卖,跳过该股(留待次日或涨跌停解除再清)。
+                    if let Some(block) = trade_block_map.get(sym) {
+                        if block.blocks_side("sell") {
+                            let dir = block.limit_type.map(|c| c.to_string()).unwrap_or_default();
+                            warn!(
+                                "[rebalance] 清仓跳过 A股sell: {} {}({})",
+                                sym,
+                                block.reason,
+                                if dir.is_empty() {
+                                    "方向未知"
+                                } else {
+                                    dir.as_str()
+                                }
+                            );
+                            continue;
+                        }
+                    }
+                    let price = fetch_eod_price(db, sym, date, price_source).await;
+                    if price <= 0.0 {
+                        continue;
+                    }
+                    let trade = crate::routes::trading::PlannedTrade {
+                        account_id: account_id.to_string(),
+                        symbol: sym.clone(),
+                        side: "sell".into(),
+                        target_quantity: *qty,
+                        target_price: Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
+                        price_upper_limit: None,
+                        price_lower_limit: None,
+                        slippage_pct: slippage,
+                        target_value: *qty
+                            * Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
+                        reason: Some("清仓(A股不在目标集)".into()),
+                        strategy_version_id: Some(sc.strategy_id.clone()),
+                        trade_date: Some(date),
+                    };
+                    match execute_simulated_trade(db, &trade).await {
+                        Ok((order_id, _)) => {
+                            let slip_d =
+                                Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
+                            let fill_price = Decimal::from_f64_retain(price)
+                                .unwrap_or(Decimal::ZERO)
+                                * (Decimal::ONE - slip_d);
+                            if apply_fill_to_position(
+                                db,
+                                account_id,
+                                sym,
+                                "sell",
+                                *qty,
+                                fill_price,
+                                leverage_enabled,
+                                date,
+                            )
+                            .await
+                            {
+                                n += 1;
+                            } else {
+                                mark_fill_skipped(db, &order_id).await;
+                            }
+                        }
+                        Err(e) => warn!("[rebalance] 清仓 {} 下单失败: {}", sym, e),
+                    }
+                }
+            }
+        } // end if pass == 0(清仓段)
     } // end for pass(A股两遍:先卖后买)
 
     // 8. ETF 建仓(按 price_source 取价:EodClose 从 DB / Intraday 从 tushare HashMap)
@@ -578,7 +586,10 @@ pub async fn rebalance_account(
     }
     let etf_allocations = build_etf_allocations(&mvo_weights, regime, &listed_etf_symbols);
     // P2-C:批量预加载 ETF 当日收盘价(EodClose 模式,替代 fetch_etf_price 逐个查)
-    let etf_eod_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::EodClose | PriceSource::EodCloseAdj | PriceSource::EodOpen) {
+    let etf_eod_prices: HashMap<String, f64> = if matches!(
+        price_source,
+        PriceSource::EodClose | PriceSource::EodCloseAdj | PriceSource::EodOpen
+    ) {
         preload_etf_eod_prices(db, &listed_etf_symbols, date, price_source).await
     } else {
         HashMap::new()
@@ -608,7 +619,8 @@ pub async fn rebalance_account(
     // 溢价 > gate 清仓、未持有且 >= gate/2 滞回不买回、< gate/2 恢复; 折价豁免。
     // 依赖下方 pass 0 放行 alloc=0 的清仓路径(本批修复: 原 alloc<=0 双 pass
     // continue 使目标 0 无卖出路径, overlay 无法生效)。
-    let etf_holding: std::collections::HashSet<String> = current_positions.keys().cloned().collect();
+    let etf_holding: std::collections::HashSet<String> =
+        current_positions.keys().cloned().collect();
     let etf_allocations = crate::routes::shared::apply_premium_exit_overlay(
         &etf_allocations,
         &etf_premium_map,
@@ -616,173 +628,174 @@ pub async fn rebalance_account(
         sc.etf_premium_gate,
     );
     for pass in 0..2 {
-    for (etf_symbol, alloc_pct) in &etf_allocations {
-        // pass 0=卖出, pass 1=买入; 门禁按方向单边拦截(双 pass 各查一次同方向)
-        let side_now = if pass == 0 { "sell" } else { "buy" };
-        if let Some(p) = etf_premium_map.get(etf_symbol.as_str()) {
-            if p.blocks_side(side_now) {
-                warn!(
-                    "[rebalance] 溢价门禁: 跳过 ETF {} {}向调仓(溢价 {:+.1}%, 阈值 {:.0}%)",
-                    etf_symbol,
-                    side_now,
-                    p.premium_pct.unwrap_or(0.0) * 100.0,
-                    sc.etf_premium_gate * 100.0
-                );
+        for (etf_symbol, alloc_pct) in &etf_allocations {
+            // pass 0=卖出, pass 1=买入; 门禁按方向单边拦截(双 pass 各查一次同方向)
+            let side_now = if pass == 0 { "sell" } else { "buy" };
+            if let Some(p) = etf_premium_map.get(etf_symbol.as_str()) {
+                if p.blocks_side(side_now) {
+                    warn!(
+                        "[rebalance] 溢价门禁: 跳过 ETF {} {}向调仓(溢价 {:+.1}%, 阈值 {:.0}%)",
+                        etf_symbol,
+                        side_now,
+                        p.premium_pct.unwrap_or(0.0) * 100.0,
+                        sc.etf_premium_gate * 100.0
+                    );
+                    continue;
+                }
+            }
+            if warn_no_buy {
+                continue; // 警戒禁买:不建仓 ETF(减仓由增量 delta 自然处理)
+            }
+            // alloc=0 仅在买入 pass 跳过; 卖出 pass 放行使 target_qty=0 → 全仓卖出
+            // (溢价退出 overlay 的清仓路径, 2026-09-18 修复: 原双 pass continue 堵死清仓)
+            if *alloc_pct <= 0.0 && pass == 1 {
                 continue;
             }
-        }
-        if warn_no_buy {
-            continue; // 警戒禁买:不建仓 ETF(减仓由增量 delta 自然处理)
-        }
-        // alloc=0 仅在买入 pass 跳过; 卖出 pass 放行使 target_qty=0 → 全仓卖出
-        // (溢价退出 overlay 的清仓路径, 2026-09-18 修复: 原双 pass continue 堵死清仓)
-        if *alloc_pct <= 0.0 && pass == 1 {
-            continue;
-        }
-        // ETF 目标市值也应用 leverage_mult(与 A 股段 scale 口径一致)。
-        // 杠杆是账号级配置,放大整个组合(A股+ETF),而非只放大 A 股 11%。
-        // 修复前:alloc_amount = current_nav × alloc_pct(不放大)→ 杠杆只对 A股生效,总 nav 几乎不变。
-        let alloc_amount = current_nav
-            * Decimal::from_f64_retain(*alloc_pct).unwrap_or(Decimal::ZERO)
-            * leverage_d;
-        // alloc=0 仅买入 pass 跳过(与上方 alloc<=0 检查同语义; 卖出 pass 放行
-        // 使 target_qty=0 → delta=-cur_qty 走全仓卖出——溢价退出 overlay 清仓路径)
-        if alloc_amount <= Decimal::ZERO && pass == 1 {
-            continue;
-        }
-        // P2-C:EodClose 模式优先用预加载的 etf_eod_prices,Intraday 模式用 intraday_prices
-        let price_val = if matches!(price_source, PriceSource::EodClose | PriceSource::EodOpen) {
-            etf_eod_prices
+            // ETF 目标市值也应用 leverage_mult(与 A 股段 scale 口径一致)。
+            // 杠杆是账号级配置,放大整个组合(A股+ETF),而非只放大 A 股 11%。
+            // 修复前:alloc_amount = current_nav × alloc_pct(不放大)→ 杠杆只对 A股生效,总 nav 几乎不变。
+            let alloc_amount = current_nav
+                * Decimal::from_f64_retain(*alloc_pct).unwrap_or(Decimal::ZERO)
+                * leverage_d;
+            // alloc=0 仅买入 pass 跳过(与上方 alloc<=0 检查同语义; 卖出 pass 放行
+            // 使 target_qty=0 → delta=-cur_qty 走全仓卖出——溢价退出 overlay 清仓路径)
+            if alloc_amount <= Decimal::ZERO && pass == 1 {
+                continue;
+            }
+            // P2-C:EodClose 模式优先用预加载的 etf_eod_prices,Intraday 模式用 intraday_prices
+            let price_val = if matches!(price_source, PriceSource::EodClose | PriceSource::EodOpen)
+            {
+                etf_eod_prices
+                    .get(etf_symbol.as_str())
+                    .copied()
+                    .unwrap_or(0.0)
+            } else {
+                fetch_etf_price(
+                    db,
+                    etf_symbol.as_str(),
+                    date,
+                    price_source,
+                    &intraday_prices,
+                )
+                .await
+            };
+            // 数据门禁：转换失败置 0 由下方 price<=0 拦截（旧 ONE 兜底是 1 元虚假成交路径）
+            let price = Decimal::from_f64_retain(price_val).unwrap_or(Decimal::ZERO);
+            if price <= Decimal::ZERO {
+                continue;
+            }
+            let target_qty = alloc_amount / price;
+            let cur_qty = current_positions
                 .get(etf_symbol.as_str())
-                .copied()
-                .unwrap_or(0.0)
-        } else {
-            fetch_etf_price(
-                db,
-                etf_symbol.as_str(),
-                date,
-                price_source,
-                &intraday_prices,
-            )
-            .await
-        };
-        // 数据门禁：转换失败置 0 由下方 price<=0 拦截（旧 ONE 兜底是 1 元虚假成交路径）
-        let price = Decimal::from_f64_retain(price_val).unwrap_or(Decimal::ZERO);
-        if price <= Decimal::ZERO {
-            continue;
-        }
-        let target_qty = alloc_amount / price;
-        let cur_qty = current_positions
-            .get(etf_symbol.as_str())
-            .map(|(q, _)| *q)
-            .unwrap_or(Decimal::ZERO);
-        let delta = target_qty - cur_qty;
-        // ETF 再平衡带宽（2026-09-08 换手优化）：目标数量相对当前持仓偏离 <25% 不调仓。
-        // 等权再平衡的漂移是慢变量，无 band 时每周微小漂移都触发交易（年换手 ~4.7 倍，
-        // 0.2% 滑点双边吃掉 ~0.9pp/年）。25% 是业界标准带宽（跟踪误差上限 3pp 权重）。
-        // 新买入(cur=0)与清仓(target=0)不受影响。A股 sleeve 段不适用（信号驱动换仓）。
-        let band = (cur_qty * Decimal::new(25, 2)).max(Decimal::new(1, 2));
-        if delta.abs() < band {
-            continue;
-        }
-        let (side, mut qty) = if delta > Decimal::ZERO {
-            // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
-            (
-                "buy",
-                quant_common::trading_rules::round_down_to_lot(
-                    delta,
-                    quant_common::trading_rules::LOT_SIZE,
-                ),
-            )
-        } else {
-            // 卖出(ETF):全仓清仓允许零头,部分减仓向下取整到100份
-            let sell_qty = -delta;
-            if target_qty > Decimal::ZERO {
+                .map(|(q, _)| *q)
+                .unwrap_or(Decimal::ZERO);
+            let delta = target_qty - cur_qty;
+            // ETF 再平衡带宽（2026-09-08 换手优化）：目标数量相对当前持仓偏离 <25% 不调仓。
+            // 等权再平衡的漂移是慢变量，无 band 时每周微小漂移都触发交易（年换手 ~4.7 倍，
+            // 0.2% 滑点双边吃掉 ~0.9pp/年）。25% 是业界标准带宽（跟踪误差上限 3pp 权重）。
+            // 新买入(cur=0)与清仓(target=0)不受影响。A股 sleeve 段不适用（信号驱动换仓）。
+            let band = (cur_qty * Decimal::new(25, 2)).max(Decimal::new(1, 2));
+            if delta.abs() < band {
+                continue;
+            }
+            let (side, mut qty) = if delta > Decimal::ZERO {
+                // 买入:A股/ETF 1手=100,必须100倍数。delta 向下取整到100,不足100股不买。
                 (
-                    "sell",
+                    "buy",
                     quant_common::trading_rules::round_down_to_lot(
-                        sell_qty,
+                        delta,
                         quant_common::trading_rules::LOT_SIZE,
                     ),
                 )
             } else {
-                ("sell", sell_qty)
+                // 卖出(ETF):全仓清仓允许零头,部分减仓向下取整到100份
+                let sell_qty = -delta;
+                if target_qty > Decimal::ZERO {
+                    (
+                        "sell",
+                        quant_common::trading_rules::round_down_to_lot(
+                            sell_qty,
+                            quant_common::trading_rules::LOT_SIZE,
+                        ),
+                    )
+                } else {
+                    ("sell", sell_qty)
+                }
+            };
+            // 取整后 qty 为 0 则跳过（不足 1 手不产生交易）
+            if qty <= Decimal::ZERO {
+                continue;
             }
-        };
-        // 取整后 qty 为 0 则跳过（不足 1 手不产生交易）
-        if qty <= Decimal::ZERO {
-            continue;
-        }
-        // 两遍过滤:pass 0 只执行卖出(先释放资金),pass 1 只执行买入
-        if (pass == 0) != (side == "sell") {
-            continue;
-        }
-        let mut target_value = qty * price;
-        // 授信预算（与 A 股段共享同一池）：买入缩量到预算内整手，卖出回流。
-        if side == "buy" {
-            if buy_budget < target_value {
-                let allowed_qty = quant_common::trading_rules::round_down_to_lot(
-                    buy_budget / price,
-                    quant_common::trading_rules::LOT_SIZE,
-                );
-                if allowed_qty <= Decimal::ZERO {
-                    warn!(
-                        "[rebalance] 授信预算不足，跳过 ETF 买入 {} 需 {:.0} 池余 {:.0}",
-                        etf_symbol, target_value, buy_budget
+            // 两遍过滤:pass 0 只执行卖出(先释放资金),pass 1 只执行买入
+            if (pass == 0) != (side == "sell") {
+                continue;
+            }
+            let mut target_value = qty * price;
+            // 授信预算（与 A 股段共享同一池）：买入缩量到预算内整手，卖出回流。
+            if side == "buy" {
+                if buy_budget < target_value {
+                    let allowed_qty = quant_common::trading_rules::round_down_to_lot(
+                        buy_budget / price,
+                        quant_common::trading_rules::LOT_SIZE,
                     );
-                    continue;
+                    if allowed_qty <= Decimal::ZERO {
+                        warn!(
+                            "[rebalance] 授信预算不足，跳过 ETF 买入 {} 需 {:.0} 池余 {:.0}",
+                            etf_symbol, target_value, buy_budget
+                        );
+                        continue;
+                    }
+                    qty = allowed_qty;
+                    target_value = qty * price;
                 }
-                qty = allowed_qty;
-                target_value = qty * price;
+                buy_budget -= target_value;
+            } else {
+                buy_budget += target_value;
             }
-            buy_budget -= target_value;
-        } else {
-            buy_budget += target_value;
-        }
-        let trade = crate::routes::trading::PlannedTrade {
-            account_id: account_id.to_string(),
-            symbol: etf_symbol.to_string(),
-            side: side.into(),
-            target_quantity: qty,
-            target_price: price,
-            price_upper_limit: None,
-            price_lower_limit: None,
-            slippage_pct: slippage,
-            target_value,
-            reason: Some(format!("调仓 ETF w={:.1}%", *alloc_pct * 100.0)),
-            strategy_version_id: Some(sc.strategy_id.clone()),
-            trade_date: Some(date),
-        };
-        match execute_simulated_trade(db, &trade).await {
-            Ok((order_id, _)) => {
-                let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
-                let mult = if side == "sell" {
-                    Decimal::ONE - slip_d
-                } else {
-                    Decimal::ONE + slip_d
-                };
-                let fill_price = price * mult;
-                if apply_fill_to_position(
-                    db,
-                    account_id,
-                    etf_symbol.as_str(),
-                    side,
-                    qty,
-                    fill_price,
-                    leverage_enabled,
-                    date,
-                )
-                .await
-                {
-                    n += 1;
-                } else {
-                    // 资金不足等被跳过:回写 skipped,避免 fill 记录与持仓脱节
-                    mark_fill_skipped(db, &order_id).await;
+            let trade = crate::routes::trading::PlannedTrade {
+                account_id: account_id.to_string(),
+                symbol: etf_symbol.to_string(),
+                side: side.into(),
+                target_quantity: qty,
+                target_price: price,
+                price_upper_limit: None,
+                price_lower_limit: None,
+                slippage_pct: slippage,
+                target_value,
+                reason: Some(format!("调仓 ETF w={:.1}%", *alloc_pct * 100.0)),
+                strategy_version_id: Some(sc.strategy_id.clone()),
+                trade_date: Some(date),
+            };
+            match execute_simulated_trade(db, &trade).await {
+                Ok((order_id, _)) => {
+                    let slip_d = Decimal::from_f64_retain(slippage).unwrap_or(Decimal::ZERO);
+                    let mult = if side == "sell" {
+                        Decimal::ONE - slip_d
+                    } else {
+                        Decimal::ONE + slip_d
+                    };
+                    let fill_price = price * mult;
+                    if apply_fill_to_position(
+                        db,
+                        account_id,
+                        etf_symbol.as_str(),
+                        side,
+                        qty,
+                        fill_price,
+                        leverage_enabled,
+                        date,
+                    )
+                    .await
+                    {
+                        n += 1;
+                    } else {
+                        // 资金不足等被跳过:回写 skipped,避免 fill 记录与持仓脱节
+                        mark_fill_skipped(db, &order_id).await;
+                    }
                 }
+                Err(e) => warn!("[rebalance] ETF {} {} 下单失败: {}", etf_symbol, side, e),
             }
-            Err(e) => warn!("[rebalance] ETF {} {} 下单失败: {}", etf_symbol, side, e),
         }
-    }
     } // end for pass(ETF 两遍:先卖后买)
 
     // 建仓 0 笔 + A股选股空 + 账号当前无持仓 → 报错(不产出假绩效)
@@ -1109,19 +1122,13 @@ pub async fn mark_to_market(
             .execute(&mut *tx)
             .await
             .map_err(|e| format!("mtm cash_div apply: {}", e))?;
-        tracing::info!(
-            "[mtm] {} {} 现金分红入账 {:.2}",
-            account_id,
-            date,
-            cash_div
-        );
+        tracing::info!("[mtm] {} {} 现金分红入账 {:.2}", account_id, date, cash_div);
     }
 
     // ── 步骤2: 份额调整 + 估值(送转/拆分 × 最新收盘)──
     // etf_mult: 因子跳变>10%(拆分级); stk_mult: 权威送转 1+stk_div; 同标的多事件乘积聚合
-    let adjusted: Vec<(String, Option<rust_decimal::Decimal>)> = sqlx::query_as(
-        &format!(
-            r#"WITH bars AS (
+    let adjusted: Vec<(String, Option<rust_decimal::Decimal>)> = sqlx::query_as(&format!(
+        r#"WITH bars AS (
                    SELECT p.symbol, t1.trade_date AS d1, t1.close AS c1
                    FROM (SELECT DISTINCT symbol FROM paper_position WHERE paper_account_id = $2) p
                    JOIN LATERAL (
@@ -1189,8 +1196,7 @@ pub async fn mark_to_market(
                  ON p2.paper_account_id = $2 AND p2.symbol = bars.symbol
                WHERE pp.paper_account_id = $2 AND pp.symbol = bars.symbol
                RETURNING pp.symbol, agg.mult"#
-        ),
-    )
+    ))
     .bind(date)
     .bind(account_id)
     .fetch_all(&mut *tx)
@@ -1208,7 +1214,9 @@ pub async fn mark_to_market(
         }
     }
 
-    tx.commit().await.map_err(|e| format!("mtm commit: {}", e))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("mtm commit: {}", e))?;
     Ok(())
 }
 
@@ -1245,23 +1253,27 @@ async fn apply_fill_to_position(
 
 /// 资金不足跳过的成交回写:order/fill 从 filled 改标记,保持审计记录与持仓一致。
 async fn mark_fill_skipped(db: &PgPool, order_id: &str) {
-    if let Err(e) = sqlx::query(
-        "UPDATE paper_order SET status = 'skipped_no_cash' WHERE order_id = $1",
-    )
-    .bind(order_id)
-    .execute(db)
-    .await
+    if let Err(e) =
+        sqlx::query("UPDATE paper_order SET status = 'skipped_no_cash' WHERE order_id = $1")
+            .bind(order_id)
+            .execute(db)
+            .await
     {
-        warn!("[rebalance] 标记 skipped_no_cash 失败(order {}): {}", order_id, e);
+        warn!(
+            "[rebalance] 标记 skipped_no_cash 失败(order {}): {}",
+            order_id, e
+        );
     }
-    if let Err(e) = sqlx::query(
-        "UPDATE paper_fill SET fill_status = 'skipped_no_cash' WHERE order_id = $1",
-    )
-    .bind(order_id)
-    .execute(db)
-    .await
+    if let Err(e) =
+        sqlx::query("UPDATE paper_fill SET fill_status = 'skipped_no_cash' WHERE order_id = $1")
+            .bind(order_id)
+            .execute(db)
+            .await
     {
-        warn!("[rebalance] 标记 fill skipped_no_cash 失败(order {}): {}", order_id, e);
+        warn!(
+            "[rebalance] 标记 fill skipped_no_cash 失败(order {}): {}",
+            order_id, e
+        );
     }
 }
 

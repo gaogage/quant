@@ -1,7 +1,6 @@
 //! Cache key types for the signal data cache.
 use super::*;
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum SignalDataCacheKey {
     ComboScores {
@@ -94,7 +93,11 @@ impl SignalDataCacheKey {
         }
     }
 
-    pub(crate) fn average_amount_symbol(symbol: &str, start_date: NaiveDate, end_date: NaiveDate) -> Self {
+    pub(crate) fn average_amount_symbol(
+        symbol: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Self {
         Self::AverageAmountSymbol {
             symbol: symbol.to_string(),
             start_date,
@@ -148,7 +151,6 @@ impl SignalDataCacheKey {
         }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MarketFeatureSnapshotKey {
@@ -413,4 +415,3 @@ pub(crate) fn subset_return_risk_feature_matrix(
         returns_by_score_symbol,
     }
 }
-

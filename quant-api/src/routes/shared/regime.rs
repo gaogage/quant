@@ -40,7 +40,8 @@ pub async fn detect_regime_exposure(
         Some(t) if t < deep_bear_threshold => {
             debug!(
                 "[Regime] DEEP BEAR: 12m return={:.1}%, exposure={:.0}%",
-                t * 100.0, deep_bear_exposure * 100.0
+                t * 100.0,
+                deep_bear_exposure * 100.0
             );
             deep_bear_exposure
         }
@@ -84,7 +85,8 @@ pub fn detect_regime_exposure_cached(
         Some(t) if t < deep_bear_threshold => {
             debug!(
                 "[Regime] DEEP BEAR: 12m return={:.1}%, exposure={:.0}%",
-                t * 100.0, deep_bear_exposure * 100.0
+                t * 100.0,
+                deep_bear_exposure * 100.0
             );
             deep_bear_exposure
         }
@@ -142,7 +144,13 @@ pub fn detect_regime_exposure_bwgv2(
     // 日收益序列
     let rets: Vec<f64> = window
         .windows(2)
-        .map(|w| if w[0].1 != 0.0 { w[1].1 / w[0].1 - 1.0 } else { 0.0 })
+        .map(|w| {
+            if w[0].1 != 0.0 {
+                w[1].1 / w[0].1 - 1.0
+            } else {
+                0.0
+            }
+        })
         .collect();
     if rets.len() < 20 {
         return 1.00;
@@ -194,8 +202,8 @@ mod tests {
 
     #[test]
     fn detect_regime_exposure_cached_deep_bear_triggers() {
-        use std::collections::HashMap;
         use chrono::NaiveDate;
+        use std::collections::HashMap;
         let mut map = HashMap::new();
         let start = NaiveDate::from_ymd_opt(2022, 1, 3).unwrap();
         for i in 0..300_i64 {
@@ -206,14 +214,17 @@ mod tests {
         }
         let latest = *map.keys().max().unwrap();
         let exposure = detect_regime_exposure_cached(&map, latest, -0.10, 0.60);
-        assert!((exposure - 0.60).abs() < 0.001,
-            "deep bear 应触发降仓 0.60, 实际: {}", exposure);
+        assert!(
+            (exposure - 0.60).abs() < 0.001,
+            "deep bear 应触发降仓 0.60, 实际: {}",
+            exposure
+        );
     }
 
     #[test]
     fn detect_regime_exposure_cached_bull_keeps_full() {
-        use std::collections::HashMap;
         use chrono::NaiveDate;
+        use std::collections::HashMap;
         let mut map = HashMap::new();
         let start = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
         for i in 0..300_i64 {
@@ -223,14 +234,17 @@ mod tests {
         }
         let latest = *map.keys().max().unwrap();
         let exposure = detect_regime_exposure_cached(&map, latest, -0.10, 0.60);
-        assert!((exposure - 1.00).abs() < 0.001,
-            "牛市应满仓 1.00, 实际: {}", exposure);
+        assert!(
+            (exposure - 1.00).abs() < 0.001,
+            "牛市应满仓 1.00, 实际: {}",
+            exposure
+        );
     }
 
     #[test]
     fn detect_regime_exposure_cached_insufficient_data_defaults_full() {
-        use std::collections::HashMap;
         use chrono::NaiveDate;
+        use std::collections::HashMap;
         let mut map = HashMap::new();
         map.insert(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(), 3500.0);
         let exposure = detect_regime_exposure_cached(
@@ -239,6 +253,10 @@ mod tests {
             -0.10,
             0.60,
         );
-        assert!((exposure - 1.00).abs() < 0.001, "数据不足应默认满仓, 实际: {}", exposure);
+        assert!(
+            (exposure - 1.00).abs() < 0.001,
+            "数据不足应默认满仓, 实际: {}",
+            exposure
+        );
     }
 }

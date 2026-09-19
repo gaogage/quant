@@ -1,14 +1,8 @@
 /// 数据同步路由
-use axum::{
-    extract::State,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, response::IntoResponse, Json};
 use chrono::Duration;
 use serde_json::json;
-use std::{
-    sync::Arc,
-};
+use std::sync::Arc;
 use tracing::info;
 
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
@@ -29,12 +23,9 @@ pub async fn sync_namechange(State(state): State<Arc<AppState>>) -> impl IntoRes
 /// 同步当日停牌股票数据
 #[derive(Debug, serde::Deserialize)]
 
-
 pub struct SyncSuspensionRequest {
     pub trade_date: String, // YYYYMMDD
 }
-
-
 
 pub async fn sync_suspension(
     State(state): State<Arc<AppState>>,
@@ -49,12 +40,9 @@ pub async fn sync_suspension(
 /// POST /api/v1/quant/data/sync/limit
 #[derive(Debug, serde::Deserialize)]
 
-
 pub struct SyncLimitListRequest {
     pub trade_date: String, // YYYYMMDD
 }
-
-
 
 pub async fn sync_limit_list(
     State(state): State<Arc<AppState>>,
@@ -71,15 +59,12 @@ pub async fn sync_limit_list(
 /// 批量回填停牌历史数据（按交易日历逐日同步）
 #[derive(Debug, serde::Deserialize)]
 
-
 pub struct BackfillRequest {
     pub start_date: String, // YYYYMMDD
     pub end_date: String,   // YYYYMMDD
     #[serde(default)]
     pub force_tushare: bool,
 }
-
-
 
 pub async fn sync_suspension_backfill(
     State(state): State<Arc<AppState>>,
@@ -129,7 +114,6 @@ pub async fn sync_suspension_backfill(
 ///
 /// 基于已同步 A 股日线缺失派生历史停牌事实；不补价格。
 
-
 pub async fn derive_suspension_from_daily(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BackfillRequest>,
@@ -154,7 +138,6 @@ pub async fn derive_suspension_from_daily(
 }
 
 /// POST /api/v1/quant/data/sync/limit/backfill
-
 
 pub async fn sync_limit_backfill(
     State(state): State<Arc<AppState>>,
@@ -242,13 +225,10 @@ pub async fn sync_limit_backfill(
 /// 补齐历史数据（2006-2015），参数：start_date、end_date
 #[derive(Debug, serde::Deserialize)]
 
-
 pub struct SyncHistoricalRequest {
     pub start_date: String, // YYYYMMDD
     pub end_date: String,   // YYYYMMDD
 }
-
-
 
 pub async fn sync_historical(
     State(state): State<Arc<AppState>>,
@@ -313,5 +293,3 @@ pub async fn sync_historical(
 
     Json(json!({"code": 0, "data": {"results": results}}))
 }
-
-

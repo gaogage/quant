@@ -61,7 +61,6 @@ impl FuturesPriceChainSyncReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct EquityPledgePressureSyncReq {
     #[serde(default)]
     pub symbols: Vec<String>,
@@ -98,7 +97,6 @@ impl EquityPledgePressureSyncReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct ShareholderStructureSyncReq {
     #[serde(default)]
@@ -139,7 +137,6 @@ impl ShareholderStructureSyncReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct MarginDetailSyncReq {
     #[serde(default)]
     pub symbols: Vec<String>,
@@ -177,7 +174,6 @@ impl MarginDetailSyncReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct ShareholderStructureSyncPlanReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -186,7 +182,6 @@ pub struct ShareholderStructureSyncPlanReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct MarginDetailSyncPlanReq {
     #[serde(default)]
@@ -199,7 +194,6 @@ pub struct MarginDetailSyncPlanReq {
 
 #[derive(Debug, Clone)]
 
-
 struct MarginDetailSyncPlanBatch {
     label: String,
     start_date: NaiveDate,
@@ -210,17 +204,15 @@ struct MarginDetailSyncPlanBatch {
 
 #[derive(Debug, Clone)]
 
-
 pub(crate) struct ShareholderStructureSyncPlanBatch {
-    pub(crate) year:i32,
-    pub(crate) start_date:NaiveDate,
-    pub(crate) end_date:NaiveDate,
-    pub(crate) symbol_count:i64,
-    pub(crate) quarter_count:i64,
+    pub(crate) year: i32,
+    pub(crate) start_date: NaiveDate,
+    pub(crate) end_date: NaiveDate,
+    pub(crate) symbol_count: i64,
+    pub(crate) quarter_count: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct FuturesPriceChainMappingValidateReq {
     #[serde(default)]
@@ -228,7 +220,6 @@ pub struct FuturesPriceChainMappingValidateReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct FuturesPriceChainCoverageAuditReq {
     #[serde(default)]
@@ -239,7 +230,6 @@ pub struct FuturesPriceChainCoverageAuditReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct EquityPledgeCoverageAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -248,7 +238,6 @@ pub struct EquityPledgeCoverageAuditReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct ShareholderStructureCoverageAuditReq {
     #[serde(default)]
@@ -259,7 +248,6 @@ pub struct ShareholderStructureCoverageAuditReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct MarginDetailCoverageAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -268,7 +256,6 @@ pub struct MarginDetailCoverageAuditReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct FuturesPriceChainMappingCandidate {
     pub product_symbol: String,
@@ -288,18 +275,16 @@ pub struct FuturesPriceChainMappingCandidate {
 
 #[derive(Debug, Clone, Serialize)]
 
-
 pub(crate) struct FuturesPriceChainMappingCandidateValidation {
-    pub(crate) product_symbol:String,
-    pub(crate) exposure_type:String,
-    pub(crate) exposure_code:String,
-    pub(crate) passed:bool,
-    pub(crate) errors:Vec<String>,
-    pub(crate) warnings:Vec<String>,
+    pub(crate) product_symbol: String,
+    pub(crate) exposure_type: String,
+    pub(crate) exposure_code: String,
+    pub(crate) passed: bool,
+    pub(crate) errors: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct MainBusinessAvailableAtAuditReq {
     #[serde(default)]
@@ -314,7 +299,6 @@ pub struct MainBusinessAvailableAtAuditReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct MainBusinessReadinessAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -328,27 +312,23 @@ pub struct MainBusinessReadinessAuditReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub(crate) struct MainBusinessPeriodMapping {
-    pub(crate) ts_code:String,
-    pub(crate) end_date:NaiveDate,
-    pub(crate) available_at:Option<NaiveDate>,
-    pub(crate) source:Option<String>,
+    pub(crate) ts_code: String,
+    pub(crate) end_date: NaiveDate,
+    pub(crate) available_at: Option<NaiveDate>,
+    pub(crate) source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 
-
 pub(crate) struct MainBusinessAvailableAtJoinDecision {
-    pub(crate) passed:bool,
-    pub(crate) status:&'static str,
-    pub(crate) readiness:&'static str,
-    pub(crate) missing_mapping_count:usize,
-    pub(crate) pit_violation_count:usize,
-    pub(crate) source_counts:BTreeMap<String, usize>,
+    pub(crate) passed: bool,
+    pub(crate) status: &'static str,
+    pub(crate) readiness: &'static str,
+    pub(crate) missing_mapping_count: usize,
+    pub(crate) pit_violation_count: usize,
+    pub(crate) source_counts: BTreeMap<String, usize>,
 }
-
-
 
 fn main_business_available_at_audit_period_limit(limit: Option<usize>) -> usize {
     limit
@@ -356,15 +336,11 @@ fn main_business_available_at_audit_period_limit(limit: Option<usize>) -> usize 
         .clamp(1, MAIN_BUSINESS_AVAILABLE_AT_AUDIT_MAX_PERIODS)
 }
 
-
-
 fn main_business_readiness_breakdown_limit(limit: Option<usize>) -> usize {
     limit
         .unwrap_or(24)
         .clamp(1, MAIN_BUSINESS_READINESS_BREAKDOWN_MAX_PERIODS)
 }
-
-
 
 fn main_business_business_type(value: Option<&str>) -> &'static str {
     match value.map(str::trim).map(str::to_ascii_uppercase).as_deref() {
@@ -373,8 +349,6 @@ fn main_business_business_type(value: Option<&str>) -> &'static str {
         _ => "P",
     }
 }
-
-
 
 fn main_business_quarter_end_dates_in_range(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
     if start > end {
@@ -394,8 +368,6 @@ fn main_business_quarter_end_dates_in_range(start: NaiveDate, end: NaiveDate) ->
     periods
 }
 
-
-
 pub(crate) fn main_business_attempt_metric(error_message: Option<&str>, prefix: &str) -> i64 {
     let Some(message) = error_message else {
         return 0;
@@ -409,9 +381,10 @@ pub(crate) fn main_business_attempt_metric(error_message: Option<&str>, prefix: 
         .unwrap_or(0)
 }
 
-
-
-pub(crate) fn phase7_share_float_next_chunk_start(start: NaiveDate, granularity: &str) -> NaiveDate {
+pub(crate) fn phase7_share_float_next_chunk_start(
+    start: NaiveDate,
+    granularity: &str,
+) -> NaiveDate {
     let months = match granularity {
         "month" => 1,
         "quarter" => 3,
@@ -422,8 +395,6 @@ pub(crate) fn phase7_share_float_next_chunk_start(start: NaiveDate, granularity:
         months,
     )
 }
-
-
 
 pub(crate) fn phase7_attempt_coverage_readiness(
     source: &str,
@@ -443,8 +414,6 @@ pub(crate) fn phase7_attempt_coverage_readiness(
         }
     }
 }
-
-
 
 fn phase7_tushare_probe_json(
     source: &str,
@@ -503,8 +472,6 @@ fn phase7_tushare_probe_json(
     }
 }
 
-
-
 fn phase7_tushare_source_status(probes: &[Value]) -> &'static str {
     if probes.iter().any(|probe| {
         matches!(
@@ -522,8 +489,6 @@ fn phase7_tushare_source_status(probes: &[Value]) -> &'static str {
     }
 }
 
-
-
 pub(crate) fn phase7_optional_source_next_step(readiness: &str) -> &'static str {
     match readiness {
         "ready_for_feature_factory" => "build_pit_feature_factory",
@@ -535,9 +500,9 @@ pub(crate) fn phase7_optional_source_next_step(readiness: &str) -> &'static str 
     }
 }
 
-
-
-pub(crate) fn phase7_market_level_source_readiness(stats: &Phase7MarketLevelSourceAudit) -> &'static str {
+pub(crate) fn phase7_market_level_source_readiness(
+    stats: &Phase7MarketLevelSourceAudit,
+) -> &'static str {
     if stats.data_rows <= 0 || stats.latest_trade_date.is_none() {
         return "market_level_needs_sync";
     }
@@ -546,8 +511,6 @@ pub(crate) fn phase7_market_level_source_readiness(stats: &Phase7MarketLevelSour
     }
     "market_level_ready_for_regime_feature"
 }
-
-
 
 pub(crate) fn phase7_market_level_zero_row_sync_covers_gap(
     last_sync: Option<&Phase7MarketLevelSyncAudit>,
@@ -570,8 +533,6 @@ pub(crate) fn phase7_market_level_zero_row_sync_covers_gap(
             .unwrap_or(false)
 }
 
-
-
 fn equity_pledge_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
     vec![
         (
@@ -591,8 +552,6 @@ fn equity_pledge_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
     ]
 }
 
-
-
 fn margin_detail_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
     vec![(
         "market_stock_margin_detail",
@@ -603,8 +562,6 @@ fn margin_detail_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
         ],
     )]
 }
-
-
 
 fn decide_shareholder_structure_readiness(
     schema_passed: bool,
@@ -654,8 +611,6 @@ fn decide_shareholder_structure_readiness(
     })
 }
 
-
-
 fn shareholder_structure_quarter_count(start: NaiveDate, end: NaiveDate) -> i64 {
     if start > end {
         return 0;
@@ -675,8 +630,6 @@ fn shareholder_structure_quarter_count(start: NaiveDate, end: NaiveDate) -> i64 
     }
     count
 }
-
-
 
 async fn build_shareholder_structure_sync_plan(
     db: &sqlx::PgPool,
@@ -726,9 +679,9 @@ async fn build_shareholder_structure_sync_plan(
     ))
 }
 
-
-
-pub(crate) async fn build_equity_pledge_pressure_readiness_audit(db: &sqlx::PgPool) -> Result<Value, String> {
+pub(crate) async fn build_equity_pledge_pressure_readiness_audit(
+    db: &sqlx::PgPool,
+) -> Result<Value, String> {
     let mut table_results = Vec::new();
     let mut schema_passed = true;
     let mut stat_rows = 0_i64;
@@ -859,8 +812,6 @@ pub(crate) async fn build_equity_pledge_pressure_readiness_audit(db: &sqlx::PgPo
         ]
     }))
 }
-
-
 
 async fn build_equity_pledge_pressure_coverage_audit(
     db: &sqlx::PgPool,
@@ -1125,8 +1076,6 @@ async fn build_equity_pledge_pressure_coverage_audit(
     }))
 }
 
-
-
 async fn build_margin_detail_readiness_audit(db: &sqlx::PgPool) -> Result<Value, String> {
     let mut table_results = Vec::new();
     let mut schema_passed = true;
@@ -1292,8 +1241,6 @@ async fn build_margin_detail_readiness_audit(db: &sqlx::PgPool) -> Result<Value,
     }))
 }
 
-
-
 fn margin_detail_sync_plan_response(
     start: NaiveDate,
     end: NaiveDate,
@@ -1359,8 +1306,6 @@ fn margin_detail_sync_plan_response(
         ]
     })
 }
-
-
 
 async fn build_margin_detail_sync_plan(
     db: &sqlx::PgPool,
@@ -1440,8 +1385,6 @@ async fn build_margin_detail_sync_plan(
         batches,
     ))
 }
-
-
 
 async fn build_margin_detail_correlation_audit(
     db: &sqlx::PgPool,
@@ -1537,8 +1480,6 @@ async fn build_margin_detail_correlation_audit(
         "gate_note": "linear screen only; even if passed, P3.10 RankIC/group/decay/turnover-capacity remains mandatory"
     }))
 }
-
-
 
 async fn build_margin_detail_coverage_audit(
     db: &sqlx::PgPool,
@@ -1898,8 +1839,6 @@ async fn build_margin_detail_coverage_audit(
     }))
 }
 
-
-
 async fn build_shareholder_structure_readiness_audit(db: &sqlx::PgPool) -> Result<Value, String> {
     let mut table_results = Vec::new();
     let mut schema_passed = true;
@@ -2037,8 +1976,6 @@ async fn build_shareholder_structure_readiness_audit(db: &sqlx::PgPool) -> Resul
         ]
     }))
 }
-
-
 
 async fn build_shareholder_structure_coverage_audit(
     db: &sqlx::PgPool,
@@ -2544,8 +2481,6 @@ async fn build_shareholder_structure_coverage_audit(
     }))
 }
 
-
-
 // 测试辅助函数：被 #[cfg(test)] 的 futures_price_chain_product_symbol_from_daily_ts_code 调用，
 // 非测试编译时无调用方，标记为允许死代码。
 #[allow(dead_code)]
@@ -2564,7 +2499,6 @@ pub(crate) fn futures_price_chain_normalize_raw_product_symbol(raw: &str) -> Opt
     }
     (!product.is_empty()).then_some(product)
 }
-
 
 fn futures_price_chain_mapping_product_summary_sql() -> &'static str {
     r#"
@@ -2590,8 +2524,6 @@ fn futures_price_chain_mapping_product_summary_sql() -> &'static str {
     ORDER BY product_symbol
     "#
 }
-
-
 
 fn futures_price_chain_exclusion_product_summary_sql() -> &'static str {
     r#"
@@ -2619,15 +2551,11 @@ fn futures_price_chain_exclusion_product_summary_sql() -> &'static str {
     "#
 }
 
-
-
 pub(crate) fn parse_futures_price_chain_mapping_date(raw: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(raw, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(raw, "%Y%m%d"))
         .map_err(|_| "date_must_be_yyyy_mm_dd_or_yyyymmdd".to_string())
 }
-
-
 
 fn parse_futures_price_chain_coverage_date(
     value: Option<&str>,
@@ -2641,8 +2569,6 @@ fn parse_futures_price_chain_coverage_date(
         .transpose()
 }
 
-
-
 fn futures_price_chain_product_set_from_audit(audit: &Value, key: &str) -> BTreeSet<String> {
     audit
         .get(key)
@@ -2654,8 +2580,6 @@ fn futures_price_chain_product_set_from_audit(audit: &Value, key: &str) -> BTree
         .filter(|symbol| !symbol.is_empty())
         .collect()
 }
-
-
 
 fn futures_price_chain_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
     vec![
@@ -2710,9 +2634,9 @@ fn futures_price_chain_expected_schema() -> Vec<(&'static str, Vec<&'static str>
     ]
 }
 
-
-
-pub(crate) async fn build_futures_price_chain_readiness_audit(db: &sqlx::PgPool) -> Result<Value, String> {
+pub(crate) async fn build_futures_price_chain_readiness_audit(
+    db: &sqlx::PgPool,
+) -> Result<Value, String> {
     let mut table_results = Vec::new();
     let mut schema_passed = true;
     let mut raw_rows = 0_i64;
@@ -2803,9 +2727,9 @@ pub(crate) async fn build_futures_price_chain_readiness_audit(db: &sqlx::PgPool)
     }))
 }
 
-
-
-pub(crate) async fn build_futures_price_chain_mapping_audit(db: &sqlx::PgPool) -> Result<Value, String> {
+pub(crate) async fn build_futures_price_chain_mapping_audit(
+    db: &sqlx::PgPool,
+) -> Result<Value, String> {
     let readiness = build_futures_price_chain_readiness_audit(db).await?;
     let schema_passed = readiness
         .get("schema_passed")
@@ -3086,8 +3010,6 @@ pub(crate) async fn build_futures_price_chain_mapping_audit(db: &sqlx::PgPool) -
     }))
 }
 
-
-
 async fn build_futures_price_chain_coverage_audit(
     db: &sqlx::PgPool,
     req: FuturesPriceChainCoverageAuditReq,
@@ -3318,8 +3240,6 @@ async fn build_futures_price_chain_coverage_audit(
     }))
 }
 
-
-
 async fn build_futures_price_chain_mapping_template(db: &sqlx::PgPool) -> Result<Value, String> {
     let mapping_audit = build_futures_price_chain_mapping_audit(db).await?;
     let raw_products = mapping_audit
@@ -3450,8 +3370,6 @@ async fn build_futures_price_chain_mapping_template(db: &sqlx::PgPool) -> Result
     }))
 }
 
-
-
 async fn validate_futures_price_chain_mapping_candidates(
     db: &sqlx::PgPool,
     req: FuturesPriceChainMappingValidateReq,
@@ -3530,8 +3448,6 @@ async fn validate_futures_price_chain_mapping_candidates(
         ],
     }))
 }
-
-
 
 pub(crate) fn apply_p319_futures_price_chain_readiness(admission: &mut Value, readiness: &Value) {
     let Some(decision) = readiness.get("decision") else {
@@ -3681,8 +3597,6 @@ pub(crate) fn apply_p319_futures_price_chain_readiness(admission: &mut Value, re
     }
 }
 
-
-
 pub(crate) fn phase7_block_trade_readiness(stats: &Phase7BlockTradeSourceAudit) -> &'static str {
     if stats.data_rows <= 0 || stats.latest_trade_date.is_none() {
         return "schema_and_client_ready_needs_bounded_sync";
@@ -3698,8 +3612,6 @@ pub(crate) fn phase7_block_trade_readiness(stats: &Phase7BlockTradeSourceAudit) 
     "bounded_sample_ready_needs_history_coverage"
 }
 
-
-
 pub(crate) fn equity_pledge_readiness_label(admission_decision: &str) -> &'static str {
     match admission_decision {
         "apply_schema_before_sync" => "schema_contract_ready_schema_not_applied",
@@ -3709,8 +3621,6 @@ pub(crate) fn equity_pledge_readiness_label(admission_decision: &str) -> &'stati
         _ => "schema_contract_ready_review_required",
     }
 }
-
-
 
 pub(crate) fn phase7_industry_membership_readiness(
     stats: &Phase7IndustryMembershipSourceAudit,
@@ -3736,8 +3646,6 @@ pub(crate) fn phase7_industry_membership_readiness(
     "industry_membership_raw_source_ready_for_coverage_audit"
 }
 
-
-
 pub async fn phase7_feasibility_audit(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match build_phase7_feasibility_audit(&state).await {
         Ok(data) => Json(json!({"code": 0, "data": data})),
@@ -3747,13 +3655,11 @@ pub async fn phase7_feasibility_audit(State(state): State<Arc<AppState>>) -> imp
 
 /// GET /api/v1/quant/data/futures-price-chain/schema-contract
 
-
 pub async fn futures_price_chain_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_futures_price_chain_schema_contract()}))
 }
 
 /// GET /api/v1/quant/data/equity-pledge-pressure/schema-contract
-
 
 pub async fn equity_pledge_pressure_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_equity_pledge_schema_contract()}))
@@ -3761,20 +3667,17 @@ pub async fn equity_pledge_pressure_schema_contract() -> impl IntoResponse {
 
 /// GET /api/v1/quant/data/margin-detail/schema-contract
 
-
 pub async fn margin_detail_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_margin_detail_schema_contract()}))
 }
 
 /// GET /api/v1/quant/data/shareholder-structure/schema-contract
 
-
 pub async fn shareholder_structure_schema_contract() -> impl IntoResponse {
     Json(json!({"code": 0, "data": phase7_shareholder_structure_schema_contract()}))
 }
 
 /// GET /api/v1/quant/data/exchange-announcement-order-capacity/schema-contract
-
 
 pub async fn futures_price_chain_readiness_audit(
     State(state): State<Arc<AppState>>,
@@ -3787,7 +3690,6 @@ pub async fn futures_price_chain_readiness_audit(
 
 /// GET /api/v1/quant/data/futures-price-chain/mapping-audit
 
-
 pub async fn futures_price_chain_mapping_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3798,7 +3700,6 @@ pub async fn futures_price_chain_mapping_audit(
 }
 
 /// GET /api/v1/quant/data/futures-price-chain/coverage-audit
-
 
 pub async fn futures_price_chain_coverage_audit(
     State(state): State<Arc<AppState>>,
@@ -3812,7 +3713,6 @@ pub async fn futures_price_chain_coverage_audit(
 
 /// GET /api/v1/quant/data/futures-price-chain/mapping-template
 
-
 pub async fn futures_price_chain_mapping_template(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3823,7 +3723,6 @@ pub async fn futures_price_chain_mapping_template(
 }
 
 /// POST /api/v1/quant/data/futures-price-chain/mapping-validate
-
 
 pub async fn futures_price_chain_mapping_validate(
     State(state): State<Arc<AppState>>,
@@ -3836,7 +3735,6 @@ pub async fn futures_price_chain_mapping_validate(
 }
 
 /// POST /api/v1/quant/data/futures-price-chain/sync
-
 
 pub async fn futures_price_chain_sync(
     State(state): State<Arc<AppState>>,
@@ -3898,7 +3796,6 @@ pub async fn futures_price_chain_sync(
 
 /// GET /api/v1/quant/data/shareholder-structure/readiness-audit
 
-
 pub async fn shareholder_structure_readiness_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3910,7 +3807,6 @@ pub async fn shareholder_structure_readiness_audit(
 
 /// GET /api/v1/quant/data/margin-detail/readiness-audit
 
-
 pub async fn margin_detail_readiness_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -3921,7 +3817,6 @@ pub async fn margin_detail_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/margin-detail/coverage-audit
-
 
 pub async fn margin_detail_coverage_audit(
     State(state): State<Arc<AppState>>,
@@ -3935,7 +3830,6 @@ pub async fn margin_detail_coverage_audit(
 
 /// GET /api/v1/quant/data/margin-detail/sync-plan
 
-
 pub async fn margin_detail_sync_plan(
     State(state): State<Arc<AppState>>,
     Query(req): Query<MarginDetailSyncPlanReq>,
@@ -3947,7 +3841,6 @@ pub async fn margin_detail_sync_plan(
 }
 
 /// POST /api/v1/quant/data/margin-detail/sync
-
 
 pub async fn margin_detail_sync(
     State(state): State<Arc<AppState>>,
@@ -4009,7 +3902,6 @@ pub async fn margin_detail_sync(
 
 /// GET /api/v1/quant/data/shareholder-structure/coverage-audit
 
-
 pub async fn shareholder_structure_coverage_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ShareholderStructureCoverageAuditReq>,
@@ -4022,7 +3914,6 @@ pub async fn shareholder_structure_coverage_audit(
 
 /// GET /api/v1/quant/data/shareholder-structure/sync-plan
 
-
 pub async fn shareholder_structure_sync_plan(
     State(state): State<Arc<AppState>>,
     Query(req): Query<ShareholderStructureSyncPlanReq>,
@@ -4034,7 +3925,6 @@ pub async fn shareholder_structure_sync_plan(
 }
 
 /// POST /api/v1/quant/data/shareholder-structure/sync
-
 
 pub async fn shareholder_structure_sync(
     State(state): State<Arc<AppState>>,
@@ -4096,7 +3986,6 @@ pub async fn shareholder_structure_sync(
 
 /// GET /api/v1/quant/data/equity-pledge-pressure/readiness-audit
 
-
 pub async fn equity_pledge_pressure_readiness_audit(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -4107,7 +3996,6 @@ pub async fn equity_pledge_pressure_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/equity-pledge-pressure/coverage-audit
-
 
 pub async fn equity_pledge_pressure_coverage_audit(
     State(state): State<Arc<AppState>>,
@@ -4120,7 +4008,6 @@ pub async fn equity_pledge_pressure_coverage_audit(
 }
 
 /// POST /api/v1/quant/data/equity-pledge-pressure/sync
-
 
 pub async fn equity_pledge_pressure_sync(
     State(state): State<Arc<AppState>>,
@@ -4182,7 +4069,6 @@ pub async fn equity_pledge_pressure_sync(
 
 /// POST /api/v1/quant/data/tushare/permission-smoke
 
-
 pub async fn tushare_permission_smoke(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TusharePermissionSmokeReq>,
@@ -4194,7 +4080,6 @@ pub async fn tushare_permission_smoke(
 }
 
 /// POST /api/v1/quant/data/main-business/available-at-audit
-
 
 pub async fn main_business_available_at_audit(
     State(state): State<Arc<AppState>>,
@@ -4208,7 +4093,6 @@ pub async fn main_business_available_at_audit(
 
 /// GET /api/v1/quant/data/main-business/readiness-audit
 
-
 pub async fn main_business_readiness_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<MainBusinessReadinessAuditReq>,
@@ -4220,7 +4104,6 @@ pub async fn main_business_readiness_audit(
 }
 
 /// GET /api/v1/quant/data/broad-analyst-revision/audit
-
 
 pub async fn phase7_optional_source_coverage_sync(
     State(state): State<Arc<AppState>>,
@@ -4234,7 +4117,6 @@ pub async fn phase7_optional_source_coverage_sync(
 
 /// POST /api/v1/quant/data/phase7-optional-source-coverage-batches
 
-
 pub async fn phase7_optional_source_coverage_batches(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7OptionalSourceCoverageBatchReq>,
@@ -4246,7 +4128,6 @@ pub async fn phase7_optional_source_coverage_batches(
 }
 
 /// POST /api/v1/quant/data/phase7-coverage-expansion-runner
-
 
 pub async fn phase7_coverage_expansion_runner(
     State(state): State<Arc<AppState>>,
@@ -4260,7 +4141,6 @@ pub async fn phase7_coverage_expansion_runner(
 
 /// POST /api/v1/quant/data/phase7-share-float-coverage-batches
 
-
 pub async fn phase7_share_float_coverage_batches(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7ShareFloatCoverageReq>,
@@ -4272,7 +4152,6 @@ pub async fn phase7_share_float_coverage_batches(
 }
 
 /// POST /api/v1/quant/data/phase7-share-float-readiness-audit
-
 
 pub async fn phase7_share_float_readiness_audit(
     State(state): State<Arc<AppState>>,
@@ -4286,7 +4165,6 @@ pub async fn phase7_share_float_readiness_audit(
 
 /// GET /api/v1/quant/data/phase7-industry-membership-coverage-audit
 
-
 pub async fn phase7_industry_membership_coverage_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<Phase7IndustryMembershipCoverageAuditReq>,
@@ -4296,8 +4174,6 @@ pub async fn phase7_industry_membership_coverage_audit(
         Err(error) => Json(json!({"code": 1, "message": error})),
     }
 }
-
-
 
 async fn build_tushare_permission_smoke(
     state: &AppState,
@@ -4358,8 +4234,6 @@ async fn build_tushare_permission_smoke(
         ],
     }))
 }
-
-
 
 async fn build_main_business_available_at_audit(
     state: &AppState,
@@ -4524,8 +4398,6 @@ async fn build_main_business_available_at_audit(
         ]
     }))
 }
-
-
 
 async fn build_main_business_readiness_audit(
     state: &AppState,
@@ -4781,8 +4653,6 @@ async fn build_main_business_readiness_audit(
     }))
 }
 
-
-
 fn main_business_period_key_from_row(row: &Value) -> Option<(String, NaiveDate)> {
     let ts_code = row.get("ts_code")?.as_str()?.trim().to_ascii_uppercase();
     if ts_code.is_empty() {
@@ -4792,8 +4662,6 @@ fn main_business_period_key_from_row(row: &Value) -> Option<(String, NaiveDate)>
     Some((ts_code, end_date))
 }
 
-
-
 fn main_business_yyyymmdd_field(row: &Value, field: &str) -> Option<NaiveDate> {
     let raw = match row.get(field)? {
         Value::String(value) => value.trim().to_string(),
@@ -4802,8 +4670,6 @@ fn main_business_yyyymmdd_field(row: &Value, field: &str) -> Option<NaiveDate> {
     };
     NaiveDate::parse_from_str(&raw, "%Y%m%d").ok()
 }
-
-
 
 async fn load_main_business_available_at_mappings(
     db: &sqlx::PgPool,
@@ -4897,8 +4763,6 @@ async fn load_main_business_available_at_mappings(
     Ok(mappings.into_values().collect())
 }
 
-
-
 fn main_business_period_mapping_json(mapping: &MainBusinessPeriodMapping) -> Value {
     json!({
         "ts_code": mapping.ts_code,
@@ -4907,8 +4771,6 @@ fn main_business_period_mapping_json(mapping: &MainBusinessPeriodMapping) -> Val
         "source": mapping.source,
     })
 }
-
-
 
 pub(crate) async fn phase7_completed_attempts_by_source_for_window(
     state: &AppState,
@@ -4948,8 +4810,6 @@ pub(crate) async fn phase7_completed_attempts_by_source_for_window(
     Ok(attempts)
 }
 
-
-
 fn phase7_first_tushare_string_field(
     response: &quant_data::model::tushare_dto::TushareResponse<Vec<serde_json::Value>>,
     field: &str,
@@ -4966,8 +4826,6 @@ fn phase7_first_tushare_string_field(
                 .filter(|value| !value.is_empty())
         })
 }
-
-
 
 async fn run_tushare_permission_source_smoke(
     state: &AppState,
@@ -5426,6 +5284,3 @@ async fn run_tushare_permission_source_smoke(
         }),
     }
 }
-
-
-

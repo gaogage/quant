@@ -2533,7 +2533,8 @@ pub(crate) fn professional_execution_pit_excess_return_recovery_seed_trials() ->
     seeds
 }
 
-pub(crate) fn professional_execution_pit_nonlinear_alpha_regime_rebuild_seed_trials() -> Vec<Value> {
+pub(crate) fn professional_execution_pit_nonlinear_alpha_regime_rebuild_seed_trials() -> Vec<Value>
+{
     let mut seeds = Vec::new();
 
     if let Some(high_sharpe_anchor) = phase7_high_sharpe_boundary_base_seed() {
@@ -3478,7 +3479,8 @@ pub(crate) fn professional_execution_broad_financial_feature_discovery_seed_tria
     seeds
 }
 
-pub(crate) fn professional_execution_broad_financial_feature_stratified_discovery_seed_trials() -> Vec<Value> {
+pub(crate) fn professional_execution_broad_financial_feature_stratified_discovery_seed_trials(
+) -> Vec<Value> {
     let priority_profiles = [
         "broad_ff_financial_quality_ascending_top100",
         "broad_ff_growth_recovery_descending_top100",

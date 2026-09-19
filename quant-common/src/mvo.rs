@@ -798,7 +798,7 @@ pub fn ledoit_wolf_shrinkage(returns: &Array2<f64>) -> Array2<f64> {
     let rho = (n_assets as f64 / n_periods as f64).clamp(0.0, 1.0);
 
     // Shrunk covariance
-    
+
     (1.0 - rho) * &sample_cov + rho * &target
 }
 
@@ -1776,7 +1776,11 @@ mod tests {
     #[test]
     fn ledoit_wolf_full_shrinkage_when_assets_ge_periods() {
         // N(3) >= T(3) → rho=1 → 纯对角目标
-        let returns = arr2(&[[0.01, 0.02, 0.005], [-0.01, 0.01, 0.003], [0.02, -0.01, 0.004]]);
+        let returns = arr2(&[
+            [0.01, 0.02, 0.005],
+            [-0.01, 0.01, 0.003],
+            [0.02, -0.01, 0.004],
+        ]);
         let cov = ledoit_wolf_shrinkage(&returns);
         assert!((cov[(0, 1)]).abs() < 1e-12, "非对角应为 0");
         assert!((cov[(1, 2)]).abs() < 1e-12, "非对角应为 0");
@@ -1936,11 +1940,7 @@ mod tests {
     #[test]
     fn tournament_select_picks_best_of_sampled() {
         let mut rng = StdRng::seed_from_u64(5);
-        let fitness = vec![
-            (vec![1.0], 0.1),
-            (vec![2.0], 0.9),
-            (vec![3.0], 0.5),
-        ];
+        let fitness = vec![(vec![1.0], 0.1), (vec![2.0], 0.9), (vec![3.0], 0.5)];
         // 锦标赛可重复抽样：选中者必为抽样内最优；20 次内几乎必然
         // 抽到过 0.9（全不中概率 (2/3)^60 ≈ 2e-11）
         let mut saw_best = false;
@@ -2061,7 +2061,12 @@ mod tests {
         ];
         for (i, r) in cases.iter().enumerate() {
             let r = r.as_ref().unwrap_or_else(|| panic!("case {} 应有解", i));
-            assert!(r.weights[0] >= min_stock - 0.02, "case {} w0={}", i, r.weights[0]);
+            assert!(
+                r.weights[0] >= min_stock - 0.02,
+                "case {} w0={}",
+                i,
+                r.weights[0]
+            );
             assert!(r.weights.iter().all(|&x| x >= -1e-9));
             assert!(r.weights.iter().all(|&x| x <= MAX_SINGLE + 1e-6));
             assert!((r.weights.sum() - 1.0).abs() < 0.02);
@@ -2086,7 +2091,9 @@ mod tests {
         let nl = mvo_allocate_with_custom_mu_nl(&data, &custom_mu, 0.20, 0.02, 0.10);
         let rmt = mvo_allocate_with_custom_mu_rmt(&data, &custom_mu, 0.20, 0.02, 0.10);
         for (i, r) in [&lw, &nl, &rmt].iter().enumerate() {
-            let r = r.as_ref().unwrap_or_else(|| panic!("cov method {} 应有解", i));
+            let r = r
+                .as_ref()
+                .unwrap_or_else(|| panic!("cov method {} 应有解", i));
             assert!(r.weights[0] >= 0.18, "method {} w0={}", i, r.weights[0]);
             assert!((r.weights.sum() - 1.0).abs() < 0.02);
         }
@@ -2097,15 +2104,9 @@ mod tests {
             (CovMethod::Nonlinear, &nl),
             (CovMethod::RMT, &rmt),
         ] {
-            let via_router = mvo_allocate_with_cov_method(
-                &data,
-                &custom_mu,
-                0.20,
-                0.02,
-                0.10,
-                method,
-            )
-            .unwrap_or_else(|| panic!("router {:?} 应有解", method));
+            let via_router =
+                mvo_allocate_with_cov_method(&data, &custom_mu, 0.20, 0.02, 0.10, method)
+                    .unwrap_or_else(|| panic!("router {:?} 应有解", method));
             let d = direct.as_ref().unwrap();
             for i in 0..3 {
                 assert!(
@@ -2165,9 +2166,16 @@ mod tests {
         let ga_sharpe = mvo_allocate_ga_maxsharpe_with_max_single(&data, &custom_mu, 0.20, 0.60);
         let ga_nl = mvo_allocate_ga_nl(&data, &custom_mu, 0.20, 0.02, 0.10);
         for (i, r) in [&ga, &ga_ms, &ga_sharpe, &ga_nl].iter().enumerate() {
-            let r = r.as_ref().unwrap_or_else(|| panic!("ga variant {} 应有解", i));
+            let r = r
+                .as_ref()
+                .unwrap_or_else(|| panic!("ga variant {} 应有解", i));
             assert!((r.weights.sum() - 1.0).abs() < 1e-6, "variant {}", i);
-            assert!(r.weights[0] >= 0.20 - 1e-6, "variant {} w0={}", i, r.weights[0]);
+            assert!(
+                r.weights[0] >= 0.20 - 1e-6,
+                "variant {} w0={}",
+                i,
+                r.weights[0]
+            );
         }
         // ga_ms 的 max_single=0.60 应被遵守
         let w = ga_ms.as_ref().unwrap();

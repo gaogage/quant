@@ -1,15 +1,9 @@
 /// 数据同步路由
-use axum::{
-    extract::State,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Duration, NaiveDate};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{
-    sync::Arc,
-};
+use std::sync::Arc;
 use tracing::{info, warn};
 
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
@@ -23,8 +17,6 @@ pub struct SyncStockBasicReq {
     #[serde(default)]
     pub data_version_id: Option<String>,
 }
-
-
 
 pub async fn sync_stock_basic(
     State(state): State<Arc<AppState>>,
@@ -45,7 +37,6 @@ pub async fn sync_stock_basic(
 /// POST /api/v1/quant/data/sync/daily
 #[derive(Debug, Deserialize)]
 
-
 pub struct SyncDailyReq {
     pub symbols: Vec<String>,
     pub start_date: String,
@@ -53,8 +44,6 @@ pub struct SyncDailyReq {
     #[serde(default)]
     pub data_version_id: Option<String>,
 }
-
-
 
 pub async fn sync_daily(
     State(state): State<Arc<AppState>>,
@@ -84,7 +73,6 @@ pub async fn sync_daily(
 /// POST /api/v1/quant/data/sync/adj-factor
 #[derive(Debug, Deserialize)]
 
-
 pub struct SyncAdjFactorReq {
     pub symbols: Vec<String>,
     pub start_date: String,
@@ -92,8 +80,6 @@ pub struct SyncAdjFactorReq {
     #[serde(default)]
     pub data_version_id: Option<String>,
 }
-
-
 
 pub async fn sync_adj_factor(
     State(state): State<Arc<AppState>>,
@@ -121,7 +107,6 @@ pub async fn sync_adj_factor(
 }
 
 /// POST /api/v1/quant/data/sync/fund-adj — 同步 ETF/基金复权因子（Tushare fund_adj）
-
 
 pub async fn sync_fund_adj(
     State(state): State<Arc<AppState>>,
@@ -151,7 +136,6 @@ pub async fn sync_fund_adj(
 /// POST /api/v1/quant/data/sync/adj-factor/background
 ///
 /// 大批量后台同步复权因子，立即返回 task_id。
-
 
 pub async fn sync_adj_factor_background(
     State(state): State<Arc<AppState>>,
@@ -220,7 +204,6 @@ pub async fn sync_adj_factor_background(
 /// 用于事后修复如 7/20-7/21 EOD 卡死导致的复权因子缺失,避免 adj 视图退化为 raw 价。
 #[derive(Debug, Deserialize)]
 
-
 pub struct BackfillAdjFactorReq {
     /// 目标日期 YYYYMMDD(必填)
     pub date: String,
@@ -228,8 +211,6 @@ pub struct BackfillAdjFactorReq {
     #[serde(default)]
     pub days: Option<i64>,
 }
-
-
 
 pub async fn sync_adj_factor_backfill(
     State(state): State<Arc<AppState>>,
@@ -266,7 +247,11 @@ pub async fn sync_adj_factor_backfill(
         .fetch_one(&state.db)
         .await
         .unwrap_or(0);
-        let pct = if bar_cnt > 0 { adj_cnt * 100 / bar_cnt } else { 100 };
+        let pct = if bar_cnt > 0 {
+            adj_cnt * 100 / bar_cnt
+        } else {
+            100
+        };
         processed.push(json!({
             "date": d.format("%Y-%m-%d").to_string(),
             "bar_count": bar_cnt,
@@ -274,12 +259,13 @@ pub async fn sync_adj_factor_backfill(
             "coverage_pct": pct,
         }));
     }
-    Json(json!({"code": 0, "data": {"task_id": dv_id, "status": "completed", "processed": processed}}))
+    Json(
+        json!({"code": 0, "data": {"task_id": dv_id, "status": "completed", "processed": processed}}),
+    )
 }
 
 /// POST /api/v1/quant/data/sync/index-daily
 #[derive(Debug, Deserialize)]
-
 
 pub struct SyncIndexDailyReq {
     pub index_codes: Vec<String>,
@@ -291,13 +277,10 @@ pub struct SyncIndexDailyReq {
 
 #[derive(Debug, Deserialize)]
 
-
 pub struct SyncHsgtRequest {
     start_date: String,
     end_date: String,
 }
-
-
 
 pub async fn sync_moneyflow_hsgt(
     State(state): State<Arc<AppState>>,
@@ -315,13 +298,10 @@ pub async fn sync_moneyflow_hsgt(
 
 #[derive(Debug, Deserialize)]
 
-
 pub struct SyncMarginRequest {
     start_date: String,
     end_date: String,
 }
-
-
 
 pub async fn sync_margin(
     State(state): State<Arc<AppState>>,
@@ -337,15 +317,12 @@ pub async fn sync_margin(
 
 #[derive(Debug, Deserialize)]
 
-
 pub struct SyncFundDailyReq {
     pub symbols: Vec<String>,
     pub start_date: String,
     pub end_date: String,
     pub data_version_id: Option<String>,
 }
-
-
 
 pub async fn sync_fund_daily(
     State(state): State<Arc<AppState>>,
@@ -369,8 +346,6 @@ pub async fn sync_fund_daily(
         Err(e) => Json(json!({"code": 1, "message": e.to_string()})),
     }
 }
-
-
 
 pub async fn sync_index_daily(
     State(state): State<Arc<AppState>>,
@@ -399,7 +374,6 @@ pub async fn sync_index_daily(
 
 /// POST /api/v1/quant/data/sync/trade-cal
 
-
 pub async fn sync_trade_cal(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     info!("同步交易日历");
     let mut count = 0usize;
@@ -415,14 +389,11 @@ pub async fn sync_trade_cal(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// POST /api/v1/quant/data/quality-check
 #[derive(Debug, Deserialize)]
 
-
 pub struct QualityCheckReq {
     pub symbols: Vec<String>,
     pub start_date: String,
     pub end_date: String,
 }
-
-
 
 pub async fn quality_check(
     State(state): State<Arc<AppState>>,
@@ -443,7 +414,6 @@ pub async fn quality_check(
 }
 
 /// GET /api/v1/quant/data/stats
-
 
 pub async fn data_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let stock_count = quant_data::repository::count_stocks(&state.db)
@@ -472,7 +442,6 @@ pub async fn data_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 /// GET /api/v1/quant/data/phase7-feasibility-audit
-
 
 pub async fn sync_daily_background(
     State(state): State<Arc<AppState>>,
@@ -541,7 +510,6 @@ pub async fn sync_daily_background(
 /// GET /api/v1/quant/data/sync/tasks/:task_id
 ///
 /// 查询数据同步任务状态（同步/后台均适用）。
-
 
 pub async fn sync_fund_basic(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match quant_data::sync::sync_fund_basic(&state.db, &state.tushare).await {
@@ -629,7 +597,11 @@ pub(crate) async fn backfill_adj_factor_for_date(db: &sqlx::PgPool, date: NaiveD
         .fetch_one(db)
         .await
         .unwrap_or(0);
-        let pct = if bar_cnt > 0 { adj_cnt_after * 100 / bar_cnt } else { 100 };
+        let pct = if bar_cnt > 0 {
+            adj_cnt_after * 100 / bar_cnt
+        } else {
+            100
+        };
         if filled > 0 {
             info!(
                 "[sync] 复权因子前向填充: {} 补 {} 只 (adj {}→{} 覆盖率 {}%)",
@@ -651,8 +623,11 @@ pub(crate) async fn backfill_adj_factor_for_date(db: &sqlx::PgPool, date: NaiveD
             date_str,
             bar_cnt,
             adj_cnt,
-            if bar_cnt > 0 { adj_cnt * 100 / bar_cnt } else { 100 }
+            if bar_cnt > 0 {
+                adj_cnt * 100 / bar_cnt
+            } else {
+                100
+            }
         );
     }
 }
-

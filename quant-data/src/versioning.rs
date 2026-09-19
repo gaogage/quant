@@ -174,15 +174,8 @@ impl<'a> DataVersionRegistry for PgDataVersionRegistry<'a> {
     ) -> Result<DataVersionId, DataVersionRegistryError> {
         let dv_id = format!("dv-eod-{}", data_date.format("%Y%m%d"));
         let name = description.unwrap_or(source);
-        self.create_version(
-            &dv_id,
-            name,
-            source,
-            &[],
-            data_date,
-            data_date,
-        )
-        .await?;
+        self.create_version(&dv_id, name, source, &[], data_date, data_date)
+            .await?;
         Ok(DataVersionId::new(dv_id))
     }
 
@@ -194,12 +187,11 @@ impl<'a> DataVersionRegistry for PgDataVersionRegistry<'a> {
         &self,
         version_id: &DataVersionId,
     ) -> Result<DataVersionState, DataVersionRegistryError> {
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT 1 FROM data_version WHERE data_version_id = $1",
-        )
-        .bind(version_id.as_str())
-        .fetch_optional(self.pool)
-        .await?;
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM data_version WHERE data_version_id = $1")
+                .bind(version_id.as_str())
+                .fetch_optional(self.pool)
+                .await?;
         row.map(|_| DataVersionState::Active)
             .ok_or_else(|| DataVersionRegistryError::NotFound(version_id.as_str().to_string()))
     }
@@ -207,13 +199,9 @@ impl<'a> DataVersionRegistry for PgDataVersionRegistry<'a> {
     /// 标记版本废弃（数据发现问题后阻断新引用）。
     ///
     /// 当前表无 state 列，此方法为预留骨架（Step 5 加列后实现）。
-    async fn deprecate(
-        &self,
-        _version_id: &DataVersionId,
-    ) -> Result<(), DataVersionRegistryError> {
+    async fn deprecate(&self, _version_id: &DataVersionId) -> Result<(), DataVersionRegistryError> {
         // TODO(R11 后续): data_version 表加 state 列后实现 UPDATE。
         // 当前 noop，保留 trait 契约完整性。
         Ok(())
     }
 }
-

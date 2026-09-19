@@ -15,7 +15,7 @@ use chrono::NaiveDate;
 use sqlx::PgPool;
 use tracing::{info, warn};
 
-use crate::routes::shared::{NavSnapshot, send_quality_alert, upsert_nav_snapshot};
+use crate::routes::shared::{send_quality_alert, upsert_nav_snapshot, NavSnapshot};
 
 /// T+1 补盯市后的快照重算(不推钉钉)。
 ///
@@ -68,8 +68,7 @@ pub async fn refresh_eod_snapshot(db: &PgPool, date: NaiveDate) {
         .await
         .ok()
         .flatten();
-        let (position_count, market_value) =
-            pos.unwrap_or((0, rust_decimal::Decimal::ZERO));
+        let (position_count, market_value) = pos.unwrap_or((0, rust_decimal::Decimal::ZERO));
 
         let mut snap = NavSnapshot::new(account_id.clone(), date, *nav);
         snap.cash = *cash;
@@ -82,10 +81,17 @@ pub async fn refresh_eod_snapshot(db: &PgPool, date: NaiveDate) {
             snap.cumulative_return = Some((*nav - *init_cap) / *init_cap);
         }
         if let Err(e) = upsert_nav_snapshot(db, &snap).await {
-            warn!("[report] T+1 补盯市 snapshot 重算失败 {} {}: {}", account_id, date, e);
+            warn!(
+                "[report] T+1 补盯市 snapshot 重算失败 {} {}: {}",
+                account_id, date, e
+            );
         }
     }
-    info!("[report] T+1 补盯市 snapshot 重算完成({} 账户, {})", accounts.len(), date);
+    info!(
+        "[report] T+1 补盯市 snapshot 重算完成({} 账户, {})",
+        accounts.len(),
+        date
+    );
 }
 
 /// EOD 日报(全部 active 账户):偏离对比 + 快照写入 + 钉钉推送。
@@ -134,9 +140,8 @@ async fn report_for_accounts(
             .await
             .map_err(|e| format!("account query: {}", e))?
         }
-        None => {
-            sqlx::query_as::<_, (String, String, Option<String>, f64, f64, f64, f64, i32)>(
-                "SELECT paper_account_id, name, dingtalk_webhook_url,
+        None => sqlx::query_as::<_, (String, String, Option<String>, f64, f64, f64, f64, i32)>(
+            "SELECT paper_account_id, name, dingtalk_webhook_url,
                         COALESCE(current_nav, initial_capital)::double precision,
                         initial_capital::double precision,
                         COALESCE(peak_nav, initial_capital)::double precision,
@@ -144,11 +149,10 @@ async fn report_for_accounts(
                         COALESCE(total_trades, 0)
                  FROM paper_account
                  WHERE status = 'active' AND account_type = 'simulated'",
-            )
-            .fetch_all(db)
-            .await
-            .map_err(|e| format!("account query: {}", e))?
-        }
+        )
+        .fetch_all(db)
+        .await
+        .map_err(|e| format!("account query: {}", e))?,
     };
 
     for (account_id, name, webhook, nav, init_cap, peak_nav, max_dd, total_trades) in &accounts {
@@ -209,7 +213,8 @@ async fn report_for_accounts(
         .await
         .ok()
         .flatten();
-        let (position_count, market_value, cash) = pos_row.unwrap_or((0, rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO));
+        let (position_count, market_value, cash) =
+            pos_row.unwrap_or((0, rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO));
 
         // 2. 当日成交汇总(买/卖笔数+金额)。paper_order 无 price 列，成交金额用 target_value
         // (下单时已按 target_price 算好的目标金额，比 quantity*target_price 更贴近实际口径)。
@@ -285,8 +290,9 @@ async fn report_for_accounts(
                     let composite_ready = composite_has_today.map(|(c,)| c > 0).unwrap_or(false);
                     // composite 缺当日数据时跳过偏离计算(A 股回退曲线同源于日线数据,也会缺当日,
                     // 强行回退仍会窗口错位误报)。backtest_deviation 保持 None,日报显示"数据未就绪"。
-                    let composite_row: Option<(rust_decimal::Decimal, rust_decimal::Decimal)> = if composite_ready {
-                        sqlx::query_as(
+                    let composite_row: Option<(rust_decimal::Decimal, rust_decimal::Decimal)> =
+                        if composite_ready {
+                            sqlx::query_as(
                             "SELECT
                                 (SELECT portfolio_value FROM backtest_composite_equity_curve WHERE strategy_id=$1 AND trade_date >= $2 ORDER BY trade_date ASC LIMIT 1),
                                 (SELECT portfolio_value FROM backtest_composite_equity_curve WHERE strategy_id=$1 AND trade_date <= $3 ORDER BY trade_date DESC LIMIT 1)",
@@ -298,9 +304,9 @@ async fn report_for_accounts(
                     .await
                     .ok()
                     .flatten()
-                    } else {
-                        None
-                    };
+                        } else {
+                            None
+                        };
                     let bt_row = composite_row;
 
                     if let Some((bt_start, bt_end)) = bt_row {
@@ -368,7 +374,9 @@ async fn report_for_accounts(
         };
 
         // 当日交易明细摘要（买卖前 5 笔，超 10 笔折叠）
-        let trades = fetch_today_trades(db, account_id, date).await.unwrap_or_default();
+        let trades = fetch_today_trades(db, account_id, date)
+            .await
+            .unwrap_or_default();
         let trade_detail = if trades.is_empty() {
             String::new()
         } else {
@@ -376,13 +384,29 @@ async fn report_for_accounts(
             let sells: Vec<&TradeRow> = trades.iter().filter(|t| t.side == "sell").collect();
             let mut detail = String::new();
             if !buys.is_empty() {
-                let shown: Vec<String> = buys.iter().take(5).map(|t| format!("{} {}", t.symbol, t.name)).collect();
-                let suffix = if buys.len() > 5 { format!(" 等 {} 笔", buys.len()) } else { String::new() };
+                let shown: Vec<String> = buys
+                    .iter()
+                    .take(5)
+                    .map(|t| format!("{} {}", t.symbol, t.name))
+                    .collect();
+                let suffix = if buys.len() > 5 {
+                    format!(" 等 {} 笔", buys.len())
+                } else {
+                    String::new()
+                };
                 detail.push_str(&format!("  买: {}{}\n", shown.join(" | "), suffix));
             }
             if !sells.is_empty() {
-                let shown: Vec<String> = sells.iter().take(5).map(|t| format!("{} {}", t.symbol, t.name)).collect();
-                let suffix = if sells.len() > 5 { format!(" 等 {} 笔", sells.len()) } else { String::new() };
+                let shown: Vec<String> = sells
+                    .iter()
+                    .take(5)
+                    .map(|t| format!("{} {}", t.symbol, t.name))
+                    .collect();
+                let suffix = if sells.len() > 5 {
+                    format!(" 等 {} 笔", sells.len())
+                } else {
+                    String::new()
+                };
                 detail.push_str(&format!("  卖: {}{}\n", shown.join(" | "), suffix));
             }
             detail
@@ -397,10 +421,16 @@ async fn report_for_accounts(
         // 当日收益行:数据不完整时显示 --(宁缺毋滥,次日 09:00 T+1 补发)
         let daily_line = match daily_return {
             Some(dr) => format!("{}{}{:.2}%", daily_color, daily_sign, dr.abs() * 100.0),
-            None => format!("{}--(日终数据不完整:{} 持仓缺日线,次日 09:00 补发)",
-                daily_color, missing_bars),
+            None => format!(
+                "{}--(日终数据不完整:{} 持仓缺日线,次日 09:00 补发)",
+                daily_color, missing_bars
+            ),
         };
-        let report_title = if resend { "实盘绩效日报(补发)" } else { "实盘绩效日报" };
+        let report_title = if resend {
+            "实盘绩效日报(补发)"
+        } else {
+            "实盘绩效日报"
+        };
         let text = format!(
             "## {} {} — {}  \n\n\
              **日期**: {}  \n\n\
@@ -436,8 +466,7 @@ async fn report_for_accounts(
             },
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         );
-        if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, report_title, &text).await
-        {
+        if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, report_title, &text).await {
             warn!("[dingtalk] {} 日报推送失败: {}", name, e);
         } else {
             info!("[dingtalk] {} 日报推送成功", name);
@@ -755,7 +784,9 @@ pub async fn push_dingtalk_trade_detail_notification(
     .map_err(|e| format!("trade detail acct: {}", e))?;
 
     for (account_id, name, webhook) in &accounts {
-        let trades = fetch_today_trades(db, account_id, date).await.unwrap_or_default();
+        let trades = fetch_today_trades(db, account_id, date)
+            .await
+            .unwrap_or_default();
         if trades.is_empty() {
             continue; // 无成交跳过（不推送空通知）
         }
@@ -827,7 +858,11 @@ mod daily_report_tests {
 
         let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
         let result = push_daily_performance_report(&db, date).await;
-        assert!(result.is_ok(), "push_daily_performance_report 失败: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "push_daily_performance_report 失败: {:?}",
+            result.err()
+        );
 
         // 验证两个 v24 生产账号的当日 snapshot 已写入
         let rows: Vec<(String, rust_decimal::Decimal, Option<rust_decimal::Decimal>)> = sqlx::query_as(

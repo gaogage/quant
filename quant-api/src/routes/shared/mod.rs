@@ -13,25 +13,28 @@
 //! - preload_trade_block_map（涨跌停预加载）
 //! - MvoWeightCache / StrategyConfig（类型）
 
-mod strategy_config;
-mod mvo_weights;
-mod regime;
 mod alerts;
-mod trade_block;
-mod etf_prices;
 mod etf_premium;
+mod etf_prices;
+mod mvo_weights;
 mod nav_snapshot;
 mod paper_account_repo;
+mod regime;
+mod strategy_config;
+mod trade_block;
 
 // pub(crate) 项用 pub(crate) use re-export（不能 pub use，否则 E0364）
+pub(crate) use alerts::{send_dingtalk_alert, send_dingtalk_alert_titled, send_quality_alert};
+pub use etf_premium::{apply_premium_exit_overlay, load_etf_premium_map, EtfPremium};
+pub(crate) use etf_prices::fetch_intraday_etf_prices;
+pub use mvo_weights::MvoWeightCache;
+pub(crate) use mvo_weights::{compute_lw_mvo_weights, compute_vol_target_leverage};
+pub use nav_snapshot::{upsert_nav_snapshot, NavSnapshot};
+pub use paper_account_repo::{CreateAccountInput, PaperAccountRepository, PgPaperAccountRepo};
+pub use regime::{
+    detect_regime_exposure, detect_regime_exposure_bwgv2, detect_regime_exposure_cached,
+    Bwgv2Config,
+};
 pub(crate) use strategy_config::resolved_to_legacy_sc;
 pub use strategy_config::StrategyConfig;
-pub(crate) use mvo_weights::{compute_lw_mvo_weights, compute_vol_target_leverage};
-pub use mvo_weights::MvoWeightCache;
-pub use regime::{detect_regime_exposure, detect_regime_exposure_bwgv2, detect_regime_exposure_cached, Bwgv2Config};
-pub(crate) use alerts::{send_quality_alert, send_dingtalk_alert, send_dingtalk_alert_titled};
 pub use trade_block::preload_trade_block_map;
-pub(crate) use etf_prices::fetch_intraday_etf_prices;
-pub use etf_premium::{apply_premium_exit_overlay, load_etf_premium_map, EtfPremium};
-pub use nav_snapshot::{NavSnapshot, upsert_nav_snapshot};
-pub use paper_account_repo::{CreateAccountInput, PaperAccountRepository, PgPaperAccountRepo};

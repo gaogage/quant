@@ -77,7 +77,10 @@ pub async fn sync_eod_data(
                     warn!("[scheduler] EOD 日线同步失败: {}", e);
                 }
             }
-            Err(_) => warn!("[scheduler] ⚠ EOD 日线同步超时({}秒),跳过", EOD_STEP_TIMEOUT_SECS),
+            Err(_) => warn!(
+                "[scheduler] ⚠ EOD 日线同步超时({}秒),跳过",
+                EOD_STEP_TIMEOUT_SECS
+            ),
         }
     }
     // 涨跌停同步(Tushare 名单 + derive 方向补全, 2026-09-19 调序至日线后):
@@ -102,31 +105,31 @@ pub async fn sync_eod_data(
     // 2026-09-16 修复: margin_detail 是 T+1 数据源(数据日次日才发布), 原来只拉
     // trade_date=今日每晚必空、静默 0 行断供 9 天(源表停 09-07)。改为 [T-1, T]
     // 区间: 昨日为主(T+1 已发布), 今日兜底(防未来改 T+0 发布)。
+    {
+        let empty_syms: Vec<String> = vec![];
+        let prev_str = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+            .format("%Y%m%d")
+            .to_string();
+        match quant_data::sync::sync_margin_detail(
+            db,
+            tushare,
+            &empty_syms,
+            &prev_str,
+            &date_str,
+            &format!("margin-detail-eod-{}", date_str),
+        )
+        .await
         {
-            let empty_syms: Vec<String> = vec![];
-            let prev_str = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
-                .format("%Y%m%d")
-                .to_string();
-            match quant_data::sync::sync_margin_detail(
-                db,
-                tushare,
-                &empty_syms,
-                &prev_str,
-                &date_str,
-                &format!("margin-detail-eod-{}", date_str),
-            )
-            .await
-            {
-                Ok(n) if n > 0 => info!("[scheduler] EOD 两融明细同步 {} 行 ({})", n, date_str),
-                Ok(_) => {}
-                Err(e) => warn!("[scheduler] EOD 两融明细同步失败 {}: {}", date_str, e),
-            }
+            Ok(n) if n > 0 => info!("[scheduler] EOD 两融明细同步 {} 行 ({})", n, date_str),
+            Ok(_) => {}
+            Err(e) => warn!("[scheduler] EOD 两融明细同步失败 {}: {}", date_str, e),
         }
-        // ── 两融因子每日增量物化（margin_rq*，生效日口径，与生产白名单 74 因子配套）──
-        // 增量只算近 5 个数据日（20 日窗口因子由 SQL 窗口自动取足前置数据）。
-        // 失败仅告警：因子缺数当季贡献为零，不会污染既有信号（白名单缺数告警会提示）。
-        {
-            let factor_sql = r#"
+    }
+    // ── 两融因子每日增量物化（margin_rq*，生效日口径，与生产白名单 74 因子配套）──
+    // 增量只算近 5 个数据日（20 日窗口因子由 SQL 窗口自动取足前置数据）。
+    // 失败仅告警：因子缺数当季贡献为零，不会污染既有信号（白名单缺数告警会提示）。
+    {
+        let factor_sql = r#"
             WITH win AS (
               SELECT MAX(trade_date) - 7 AS min_d, MAX(trade_date) AS max_d FROM market_stock_margin_detail
             ),
@@ -149,14 +152,14 @@ pub async fn sync_eod_data(
               RETURNING 1
             )
             SELECT COUNT(*) FROM ins"#;
-            match sqlx::query_scalar::<_, i64>(factor_sql).fetch_one(db).await {
-                Ok(n) if n > 0 => info!("[scheduler] 两融因子 rq_ratio 增量物化 {} 行", n),
-                Ok(_) => {}
-                Err(e) => warn!("[scheduler] 两融因子增量物化失败: {}", e),
-            }
+        match sqlx::query_scalar::<_, i64>(factor_sql).fetch_one(db).await {
+            Ok(n) if n > 0 => info!("[scheduler] 两融因子 rq_ratio 增量物化 {} 行", n),
+            Ok(_) => {}
+            Err(e) => warn!("[scheduler] 两融因子增量物化失败: {}", e),
         }
-        {
-            let factor_sql = r#"
+    }
+    {
+        let factor_sql = r#"
             WITH win AS (
               SELECT MAX(trade_date) - 7 AS min_d, MAX(trade_date) AS max_d FROM market_stock_margin_detail
             ),
@@ -182,41 +185,44 @@ pub async fn sync_eod_data(
               RETURNING 1
             )
             SELECT COUNT(*) FROM ins"#;
-            match sqlx::query_scalar::<_, i64>(factor_sql).fetch_one(db).await {
-                Ok(n) if n > 0 => info!("[scheduler] 两融因子 rqye_chg 增量物化 {} 行", n),
-                Ok(_) => {}
-                Err(e) => warn!("[scheduler] 两融因子 rqye_chg 增量物化失败: {}", e),
-            }
+        match sqlx::query_scalar::<_, i64>(factor_sql).fetch_one(db).await {
+            Ok(n) if n > 0 => info!("[scheduler] 两融因子 rqye_chg 增量物化 {} 行", n),
+            Ok(_) => {}
+            Err(e) => warn!("[scheduler] 两融因子 rqye_chg 增量物化失败: {}", e),
         }
-        // ── 东财主力资金流每日增量（2026-09-09 接入，mfdc_* 因子数据源，76 白名单配套）──
-        // moneyflow_dc 按日全市场 6000 行；双 token fallback 兜权限。生效日 = 数据日+1。
-        {
-            // raw 拉取：当日 moneyflow_dc 全市场（6000 行/次，reqwest 直调充值 token，
-            // 主 token 无该接口权限；失败仅告警不阻塞 EOD）
-            if let Ok(tok) = std::env::var("TUSHARE_TOKEN_ALT") {
-                if !tok.trim().is_empty() {
-                    let body = serde_json::json!({
-                        "api_name": "moneyflow_dc", "token": tok.trim(),
-                        "params": {"trade_date": date_str},
-                        "fields": "ts_code,trade_date,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_sm_amount"
-                    });
-                    match reqwest::Client::new()
-                        .post("http://api.tushare.pro")
-                        .json(&body)
-                        .timeout(std::time::Duration::from_secs(60))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => {
-                            if let Ok(parsed) = resp.json::<serde_json::Value>().await {
-                                if parsed["code"].as_i64() == Some(0) {
-                                    if let Some(items) = parsed["data"]["items"].as_array() {
-                                        let mut n = 0usize;
-                                        for it in items {
-                                            let g = |k: &str| it.get(k).and_then(|v| v.as_f64());
-                                            let s = |k: &str| it.get(k).and_then(|v| v.as_str());
-                                            let (Some(tc), Some(td)) = (s("ts_code"), s("trade_date")) else { continue };
-                                            let r = sqlx::query(
+    }
+    // ── 东财主力资金流每日增量（2026-09-09 接入，mfdc_* 因子数据源，76 白名单配套）──
+    // moneyflow_dc 按日全市场 6000 行；双 token fallback 兜权限。生效日 = 数据日+1。
+    {
+        // raw 拉取：当日 moneyflow_dc 全市场（6000 行/次，reqwest 直调充值 token，
+        // 主 token 无该接口权限；失败仅告警不阻塞 EOD）
+        if let Ok(tok) = std::env::var("TUSHARE_TOKEN_ALT") {
+            if !tok.trim().is_empty() {
+                let body = serde_json::json!({
+                    "api_name": "moneyflow_dc", "token": tok.trim(),
+                    "params": {"trade_date": date_str},
+                    "fields": "ts_code,trade_date,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_sm_amount"
+                });
+                match reqwest::Client::new()
+                    .post("http://api.tushare.pro")
+                    .json(&body)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        if let Ok(parsed) = resp.json::<serde_json::Value>().await {
+                            if parsed["code"].as_i64() == Some(0) {
+                                if let Some(items) = parsed["data"]["items"].as_array() {
+                                    let mut n = 0usize;
+                                    for it in items {
+                                        let g = |k: &str| it.get(k).and_then(|v| v.as_f64());
+                                        let s = |k: &str| it.get(k).and_then(|v| v.as_str());
+                                        let (Some(tc), Some(td)) = (s("ts_code"), s("trade_date"))
+                                        else {
+                                            continue;
+                                        };
+                                        let r = sqlx::query(
                                                 "INSERT INTO market_stock_moneyflow_dc_raw
                                                  (ts_code, trade_date, net_amount, net_amount_rate, buy_elg_amount, buy_elg_amount_rate,
                                                   buy_lg_amount, buy_lg_amount_rate, buy_md_amount, buy_sm_amount, available_at)
@@ -229,21 +235,31 @@ pub async fn sync_eod_data(
                                             .bind(g("buy_lg_amount")).bind(g("buy_lg_amount_rate"))
                                             .bind(g("buy_md_amount")).bind(g("buy_sm_amount"))
                                             .execute(db).await;
-                                            if r.map(|x| x.rows_affected()).unwrap_or(0) > 0 { n += 1; }
+                                        if r.map(|x| x.rows_affected()).unwrap_or(0) > 0 {
+                                            n += 1;
                                         }
-                                        if n > 0 { info!("[scheduler] EOD 东财资金流同步 {} 行 ({})", n, date_str); }
                                     }
-                                } else {
-                                    warn!("[scheduler] EOD 东财资金流拉取失败 code={:?}", parsed["code"]);
+                                    if n > 0 {
+                                        info!(
+                                            "[scheduler] EOD 东财资金流同步 {} 行 ({})",
+                                            n, date_str
+                                        );
+                                    }
                                 }
+                            } else {
+                                warn!(
+                                    "[scheduler] EOD 东财资金流拉取失败 code={:?}",
+                                    parsed["code"]
+                                );
                             }
                         }
-                        Err(e) => warn!("[scheduler] EOD 东财资金流请求失败: {}", e),
                     }
+                    Err(e) => warn!("[scheduler] EOD 东财资金流请求失败: {}", e),
                 }
             }
-            // 因子增量物化保鲜
-            let factor_sql = r#"
+        }
+        // 因子增量物化保鲜
+        let factor_sql = r#"
             WITH win AS (
               SELECT MAX(trade_date) - 30 AS min_d, MAX(trade_date) AS max_d FROM market_stock_moneyflow_dc_raw
             ),
@@ -264,12 +280,12 @@ pub async fn sync_eod_data(
               RETURNING 1
             )
             SELECT COUNT(*) FROM ins"#;
-            match sqlx::query_scalar::<_, i64>(factor_sql).fetch_one(db).await {
-                Ok(n) if n > 0 => info!("[scheduler] 主力资金流因子 net_rate 增量物化 {} 行", n),
-                Ok(_) => {}
-                Err(e) => warn!("[scheduler] 主力资金流因子物化失败: {}", e),
-            }
-            let factor_sql2 = r#"
+        match sqlx::query_scalar::<_, i64>(factor_sql).fetch_one(db).await {
+            Ok(n) if n > 0 => info!("[scheduler] 主力资金流因子 net_rate 增量物化 {} 行", n),
+            Ok(_) => {}
+            Err(e) => warn!("[scheduler] 主力资金流因子物化失败: {}", e),
+        }
+        let factor_sql2 = r#"
             WITH win AS (
               SELECT MAX(trade_date) - 30 AS min_d, MAX(trade_date) AS max_d FROM market_stock_moneyflow_dc_raw
             ),
@@ -290,12 +306,15 @@ pub async fn sync_eod_data(
               RETURNING 1
             )
             SELECT COUNT(*) FROM ins"#;
-            match sqlx::query_scalar::<_, i64>(factor_sql2).fetch_one(db).await {
-                Ok(n) if n > 0 => info!("[scheduler] 主力资金流因子 elg_rate 增量物化 {} 行", n),
-                Ok(_) => {}
-                Err(e) => warn!("[scheduler] 主力资金流因子 elg 物化失败: {}", e),
-            }
+        match sqlx::query_scalar::<_, i64>(factor_sql2)
+            .fetch_one(db)
+            .await
+        {
+            Ok(n) if n > 0 => info!("[scheduler] 主力资金流因子 elg_rate 增量物化 {} 行", n),
+            Ok(_) => {}
+            Err(e) => warn!("[scheduler] 主力资金流因子 elg 物化失败: {}", e),
         }
+    }
     // ── 业绩预告增量同步（forecast 族因子数据源，2026-09-05 接入）──
     // forecast 接口要求 ann_date 或 ts_code 至少一个参数，按日增量拉当日公告。
     // 用充值 token（现行 token 无此接口权限）。同步失败不阻塞 EOD 主链路。
@@ -326,8 +345,13 @@ pub async fn sync_eod_data(
                         // 2026-09-15: 逐股(7210次×60/min=2h)改 ann_date 全市场单次拉取;
                         // 备用端点教训见 sync_forecast_by_day 文档注释
                         match quant_data::sync::sync_forecast_by_day(
-                            &db2, &fc_client, &ds, &format!("fc-eod-{}", ds),
-                        ).await {
+                            &db2,
+                            &fc_client,
+                            &ds,
+                            &format!("fc-eod-{}", ds),
+                        )
+                        .await
+                        {
                             Ok(n) => info!("[EOD] 业绩预告增量(后台,按日): {} 条", n),
                             Err(e) => warn!("[EOD] 业绩预告增量失败(后台,次日9点兜底): {}", e),
                         }
@@ -367,12 +391,11 @@ pub async fn sync_eod_data(
                         .fetch_optional(&db3)
                         .await
                         {
-                            Ok(Some((Some(max_d),))) => {
-                                (max_d + chrono::Duration::days(1)).format("%Y%m%d").to_string()
-                            }
+                            Ok(Some((Some(max_d),))) => (max_d + chrono::Duration::days(1))
+                                .format("%Y%m%d")
+                                .to_string(),
                             // 表空: 回补近 90 天
-                            _ => (chrono::Utc::now().date_naive()
-                                - chrono::Duration::days(90))
+                            _ => (chrono::Utc::now().date_naive() - chrono::Duration::days(90))
                                 .format("%Y%m%d")
                                 .to_string(),
                         };
@@ -419,7 +442,10 @@ pub async fn sync_eod_data(
         warn!("[EOD] 指数日线同步失败 {}: {}", date_str, err);
         crate::routes::shared::send_quality_alert(
             db,
-            &[format!("EOD 指数日线同步失败 {}（次日 T+1 会补齐，若仍缺需手工 sync/index-daily）: {}", date_str, err)],
+            &[format!(
+                "EOD 指数日线同步失败 {}（次日 T+1 会补齐，若仍缺需手工 sync/index-daily）: {}",
+                date_str, err
+            )],
         )
         .await;
     }
@@ -455,16 +481,13 @@ pub async fn sync_eod_data(
     // 批量拉取：传空走 trade_date 全市场路径，1 次 API 调用几秒完成。
     let mf_n = {
         let mf_dv = format!("mf-eod-{}", date_str);
-        let mf_fut = quant_data::sync::sync_moneyflow(
-            db,
-            tushare,
-            &[],
-            &date_str,
-            &date_str,
-            &mf_dv,
-        );
-        match tokio::time::timeout(tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS), mf_fut)
-            .await
+        let mf_fut =
+            quant_data::sync::sync_moneyflow(db, tushare, &[], &date_str, &date_str, &mf_dv);
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS),
+            mf_fut,
+        )
+        .await
         {
             Ok(r) => r.unwrap_or(0),
             Err(_) => {
@@ -480,15 +503,12 @@ pub async fn sync_eod_data(
     // 大宗交易(market_stock_block_trade): v24 block_trade_inst 因子依赖。
     let bt_n = {
         let bt_dv = format!("bt-eod-{}", date_str);
-        let bt_fut = quant_data::sync::sync_block_trade(
-            db,
-            tushare,
-            &bt_dv,
-            &date_str,
-            &date_str,
-        );
-        match tokio::time::timeout(tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS), bt_fut)
-            .await
+        let bt_fut = quant_data::sync::sync_block_trade(db, tushare, &bt_dv, &date_str, &date_str);
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS),
+            bt_fut,
+        )
+        .await
         {
             Ok(r) => r.unwrap_or(0),
             Err(_) => {
@@ -635,4 +655,3 @@ pub async fn sync_eod_data(
     // 预备链全部前置,22:10 独立触发可提前 ~2 小时完成。
     Ok(())
 }
-

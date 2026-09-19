@@ -167,7 +167,11 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         strategy_id: rs.strategy_id.clone(),
         name: rs.name.clone(),
         etf_symbols: rs_to_legacy_etf_symbols(rs),
-        equity_curve_task_id: a_share.security.equity_curve_task_id.clone().unwrap_or_default(),
+        equity_curve_task_id: a_share
+            .security
+            .equity_curve_task_id
+            .clone()
+            .unwrap_or_default(),
         min_stock: mvo.min_stock,
         max_single: a_share.security.max_single,
         max_single_bull: a_share.security.max_single_bull,
@@ -361,20 +365,37 @@ mod tests {
             sc.equity_curve_task_id, "fbt-ab3eecf6",
             "equity_curve_task_id 取自 a_share"
         );
-        assert_eq!(sc.signal_source, "prediction_blend", "signal_source 取自 a_share");
-        assert_eq!(sc.combo_name, "full_pit_icir_37f", "combo_name 取自 a_share");
+        assert_eq!(
+            sc.signal_source, "prediction_blend",
+            "signal_source 取自 a_share"
+        );
+        assert_eq!(
+            sc.combo_name, "full_pit_icir_37f",
+            "combo_name 取自 a_share"
+        );
         assert_eq!(
             sc.candidate_tier, "professional_observation",
             "candidate_tier 取自 a_share"
         );
-        assert!((sc.max_single - 0.75).abs() < 1e-9, "max_single 取自 a_share");
-        assert!((sc.max_single_bull - 0.80).abs() < 1e-9, "max_single_bull 取自 a_share");
+        assert!(
+            (sc.max_single - 0.75).abs() < 1e-9,
+            "max_single 取自 a_share"
+        );
+        assert!(
+            (sc.max_single_bull - 0.80).abs() < 1e-9,
+            "max_single_bull 取自 a_share"
+        );
         // etf_symbols 保持 MVO 标准顺序(黄金/国债/标普/纳指/有色/豆粕/原油)
         assert_eq!(
             sc.etf_symbols,
             vec![
-                "518880.SH", "511010.SH", "513500.SH", "513100.SH",
-                "159980.SZ", "159985.SZ", "501018.SH"
+                "518880.SH",
+                "511010.SH",
+                "513500.SH",
+                "513100.SH",
+                "159980.SZ",
+                "159985.SZ",
+                "501018.SH"
             ],
             "etf_symbols 保持 MVO 标准顺序"
         );

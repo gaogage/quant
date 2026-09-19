@@ -9,9 +9,7 @@ use sqlx::PgPool;
 use std::ops::{Deref, DerefMut};
 
 // Step 5c：复用 quant-backtest 的策略状态标记 trait + 状态类型。
-use quant_backtest::types::{
-    Backtested, PaperLive, Production, StrategyState, Validated,
-};
+use quant_backtest::types::{Backtested, PaperLive, Production, StrategyState, Validated};
 
 /// 解析后的完整策略树(composite 或单 asset 账号都会解析成此结构)
 #[allow(dead_code)]

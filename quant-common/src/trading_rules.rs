@@ -88,7 +88,7 @@ mod tests {
         assert_eq!(round_down_to_lot(d(99, 0), 100), d(0, 0)); // 不足1手
         assert_eq!(round_down_to_lot(d(5, 1), 100), d(0, 0)); // 0.5 → 0
         assert_eq!(round_down_to_lot(d(-10, 0), 100), d(0, 0)); // 负数 → 0
-        // 小数持仓(如除权后 1.48 股)向下取整到 0
+                                                                // 小数持仓(如除权后 1.48 股)向下取整到 0
         assert_eq!(round_down_to_lot(d(148, 2), 100), d(0, 0)); // 1.48 → 0
         assert_eq!(round_down_to_lot(d(10148, 2), 100), d(100, 0)); // 101.48 → 100
     }

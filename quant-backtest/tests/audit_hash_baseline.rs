@@ -21,8 +21,10 @@ use quant_backtest::db_perf_baseline::{run_db_perf_baseline, DbPerfBaselineConfi
 // 2026-08-20 更新:participation_rate_for 千元单位 bug 修复(见 scripts/audit_hash_baseline.json changelog)
 // 2026-09-03 更新:cap_order_amount 千元单位 bug 修复(f01af33 同根因另一半,参与率
 // cap 被压小 1000 倍致低流动性买单遭整手规则跳过),equity 变化,signal 不变
-const BASELINE_EQUITY_HASH: &str = "fba8f638d6b4d87e1fb3125732a23b357087ef5b5859688af75ae3145ae71bb6";
-const BASELINE_SIGNAL_HASH: &str = "d1ee0c46975b02bded46ca5dc44b39d4ae19fbdd90b4909f7aa3a3de83d6c95b";
+const BASELINE_EQUITY_HASH: &str =
+    "fba8f638d6b4d87e1fb3125732a23b357087ef5b5859688af75ae3145ae71bb6";
+const BASELINE_SIGNAL_HASH: &str =
+    "d1ee0c46975b02bded46ca5dc44b39d4ae19fbdd90b4909f7aa3a3de83d6c95b";
 
 /// 跑一个最小规模 DB 回测,验证 hash 产出链路通畅 + 确定性。
 ///
@@ -91,10 +93,7 @@ async fn audit_hash_config_and_data_version_are_stable() {
     // config/data_version hash 必须是 64 位十六进制
     assert_eq!(report.config_sha256.len(), 64);
     assert_eq!(report.data_version_sha256.len(), 64);
-    assert!(report
-        .config_sha256
-        .chars()
-        .all(|c| c.is_ascii_hexdigit()));
+    assert!(report.config_sha256.chars().all(|c| c.is_ascii_hexdigit()));
     assert!(report
         .data_version_sha256
         .chars()
@@ -120,7 +119,9 @@ async fn audit_hash_config_and_data_version_are_stable() {
 /// 这是守卫的"地基"--若 hash 函数本身不确定,DB 基线无从谈起。
 #[test]
 fn audit_hash_functions_are_deterministic_offline() {
-    use quant_backtest::db_perf_baseline::{hash_config, hash_data_version, hash_equity_curve, hash_signals};
+    use quant_backtest::db_perf_baseline::{
+        hash_config, hash_data_version, hash_equity_curve, hash_signals,
+    };
     use quant_backtest::engine::{BacktestConfig, StrategySignal};
     use rust_decimal::Decimal;
     use std::collections::HashMap;
@@ -140,7 +141,13 @@ fn audit_hash_functions_are_deterministic_offline() {
     let mut signals = HashMap::new();
     let mut weights = HashMap::new();
     weights.insert("000001.SZ".to_string(), Decimal::new(12, 2));
-    signals.insert(d1, StrategySignal { date: d1, target_weights: weights });
+    signals.insert(
+        d1,
+        StrategySignal {
+            date: d1,
+            target_weights: weights,
+        },
+    );
     let s1 = hash_signals(&signals);
     let s2 = hash_signals(&signals);
     assert_eq!(s1, s2, "相同信号必须产出相同 hash");
@@ -157,5 +164,9 @@ fn audit_hash_functions_are_deterministic_offline() {
     let dv1 = hash_data_version("dv-test-001");
     let dv2 = hash_data_version("dv-test-001");
     assert_eq!(dv1, dv2, "相同 data_version 必须产出相同 hash");
-    assert_ne!(dv1, hash_data_version("dv-test-002"), "不同 dv 应产出不同 hash");
+    assert_ne!(
+        dv1,
+        hash_data_version("dv-test-002"),
+        "不同 dv 应产出不同 hash"
+    );
 }

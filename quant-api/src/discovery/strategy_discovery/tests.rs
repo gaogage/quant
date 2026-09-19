@@ -1,7 +1,7 @@
 //! BC4 策略发现 / strategy_discovery 测试模块（R8 批次4 由 mod.rs 拆出，纯 move）。
 
-use super::*;
 use super::seed_generators::*;
+use super::*;
 use rust_decimal::Decimal;
 use serde_json::json;
 use serde_json::Value;
@@ -171,8 +171,7 @@ fn professional_execution_alpha_capacity_bridge_profile_combines_alpha_and_fill_
     assert!(config.seed_trials.iter().any(|trial| {
         trial["market_regime"] == "quality_nonlinear_alpha_risk_memory_router_v3"
             && trial["event_gate_profile"] == "valuation_exclude_bottom40"
-            && trial["capacity_fill_frontier_profile"]
-                == "capacity_fill_top120_maxpos006_gross090"
+            && trial["capacity_fill_frontier_profile"] == "capacity_fill_top120_maxpos006_gross090"
             && trial["capacity_risk_budget"] == "capacity_participation_strict_v1"
     }));
 }
@@ -232,8 +231,7 @@ fn professional_execution_alpha_capacity_return_frontier_profile_expands_near_mi
 
 #[test]
 fn professional_execution_stress_fill_return_frontier_profile_adds_stress_fill_axis() {
-    let config =
-        LayeredSearchConfig::professional_execution_stress_fill_return_frontier_default();
+    let config = LayeredSearchConfig::professional_execution_stress_fill_return_frontier_default();
 
     assert_eq!(config.top_n, vec![80, 120, 160]);
     assert_eq!(
@@ -283,8 +281,7 @@ fn professional_execution_stress_risk_budget_profile_adds_soft_participation_axi
 
 #[test]
 fn professional_execution_capacity_stress_return_gate_profile_targets_stress_return_frontier() {
-    let config =
-        LayeredSearchConfig::professional_execution_capacity_stress_return_gate_default();
+    let config = LayeredSearchConfig::professional_execution_capacity_stress_return_gate_default();
 
     assert_eq!(config.top_n, vec![80, 100, 120]);
     assert_eq!(
@@ -355,8 +352,7 @@ fn professional_execution_low_impact_alpha_stress_return_profile_targets_long_ho
 
 #[test]
 fn professional_execution_stress_target_scaling_return_profile_adds_target_scale_axis() {
-    let config =
-        LayeredSearchConfig::professional_execution_stress_target_scaling_return_default();
+    let config = LayeredSearchConfig::professional_execution_stress_target_scaling_return_default();
 
     assert_eq!(config.top_n, vec![100, 120, 160]);
     assert_eq!(
@@ -399,8 +395,7 @@ fn professional_execution_stress_target_scaling_return_profile_adds_target_scale
 
 #[test]
 fn professional_execution_stress_floor_scaling_return_profile_adds_gross_floor_axis() {
-    let config =
-        LayeredSearchConfig::professional_execution_stress_floor_scaling_return_default();
+    let config = LayeredSearchConfig::professional_execution_stress_floor_scaling_return_default();
 
     assert_eq!(config.top_n, vec![100, 120, 160]);
     assert_eq!(
@@ -430,8 +425,7 @@ fn professional_execution_stress_floor_scaling_return_profile_adds_gross_floor_a
 
 #[test]
 fn professional_execution_stress_floor_return_recovery_profile_extends_floor_axis() {
-    let config =
-        LayeredSearchConfig::professional_execution_stress_floor_return_recovery_default();
+    let config = LayeredSearchConfig::professional_execution_stress_floor_return_recovery_default();
 
     assert_eq!(config.top_n, vec![100, 120, 160]);
     assert_eq!(
@@ -479,8 +473,7 @@ fn professional_execution_pressure_headroom_floor_profile_targets_perturbed_fill
         .contains(&"capacity_stress_participation_headroom_floor_60_v1".to_string()));
     assert!(config.seed_trials.iter().any(|trial| {
         trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
-            && trial["capacity_risk_budget"]
-                == "capacity_stress_participation_headroom_floor_70_v1"
+            && trial["capacity_risk_budget"] == "capacity_stress_participation_headroom_floor_70_v1"
             && trial["execution_schedule_profile"] == "twap_20d_v1"
             && trial["top_n"] == 160
             && trial["max_position_pct"] == "0.05"
@@ -518,16 +511,15 @@ fn professional_execution_alpha_headroom_floor_profile_balances_return_and_fill(
 
 #[test]
 fn professional_execution_blended_alpha_headroom_floor_profile_keeps_dual_axis() {
-    let config =
-        LayeredSearchConfig::professional_execution_blended_alpha_headroom_floor_default();
+    let config = LayeredSearchConfig::professional_execution_blended_alpha_headroom_floor_default();
 
     assert_eq!(config.top_n, vec![100, 120, 160]);
-    assert!(config.capacity_risk_budget_profiles.contains(
-        &"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()
-    ));
-    assert!(config.capacity_risk_budget_profiles.contains(
-        &"capacity_stress_participation_blended_alpha_headroom_floor_60_v1".to_string()
-    ));
+    assert!(config
+        .capacity_risk_budget_profiles
+        .contains(&"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()));
+    assert!(config
+        .capacity_risk_budget_profiles
+        .contains(&"capacity_stress_participation_blended_alpha_headroom_floor_60_v1".to_string()));
     assert!(config.seed_trials.iter().any(|trial| {
         trial["combo_name"] == "phase7_quality_event_window_overlay_v1"
             && trial["capacity_risk_budget"]
@@ -542,8 +534,7 @@ fn professional_execution_blended_alpha_headroom_floor_profile_keeps_dual_axis()
 
 #[test]
 fn professional_execution_event_anchor_stress_bridge_profile_keeps_strong_alpha_anchors() {
-    let config =
-        LayeredSearchConfig::professional_execution_event_anchor_stress_bridge_default();
+    let config = LayeredSearchConfig::professional_execution_event_anchor_stress_bridge_default();
 
     assert_eq!(config.top_n, vec![80, 120, 160]);
     assert!(config
@@ -593,8 +584,7 @@ fn professional_execution_participation_aware_event_anchor_profile_prefers_trada
         .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
     assert!(config.seed_trials.iter().any(|trial| {
         trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
-            && trial["candidate_risk_filter"]
-                == "soft_liquidity_low_volatility_low_correlation_v1"
+            && trial["candidate_risk_filter"] == "soft_liquidity_low_volatility_low_correlation_v1"
             && trial["execution_impact_budget"] == "impact_turnover_15pct_v1"
             && trial["execution_schedule_profile"] == "twap_20d_v1"
             && trial["execution_rules"]["max_participation_rate"] == json!(0.10)
@@ -722,8 +712,7 @@ fn professional_execution_pit_capacity_ranking_profile_reuses_strict_capacity_se
 
 #[test]
 fn professional_execution_pit_alpha_first_low_impact_profile_restarts_from_alpha_sources() {
-    let config =
-        LayeredSearchConfig::professional_execution_pit_alpha_first_low_impact_default();
+    let config = LayeredSearchConfig::professional_execution_pit_alpha_first_low_impact_default();
 
     assert_eq!(
         config.candidate_ranking_profiles,
@@ -754,8 +743,7 @@ fn professional_execution_pit_alpha_first_low_impact_profile_restarts_from_alpha
 
 #[test]
 fn professional_execution_pit_excess_return_recovery_profile_adds_relative_strength_axis() {
-    let config =
-        LayeredSearchConfig::professional_execution_pit_excess_return_recovery_default();
+    let config = LayeredSearchConfig::professional_execution_pit_excess_return_recovery_default();
 
     assert_eq!(
         config.candidate_ranking_profiles,
@@ -786,8 +774,7 @@ fn professional_execution_pit_excess_return_recovery_profile_adds_relative_stren
 #[test]
 fn professional_execution_pit_nonlinear_alpha_regime_rebuild_profile_restarts_alpha_search() {
     let config =
-        LayeredSearchConfig::professional_execution_pit_nonlinear_alpha_regime_rebuild_default(
-        );
+        LayeredSearchConfig::professional_execution_pit_nonlinear_alpha_regime_rebuild_default();
 
     assert_eq!(
         config.candidate_ranking_profiles,
@@ -842,8 +829,7 @@ fn professional_execution_pit_nonlinear_alpha_regime_rebuild_profile_restarts_al
 
 #[test]
 fn professional_execution_pit_quality_recovery_alpha_profile_uses_native_pit_alpha() {
-    let config =
-        LayeredSearchConfig::professional_execution_pit_quality_recovery_alpha_default();
+    let config = LayeredSearchConfig::professional_execution_pit_quality_recovery_alpha_default();
 
     assert_eq!(
         config.combo_versions,
@@ -1175,8 +1161,7 @@ fn professional_execution_native_alpha_fusion_discovery_profile_combines_broad_e
 
 #[test]
 fn professional_trainable_alpha_admission_discovery_profile_keeps_base_sources_trainable() {
-    let config =
-        LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
+    let config = LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
     let combo_names = config
         .combo_versions
         .iter()
@@ -1256,8 +1241,7 @@ fn phase7_financial_quality_change_is_p37_base_trainable_alpha_source() {
 
 #[test]
 fn professional_trainable_alpha_admission_discovery_includes_p37_quality_change_seed() {
-    let config =
-        LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
+    let config = LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
     let combo_names = config
         .combo_versions
         .iter()
@@ -1303,8 +1287,7 @@ fn phase7_earnings_recovery_persistence_is_p37_base_trainable_alpha_source() {
 
 #[test]
 fn professional_trainable_alpha_admission_discovery_includes_p37_earnings_recovery_seed() {
-    let config =
-        LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
+    let config = LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
     let combo_names = config
         .combo_versions
         .iter()
@@ -1350,8 +1333,7 @@ fn phase7_moneyflow_congestion_is_p38_base_trainable_alpha_source() {
 
 #[test]
 fn professional_trainable_alpha_admission_discovery_includes_p38_moneyflow_congestion_seed() {
-    let config =
-        LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
+    let config = LayeredSearchConfig::professional_trainable_alpha_admission_discovery_default();
     let combo_names = config
         .combo_versions
         .iter()
@@ -1436,9 +1418,10 @@ fn professional_v19_event_post_return_overlay_profile_keeps_event_source_as_over
     resource_plan.max_trials = 12;
 
     assert_eq!(config.prediction_set_ids, Vec::<String>::new());
-    assert!(config.combo_versions.iter().all(|combo| {
-        combo.combo_name == "phase7_quality_event_post_return_curve_overlay_v1"
-    }));
+    assert!(config
+        .combo_versions
+        .iter()
+        .all(|combo| { combo.combo_name == "phase7_quality_event_post_return_curve_overlay_v1" }));
     assert!(config.event_gate_profiles.iter().any(|profile| {
         profile.profile_name == "event_post_return_boost_pos_5pct"
             && profile.combo_name.as_deref() == Some("phase7_event_post_return_curve_20d_v1")
@@ -1448,8 +1431,7 @@ fn professional_v19_event_post_return_overlay_profile_keeps_event_source_as_over
 
     assert!(plan.trials.iter().all(|trial| {
         trial.parameters["signal_source"] == "factor_combo"
-            && trial.parameters["combo_name"]
-                == "phase7_quality_event_post_return_curve_overlay_v1"
+            && trial.parameters["combo_name"] == "phase7_quality_event_post_return_curve_overlay_v1"
             && trial.parameters["event_overlay_profile"]
                 == "v19_p39_broad_base_event_post_return_overlay_v1"
             && trial.parameters["broad_base_combo_name"] == "phase7_financial_quality_v1"
@@ -1523,8 +1505,7 @@ fn professional_v19_execution_repair_admission_profile_reuses_v19_alpha_with_bou
     }
     assert!(plan.trials.iter().all(|trial| {
         trial.parameters["v19_execution_repair_profile"] == "v19_p2_pit_execution_repair_v1"
-            && trial.parameters["multi_alpha_sleeve_profile"]
-                == "v19_p2_pit_sleeve_admission_v1"
+            && trial.parameters["multi_alpha_sleeve_profile"] == "v19_p2_pit_sleeve_admission_v1"
     }));
     assert!(plan.trials.iter().all(|trial| {
         let combo_name = trial.parameters["combo_name"].as_str().unwrap_or_default();
@@ -1577,8 +1558,7 @@ fn professional_v19_train_window_ml_alpha_rebuild_profile_is_train_scoped_and_pi
     let plan = build_layered_search_plan(&config, &resource_plan);
     assert_eq!(plan.trials.len(), 24);
     assert!(plan.trials.iter().all(|trial| {
-        trial.parameters["v19_alpha_rebuild_profile"]
-            == "v19_p3_train_window_ml_alpha_rebuild_v1"
+        trial.parameters["v19_alpha_rebuild_profile"] == "v19_p3_train_window_ml_alpha_rebuild_v1"
             && trial.parameters["train_window_ml_pit_policy"]
                 == "train-window rolling fit; no OOS labels"
             && trial.parameters["train_window_ml_feature_profile"]
@@ -1803,8 +1783,7 @@ fn professional_v19_train_window_ml_h120_low_impact_rebuild_profile_is_train_sco
 }
 
 #[test]
-fn professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile_is_train_scoped()
-{
+fn professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile_is_train_scoped() {
     let config =
         LayeredSearchConfig::professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild_default();
     let mut resource_plan = LocalResourcePlan::for_machine(10, 32);
@@ -1834,8 +1813,7 @@ fn professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile_i
                 == "train-window rolling fit; no OOS labels"
             && trial.parameters["train_window_ml_feature_profile"]
                 == "phase7_gb_quality_value_recovery_low_impact_v6"
-            && trial.parameters["train_window_ml_label_objective"]
-                == "risk_adjusted_excess_return"
+            && trial.parameters["train_window_ml_label_objective"] == "risk_adjusted_excess_return"
             && trial.parameters["train_window_ml_label_horizon_days"] == 120
             && trial.parameters["train_window_ml_bucket_count"] == 7
             && trial.parameters["train_window_ml_min_samples_per_bucket"] == 50
@@ -1894,8 +1872,7 @@ fn professional_v19_train_window_ml_event_sentiment_rebuild_profile_is_train_sco
                 == "train-window rolling fit; no OOS labels"
             && trial.parameters["train_window_ml_feature_profile"]
                 == "phase7_p4_event_sentiment_high_coverage_v1"
-            && trial.parameters["train_window_ml_label_objective"]
-                == "risk_adjusted_excess_return"
+            && trial.parameters["train_window_ml_label_objective"] == "risk_adjusted_excess_return"
             && trial.parameters["train_window_ml_label_horizon_days"] == 120
             && trial.parameters["train_window_ml_bucket_count"] == 7
             && trial.parameters["train_window_ml_min_samples_per_bucket"] == 50
@@ -1950,9 +1927,9 @@ fn professional_prediction_capacity_dual_objective_profile_bridges_return_and_tr
     assert!(config
         .capacity_risk_budget_profiles
         .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
-    assert!(config.capacity_risk_budget_profiles.contains(
-        &"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()
-    ));
+    assert!(config
+        .capacity_risk_budget_profiles
+        .contains(&"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()));
     assert_eq!(
         config.execution_schedule_profiles,
         vec!["twap_15d_v1".to_string(), "twap_20d_v1".to_string()]
@@ -2093,8 +2070,7 @@ fn professional_prediction_target_gross_signal_fidelity_profile_scales_exposure_
         .seed_trials
         .iter()
         .find(|trial| {
-            trial["prediction_target_gross_signal_fidelity_profile"]
-                == "gross65_signal_fidelity"
+            trial["prediction_target_gross_signal_fidelity_profile"] == "gross65_signal_fidelity"
         })
         .expect("FM should include gross65 signal-fidelity seed");
     assert_eq!(gross65["max_gross_exposure"], "0.65");
@@ -2123,8 +2099,7 @@ fn professional_prediction_target_gross_signal_fidelity_profile_scales_exposure_
 }
 
 #[test]
-fn professional_prediction_confidence_turnover_discovery_profile_gates_prediction_and_turnover()
-{
+fn professional_prediction_confidence_turnover_discovery_profile_gates_prediction_and_turnover() {
     let config =
         LayeredSearchConfig::professional_prediction_confidence_turnover_discovery_default();
 
@@ -2371,8 +2346,7 @@ fn professional_prediction_confidence_alpha_lift_profile_preserves_low_gap_struc
 
 #[test]
 fn professional_prediction_long_horizon_low_turnover_profile_uses_h60_overlay() {
-    let config =
-        LayeredSearchConfig::professional_prediction_long_horizon_low_turnover_default();
+    let config = LayeredSearchConfig::professional_prediction_long_horizon_low_turnover_default();
 
     assert_eq!(
         config.prediction_set_ids,
@@ -2466,8 +2440,7 @@ fn professional_prediction_long_horizon_low_turnover_profile_uses_h60_overlay() 
 #[test]
 fn professional_prediction_long_horizon_regime_alpha_profile_keeps_h60_overlay_and_adds_return_sources(
 ) {
-    let config =
-        LayeredSearchConfig::professional_prediction_long_horizon_regime_alpha_default();
+    let config = LayeredSearchConfig::professional_prediction_long_horizon_regime_alpha_default();
 
     assert_eq!(
         config.prediction_set_ids,
@@ -2769,9 +2742,9 @@ fn professional_train_window_stress_fill_target_exposure_profile_is_prediction_f
     assert!(config
         .capacity_risk_budget_profiles
         .contains(&"capacity_stress_participation_alpha_headroom_floor_70_v1".to_string()));
-    assert!(config.capacity_risk_budget_profiles.contains(
-        &"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()
-    ));
+    assert!(config
+        .capacity_risk_budget_profiles
+        .contains(&"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()));
     assert!(
         config.seed_trials.len() >= 8,
         "GA needs enough native stress-fill target-exposure seeds for an 8-trial strict smoke"
@@ -2815,8 +2788,7 @@ fn professional_train_window_stress_fill_target_exposure_profile_is_prediction_f
 #[test]
 fn professional_train_window_ml_stress_fill_discovery_profile_is_train_scoped_and_stress_fill_aware(
 ) {
-    let config =
-        LayeredSearchConfig::professional_train_window_ml_stress_fill_discovery_default();
+    let config = LayeredSearchConfig::professional_train_window_ml_stress_fill_discovery_default();
 
     assert_eq!(
         config.prediction_set_ids,
@@ -2827,9 +2799,9 @@ fn professional_train_window_ml_stress_fill_discovery_profile_is_train_scoped_an
         config.cash_utilization_profiles,
         vec!["stress_fill_gross_98_v1"]
     );
-    assert!(config.capacity_risk_budget_profiles.contains(
-        &"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()
-    ));
+    assert!(config
+        .capacity_risk_budget_profiles
+        .contains(&"capacity_stress_participation_blended_alpha_headroom_floor_70_v1".to_string()));
     assert!(
         config.seed_trials.len() >= 8,
         "GB needs enough train-window ML stress-fill seeds for an 8-trial strict smoke"
@@ -2888,8 +2860,7 @@ fn professional_train_window_ml_stress_fill_discovery_profile_is_train_scoped_an
 }
 
 #[test]
-fn professional_current_event_nonlinear_alpha_discovery_profile_uses_only_current_event_sources(
-) {
+fn professional_current_event_nonlinear_alpha_discovery_profile_uses_only_current_event_sources() {
     let config =
         LayeredSearchConfig::professional_current_event_nonlinear_alpha_discovery_default();
 
@@ -2950,8 +2921,7 @@ fn professional_current_event_nonlinear_alpha_discovery_profile_uses_only_curren
 
 #[test]
 fn professional_execution_bull_sleeve_cash_recovery_profile_extends_ec_anchor() {
-    let config =
-        LayeredSearchConfig::professional_execution_bull_sleeve_cash_recovery_default();
+    let config = LayeredSearchConfig::professional_execution_bull_sleeve_cash_recovery_default();
 
     assert_eq!(
         config.combo_versions,
@@ -3104,8 +3074,7 @@ fn professional_execution_oos_regime_alpha_rebuild_profile_targets_train_return_
 
 #[test]
 fn professional_execution_oos_benchmark_excess_rebuild_profile_targets_excess_gap() {
-    let config =
-        LayeredSearchConfig::professional_execution_oos_benchmark_excess_rebuild_default();
+    let config = LayeredSearchConfig::professional_execution_oos_benchmark_excess_rebuild_default();
 
     assert!(config
         .portfolio_volatility_controls
@@ -4476,8 +4445,7 @@ fn professional_regime_alpha_overlay_search_profile_seeds_small_stress_overlays(
             && trial["portfolio_volatility_control"] == "vol120_22_65_100"
     }));
     assert!(config.seed_trials.iter().all(|trial| {
-        trial["combo_name"] == "phase7_financial_quality_v1"
-            && trial["event_gate_profile"] == "off"
+        trial["combo_name"] == "phase7_financial_quality_v1" && trial["event_gate_profile"] == "off"
     }));
 }
 
@@ -4505,8 +4473,7 @@ fn professional_regime_alpha_sleeve_allocation_profile_seeds_portfolio_sleeves()
             && trial["portfolio_volatility_control"] == "vol120_22_65_100"
     }));
     assert!(config.seed_trials.iter().all(|trial| {
-        trial["combo_name"] == "phase7_financial_quality_v1"
-            && trial["event_gate_profile"] == "off"
+        trial["combo_name"] == "phase7_financial_quality_v1" && trial["event_gate_profile"] == "off"
     }));
 }
 
@@ -4531,8 +4498,7 @@ fn professional_low_risk_sleeve_profile_seeds_low_risk_portfolio_sleeves() {
             && trial["portfolio_volatility_control"] == "vol120_22_65_100"
     }));
     assert!(config.seed_trials.iter().all(|trial| {
-        trial["combo_name"] == "phase7_financial_quality_v1"
-            && trial["event_gate_profile"] == "off"
+        trial["combo_name"] == "phase7_financial_quality_v1" && trial["event_gate_profile"] == "off"
     }));
 }
 
@@ -4621,9 +4587,9 @@ fn professional_event_regime_sleeve_profile_searches_event_sleeve_neighbors() {
     assert!(config
         .market_regime_policies
         .contains(&"quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1".to_string()));
-    assert!(config.market_regime_policies.contains(
-        &"quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1".to_string()
-    ));
+    assert!(config
+        .market_regime_policies
+        .contains(&"quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1".to_string()));
     assert_eq!(config.seed_trials.len(), 6);
     assert!(config.seed_trials.iter().all(|trial| {
         trial["event_gate_profile"] == "valuation_exclude_bottom40"
@@ -4635,8 +4601,7 @@ fn professional_event_regime_sleeve_profile_searches_event_sleeve_neighbors() {
         trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1"
     }));
     assert!(config.seed_trials.iter().any(|trial| {
-        trial["market_regime"]
-            == "quality_regime_alpha_portfolio_sleeve_event_surprise_10pct_v1"
+        trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_surprise_10pct_v1"
     }));
 }
 
@@ -4732,12 +4697,12 @@ fn professional_event_window_decay_profile_searches_short_and_long_decay_variant
     assert_eq!(config.score_directions, vec![ScoreDirection::Ascending]);
     assert_eq!(config.portfolio_methods, vec!["risk_budget".to_string()]);
     assert_eq!(config.risk_budget_lookback_days, vec![120]);
-    assert!(config.market_regime_policies.contains(
-        &"quality_regime_alpha_portfolio_sleeve_event_window_15pct_10d_v1".to_string()
-    ));
-    assert!(config.market_regime_policies.contains(
-        &"quality_regime_alpha_portfolio_sleeve_event_window_15pct_40d_v1".to_string()
-    ));
+    assert!(config
+        .market_regime_policies
+        .contains(&"quality_regime_alpha_portfolio_sleeve_event_window_15pct_10d_v1".to_string()));
+    assert!(config
+        .market_regime_policies
+        .contains(&"quality_regime_alpha_portfolio_sleeve_event_window_15pct_40d_v1".to_string()));
     assert_eq!(config.seed_trials.len(), 5);
     assert!(config.seed_trials.iter().all(|trial| {
         trial["event_gate_profile"] == "valuation_exclude_bottom40"
@@ -4831,8 +4796,7 @@ fn professional_event_quality_segment_profile_keeps_ax_anchor_and_compares_event
         trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_window_15pct_v1"
     }));
     assert!(config.seed_trials.iter().any(|trial| {
-        trial["market_regime"]
-            == "quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1"
+        trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1"
     }));
     assert!(config.seed_trials.iter().any(|trial| {
         trial["market_regime"] == "quality_regime_alpha_portfolio_sleeve_event_confirm_15pct_v1"
@@ -5130,8 +5094,7 @@ fn professional_current_anchor_weak_window_repair_profile_keeps_bg_anchor_and_us
 
 #[test]
 fn professional_current_anchor_sharpe_return_bridge_profile_starts_from_high_sharpe_boundary() {
-    let config =
-        LayeredSearchConfig::professional_current_anchor_sharpe_return_bridge_default();
+    let config = LayeredSearchConfig::professional_current_anchor_sharpe_return_bridge_default();
 
     assert_eq!(
         config.combo_versions,
@@ -5436,8 +5399,7 @@ fn professional_position_sharpe_return_bridge_profile_blends_bq_and_boundary_sha
 
 #[test]
 fn professional_moderate_position_sharpe_return_bridge_profile_keeps_return_room() {
-    let config =
-        LayeredSearchConfig::professional_moderate_position_sharpe_return_bridge_default();
+    let config = LayeredSearchConfig::professional_moderate_position_sharpe_return_bridge_default();
 
     assert_eq!(
         config.combo_versions,
@@ -5529,8 +5491,7 @@ fn professional_correlation_frontier_sharpe_return_profile_sweeps_narrow_corr_ba
 
 #[test]
 fn professional_correlation_threshold_sharpe_return_profile_sweeps_jump_boundary() {
-    let config =
-        LayeredSearchConfig::professional_correlation_threshold_sharpe_return_default();
+    let config = LayeredSearchConfig::professional_correlation_threshold_sharpe_return_default();
 
     assert_eq!(
         config.max_pairwise_correlation,
@@ -5816,8 +5777,7 @@ fn professional_mixed_state_risk_memory_frontier_profile_bridges_return_and_shar
 
 #[test]
 fn professional_mixed_state_risk_memory_fine_frontier_profile_scans_near_boundary() {
-    let config =
-        LayeredSearchConfig::professional_mixed_state_risk_memory_fine_frontier_default();
+    let config = LayeredSearchConfig::professional_mixed_state_risk_memory_fine_frontier_default();
 
     assert_eq!(
         config.market_regime_policies,
@@ -6345,8 +6305,7 @@ fn professional_high_sharpe_boundary_return_bridge_profile_targets_real_boundary
 }
 
 #[test]
-fn professional_high_sharpe_boundary_event_lift_profile_adds_small_sleeves_without_date_fitting(
-) {
+fn professional_high_sharpe_boundary_event_lift_profile_adds_small_sleeves_without_date_fitting() {
     let config = LayeredSearchConfig::professional_high_sharpe_boundary_event_lift_default();
 
     assert_eq!(
@@ -6474,8 +6433,7 @@ fn professional_high_sharpe_micro_frontier_profile_searches_near_cl_cm_v14_witho
 }
 
 #[test]
-fn professional_v14_sharpe_return_lift_profile_keeps_sharpe_anchor_and_only_lifts_return_gently(
-) {
+fn professional_v14_sharpe_return_lift_profile_keeps_sharpe_anchor_and_only_lifts_return_gently() {
     let config = LayeredSearchConfig::professional_v14_sharpe_return_lift_default();
 
     assert_eq!(
@@ -6676,8 +6634,7 @@ fn professional_v14_ultra_micro_lift_profile_only_perturbs_the_high_sharpe_ancho
 }
 
 #[test]
-fn professional_return_alpha_sharpe_bridge_profile_combines_return_alpha_with_sharpe_controls()
-{
+fn professional_return_alpha_sharpe_bridge_profile_combines_return_alpha_with_sharpe_controls() {
     let config = LayeredSearchConfig::professional_return_alpha_sharpe_bridge_default();
 
     assert_eq!(
@@ -7180,8 +7137,8 @@ fn professional_execution_robust_candidate_profile_targets_capacity_fragility() 
 }
 
 #[test]
-fn professional_execution_low_turnover_alpha_profile_targets_capacity_friendly_orthogonal_sources(
-) {
+fn professional_execution_low_turnover_alpha_profile_targets_capacity_friendly_orthogonal_sources()
+{
     let config = LayeredSearchConfig::professional_execution_low_turnover_alpha_default();
 
     assert_eq!(
@@ -7344,8 +7301,7 @@ fn professional_execution_patient_schedule_profile_adds_long_twap_axis() {
 
     assert!(plan.trials.iter().any(|trial| {
         trial.parameters["execution_schedule_profile"] == "twap_20d_v1"
-            && trial.parameters["execution_rules"]["execution_schedule_profile"]
-                == "twap_20d_v1"
+            && trial.parameters["execution_rules"]["execution_schedule_profile"] == "twap_20d_v1"
     }));
 }
 
@@ -8281,8 +8237,7 @@ fn professional_v19_supply_float_sleeve_profile_is_seed_only_and_bounded() {
 
     assert!(config.seed_trials.iter().all(|trial| {
         trial["signal_source"] == "factor_combo"
-            && trial["supply_float_sleeve_profile"]
-                == "v19_p312_fq_change_supply_float_sleeve_v1"
+            && trial["supply_float_sleeve_profile"] == "v19_p312_fq_change_supply_float_sleeve_v1"
     }));
     assert!(config.seed_trials.iter().any(|trial| {
         trial["combo_name"] == "phase7_fq_change_supply_float_sleeve_10pct_v1"
@@ -8455,8 +8410,7 @@ fn professional_v19_shareholder_structure_sleeve_profile_is_seed_only_and_gated(
         trial["signal_source"] == "factor_combo"
             && trial["shareholder_structure_sleeve_profile"]
                 == "v19_p321e_fq_change_shareholder_structure_sleeve_v1"
-            && trial["shareholder_structure_sleeve_control"]
-                == "phase7_financial_quality_change_v1"
+            && trial["shareholder_structure_sleeve_control"] == "phase7_financial_quality_change_v1"
             && trial["alpha_admission_gate_id"]
                 == "shareholder_structure_low_fanout_strict_pit_gate_v1"
             && trial["universe_profile"] == "main_chinext_non_st"
@@ -8465,8 +8419,7 @@ fn professional_v19_shareholder_structure_sleeve_profile_is_seed_only_and_gated(
     }));
     assert!(config.seed_trials.iter().any(|trial| {
         trial["combo_name"] == "phase7_fq_change_shareholder_structure_sleeve_10pct_v1"
-            && trial["shareholder_structure_sleeve_variant"]
-                == "shareholder_structure_sleeve_10pct"
+            && trial["shareholder_structure_sleeve_variant"] == "shareholder_structure_sleeve_10pct"
     }));
 }
 

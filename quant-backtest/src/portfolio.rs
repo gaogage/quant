@@ -116,9 +116,9 @@ impl Default for FeeConfig {
             cost_multiplier: Decimal::ONE,
             // 平方根冲击模型：impact = 0.05 * sqrt(participation_rate)
             // participation_rate=10% 时冲击≈1.6%，超线性增长更贴近大单真实冲击
-            impact_cost_coefficient: Decimal::new(5, 2),  // 0.05
-            impact_cost_exponent: Decimal::new(5, 1),     // 0.5（平方根）
-            transfer_fee_rate: Decimal::new(1, 5),        // 0.00001 = 万0.1（沪市双边）
+            impact_cost_coefficient: Decimal::new(5, 2), // 0.05
+            impact_cost_exponent: Decimal::new(5, 1),    // 0.5（平方根）
+            transfer_fee_rate: Decimal::new(1, 5),       // 0.00001 = 万0.1（沪市双边）
         }
     }
 }
@@ -363,14 +363,17 @@ impl Portfolio {
         // 默认 exponent=0.5（平方根），大单冲击成本超线性增长，更贴近真实市场冲击。
         // 用 f64 powf（参照 metrics.rs:121 的 Decimal sqrt 模式），避免 Decimal 无原生 sqrt。
         // coeff=0 或 participation_rate=0 时无冲击（向后兼容旧配置）。
-        let impact = if participation_rate.is_zero() || self.fee_config.impact_cost_coefficient.is_zero() {
-            Decimal::ZERO
-        } else {
-            let pr_f = participation_rate.to_f64().unwrap_or(0.0).max(0.0);
-            let exp = self.fee_config.impact_cost_exponent.to_f64().unwrap_or(0.5);
-            let coeff = self.fee_config.impact_cost_coefficient;
-            Decimal::from_f64(pr_f.powf(exp)).map(|v| coeff * v).unwrap_or(Decimal::ZERO)
-        };
+        let impact =
+            if participation_rate.is_zero() || self.fee_config.impact_cost_coefficient.is_zero() {
+                Decimal::ZERO
+            } else {
+                let pr_f = participation_rate.to_f64().unwrap_or(0.0).max(0.0);
+                let exp = self.fee_config.impact_cost_exponent.to_f64().unwrap_or(0.5);
+                let coeff = self.fee_config.impact_cost_coefficient;
+                Decimal::from_f64(pr_f.powf(exp))
+                    .map(|v| coeff * v)
+                    .unwrap_or(Decimal::ZERO)
+            };
         let base = self.fee_config.slippage_bps + impact;
         base * self.fee_config.cost_multiplier
     }
@@ -403,7 +406,11 @@ mod tests {
     use super::*;
 
     fn default_portfolio() -> Portfolio {
-        Portfolio::new(Decimal::new(1_000_000, 0), FeeConfig::default(), Decimal::ZERO)
+        Portfolio::new(
+            Decimal::new(1_000_000, 0),
+            FeeConfig::default(),
+            Decimal::ZERO,
+        )
     }
 
     /// 平方根冲击模型：impact = 0.05 * sqrt(participation_rate)
@@ -412,8 +419,10 @@ mod tests {
     fn effective_slippage_sqrt_model() {
         let p = default_portfolio();
         let slippage = p.effective_slippage(Decimal::new(1, 1)); // 0.1
-        // slippage = slippage_bps(0.0001) + 0.05 * sqrt(0.1)
-        let expected_impact = Decimal::from_f64(0.1_f64.sqrt()).map(|v| Decimal::new(5, 2) * v).unwrap();
+                                                                 // slippage = slippage_bps(0.0001) + 0.05 * sqrt(0.1)
+        let expected_impact = Decimal::from_f64(0.1_f64.sqrt())
+            .map(|v| Decimal::new(5, 2) * v)
+            .unwrap();
         let expected = Decimal::new(1, 4) + expected_impact;
         assert!(
             (slippage - expected).abs() < Decimal::new(1, 8),
@@ -425,14 +434,20 @@ mod tests {
     #[test]
     fn effective_slippage_sqrt_sublinear() {
         let p = default_portfolio();
-        let s_low = p.effective_slippage(Decimal::new(5, 2));  // 0.05
+        let s_low = p.effective_slippage(Decimal::new(5, 2)); // 0.05
         let s_high = p.effective_slippage(Decimal::new(1, 1)); // 0.10（参与率翻倍）
         let impact_low = s_low - Decimal::new(1, 4);
         let impact_high = s_high - Decimal::new(1, 4);
         // 线性模型 impact_high/impact_low = 2.0；平方根模型 = sqrt(2) ≈ 1.414
         let ratio = impact_high / impact_low;
-        assert!(ratio < Decimal::new(18, 1), "sqrt 模型应亚线性，ratio={ratio} < 1.8"); // < 1.8
-        assert!(ratio > Decimal::new(14, 1), "ratio 应接近 sqrt(2)≈1.414，got {ratio}");
+        assert!(
+            ratio < Decimal::new(18, 1),
+            "sqrt 模型应亚线性，ratio={ratio} < 1.8"
+        ); // < 1.8
+        assert!(
+            ratio > Decimal::new(14, 1),
+            "ratio 应接近 sqrt(2)≈1.414，got {ratio}"
+        );
     }
 
     /// coeff=0 时无冲击（向后兼容旧配置）
@@ -476,7 +491,14 @@ mod tests {
         // 买 100 股 600000.SH @ 10 元，participation_rate=0 → slippage=slippage_bps=0.0001
         // slippage_price = 10 * 1.0001 = 10.001，amount = 1000.1
         // 过户费 = 1000.1 * 0.00001 = 0.010001（沪市）
-        let fill = p.buy_with_cost(date, "600000.SH", Decimal::new(100, 0), Decimal::new(10, 0), Decimal::ZERO, None);
+        let fill = p.buy_with_cost(
+            date,
+            "600000.SH",
+            Decimal::new(100, 0),
+            Decimal::new(10, 0),
+            Decimal::ZERO,
+            None,
+        );
         assert!(fill.is_some());
         let trade = p.trades.last().unwrap();
         assert_eq!(trade.transfer_fee, Decimal::new(10001, 6)); // 0.010001
@@ -493,7 +515,14 @@ mod tests {
         );
         let mut p = p;
         let date = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
-        let fill = p.buy_with_cost(date, "000001.SZ", Decimal::new(100, 0), Decimal::new(10, 0), Decimal::ZERO, None);
+        let fill = p.buy_with_cost(
+            date,
+            "000001.SZ",
+            Decimal::new(100, 0),
+            Decimal::new(10, 0),
+            Decimal::ZERO,
+            None,
+        );
         assert!(fill.is_some());
         let trade = p.trades.last().unwrap();
         assert_eq!(trade.transfer_fee, Decimal::ZERO);

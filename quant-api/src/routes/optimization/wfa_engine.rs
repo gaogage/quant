@@ -57,7 +57,6 @@ use quant_backtest::signal_generator::{
     SignalDataCacheSnapshot, SignalDataCacheStats,
 };
 
-
 use super::*;
 
 #[derive(Debug, Clone)]
@@ -69,7 +68,6 @@ pub(crate) struct OosDiscoveryWindow {
     pub(crate) test_start: NaiveDate,
     pub(crate) test_end: NaiveDate,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct OosDiscoveryPlan {
@@ -83,7 +81,6 @@ pub(crate) struct OosDiscoveryPlan {
     pub(crate) include_partial_last_window: bool,
     pub(crate) windows: Vec<OosDiscoveryWindow>,
 }
-
 
 pub(crate) struct OosWindowExecution {
     pub(crate) window: OosDiscoveryWindow,
@@ -102,14 +99,12 @@ pub(crate) struct OosWindowExecution {
     pub(crate) skip_reason: Option<String>,
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct TrainWindowMlPredictionSets {
     pub(crate) train_prediction_set_id: String,
     pub(crate) test_prediction_set_id: String,
     pub(crate) training_task_id: String,
 }
-
 
 pub(crate) struct OosCostCapacityPerturbationResult {
     name: String,
@@ -119,7 +114,6 @@ pub(crate) struct OosCostCapacityPerturbationResult {
     passed: bool,
 }
 
-
 pub(crate) struct OosTrainCandidateEvaluation {
     pub(crate) candidate: DiscoveryCandidate,
     pub(crate) robustness: Value,
@@ -128,7 +122,6 @@ pub(crate) struct OosTrainCandidateEvaluation {
     pub(crate) stress_adjusted_score: Decimal,
     pub(crate) train_cost_gate_passed: bool,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct CostCapacityPerturbationSummary {
@@ -154,7 +147,6 @@ pub(crate) struct CostCapacityPerturbationSummary {
     pub(crate) total_execution_schedule_expired_count: usize,
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct PredictionConfidenceStressFillQualityScoreBreakdown {
     total_score: Decimal,
@@ -179,7 +171,6 @@ pub(crate) struct PredictionConfidenceStressFillQualityScoreBreakdown {
     sortino_shortfall: Decimal,
 }
 
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OosCostCapacityGateConfig {
     pub(crate) enabled: bool,
@@ -187,7 +178,6 @@ pub(crate) struct OosCostCapacityGateConfig {
     pub(crate) min_perturbed_calmar: f64,
     pub(crate) max_perturbed_drawdown_pct: f64,
 }
-
 
 pub(crate) struct TrialExecutionOutcome {
     pub(crate) completed: i64,
@@ -198,7 +188,6 @@ pub(crate) struct TrialExecutionOutcome {
     pub(crate) backtest_cache_snapshot: Option<BacktestDataCacheSnapshot>,
 }
 
-
 #[cfg(test)]
 pub(crate) fn build_phase7_layered_plan_bundle(
     req: &Phase7LayeredOptimizationRequest,
@@ -206,7 +195,6 @@ pub(crate) fn build_phase7_layered_plan_bundle(
 ) -> Phase7LayeredPlanBundle {
     build_phase7_layered_plan_bundle_with_trial_cap(req, resource_plan, 500)
 }
-
 
 #[cfg(test)]
 fn build_phase7_layered_plan_bundle_with_trial_cap(
@@ -222,7 +210,6 @@ fn build_phase7_layered_plan_bundle_with_trial_cap(
         None,
     )
 }
-
 
 pub(crate) fn build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train_window_ml_prediction_set(
     req: &Phase7LayeredOptimizationRequest,
@@ -276,7 +263,6 @@ pub(crate) fn build_phase7_layered_plan_bundle_with_trial_cap_and_internal_train
     }
 }
 
-
 pub async fn create_phase7_layered_optimization(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7LayeredOptimizationRequest>,
@@ -302,7 +288,6 @@ pub async fn create_phase7_layered_optimization(
     }
 }
 
-
 pub(crate) async fn insert_phase7_layered_optimization(
     db: &sqlx::PgPool,
     req: &Phase7LayeredOptimizationRequest,
@@ -310,7 +295,6 @@ pub(crate) async fn insert_phase7_layered_optimization(
 ) -> Result<(String, Phase7LayeredPlanBundle), String> {
     insert_phase7_layered_optimization_with_trial_cap(db, req, resource_plan, 500).await
 }
-
 
 pub(crate) async fn insert_phase7_layered_optimization_with_trial_cap(
     db: &sqlx::PgPool,
@@ -327,7 +311,6 @@ pub(crate) async fn insert_phase7_layered_optimization_with_trial_cap(
     )
     .await
 }
-
 
 pub(crate) async fn insert_phase7_layered_optimization_with_trial_cap_and_internal_train_window_ml_prediction_set(
     db: &sqlx::PgPool,
@@ -404,7 +387,6 @@ pub(crate) async fn insert_phase7_layered_optimization_with_trial_cap_and_intern
     Ok((task_id, bundle))
 }
 
-
 pub async fn run_phase7_oos_walk_forward_discovery(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7OosWalkForwardDiscoveryRequest>,
@@ -433,7 +415,6 @@ pub async fn run_phase7_oos_walk_forward_discovery(
     }
 }
 
-
 pub async fn plan_phase7_oos_profile_comparison(
     Json(req): Json<Phase7OosProfileComparisonPlanRequest>,
 ) -> impl IntoResponse {
@@ -446,7 +427,6 @@ pub async fn plan_phase7_oos_profile_comparison(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub async fn launch_phase7_oos_profile_comparison_smoke(
     State(state): State<Arc<AppState>>,
@@ -475,13 +455,11 @@ pub(crate) fn normalize_oos_execution_mode(mode: Option<&str>) -> Result<&'stati
     }
 }
 
-
 pub(crate) fn normalized_trial_concurrency(value: Option<usize>) -> usize {
     value
         .unwrap_or_else(|| LocalResourcePlan::local_mac().batch_size.min(4).max(1))
         .clamp(1, 16)
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OosTrainExecutionPolicy {
@@ -490,7 +468,6 @@ pub(crate) struct OosTrainExecutionPolicy {
     pub(crate) requested_trial_concurrency: usize,
     pub(crate) trial_concurrency: usize,
 }
-
 
 pub(crate) fn normalize_oos_train_cache_mode(mode: Option<&str>) -> Result<&'static str, String> {
     match mode
@@ -505,7 +482,6 @@ pub(crate) fn normalize_oos_train_cache_mode(mode: Option<&str>) -> Result<&'sta
         other => Err(format!("unsupported train_cache_mode: {}", other)),
     }
 }
-
 
 pub(crate) fn resolve_oos_train_execution_policy(
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -546,7 +522,6 @@ pub(crate) fn resolve_oos_train_execution_policy(
         trial_concurrency,
     })
 }
-
 
 pub(crate) async fn start_phase7_oos_walk_forward_discovery_background(
     db: &sqlx::PgPool,
@@ -591,7 +566,6 @@ pub(crate) async fn start_phase7_oos_walk_forward_discovery_background(
         "poll_url": format!("/api/v1/quant/experiments/{}", experiment_run_id),
     }))
 }
-
 
 pub(crate) async fn start_phase7_oos_profile_comparison_smoke(
     db: &sqlx::PgPool,
@@ -641,7 +615,6 @@ pub(crate) async fn start_phase7_oos_profile_comparison_smoke(
         "launches": launches,
     }))
 }
-
 
 pub(crate) async fn execute_phase7_oos_walk_forward_discovery(
     db: &sqlx::PgPool,
@@ -795,7 +768,6 @@ pub(crate) async fn execute_phase7_oos_walk_forward_discovery(
     }))
 }
 
-
 pub(crate) fn should_use_fixed_params_oos_mode(
     fixed_params_enabled: bool,
     has_train_window_ml_prediction_sets: bool,
@@ -822,7 +794,6 @@ pub(crate) fn should_use_fixed_params_oos_mode_with_profile(
     let (_profile_name, search_config) = phase7_search_config(Some(canonical_profile));
     search_config.seed_trials.len() == 1
 }
-
 
 pub(crate) async fn execute_oos_discovery_window(
     db: &sqlx::PgPool,
@@ -1247,7 +1218,6 @@ pub(crate) async fn ensemble_model_params_for_window(
     }
 }
 
-
 pub(crate) async fn prepare_train_window_ml_prediction_sets_for_oos_window(
     db: &sqlx::PgPool,
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -1601,7 +1571,6 @@ pub(crate) async fn prepare_train_window_ml_prediction_sets_for_oos_window(
     }))
 }
 
-
 pub(crate) async fn execute_oos_cost_capacity_perturbations(
     db: &sqlx::PgPool,
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -1640,7 +1609,6 @@ pub(crate) async fn execute_oos_cost_capacity_perturbations(
     }
     Ok(results)
 }
-
 
 pub(crate) async fn execute_train_cost_capacity_perturbations(
     db: &sqlx::PgPool,
@@ -1689,7 +1657,6 @@ pub(crate) async fn execute_train_cost_capacity_perturbations(
     Ok(results)
 }
 
-
 pub(crate) async fn execute_oos_candidate_backtest(
     db: &sqlx::PgPool,
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -1733,8 +1700,9 @@ pub(crate) async fn execute_oos_candidate_backtest(
     }
 }
 
-
-pub(crate) fn cost_capacity_perturbation_gate_enabled(req: &Phase7OosWalkForwardDiscoveryRequest) -> bool {
+pub(crate) fn cost_capacity_perturbation_gate_enabled(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+) -> bool {
     req.enable_cost_capacity_perturbation_gate
         .unwrap_or_else(|| {
             req.cost_capacity_perturbations
@@ -1743,7 +1711,6 @@ pub(crate) fn cost_capacity_perturbation_gate_enabled(req: &Phase7OosWalkForward
                 .unwrap_or(false)
         })
 }
-
 
 pub(crate) fn resolved_oos_cost_capacity_perturbations(
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -1756,7 +1723,6 @@ pub(crate) fn resolved_oos_cost_capacity_perturbations(
         .filter(|items| !items.is_empty())
         .unwrap_or_else(default_oos_cost_capacity_perturbations)
 }
-
 
 pub(crate) fn resolved_train_cost_capacity_perturbations(
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -1771,7 +1737,6 @@ pub(crate) fn resolved_train_cost_capacity_perturbations(
         .filter(|items| !items.is_empty())
         .unwrap_or_else(default_oos_cost_capacity_perturbations)
 }
-
 
 pub(crate) fn train_cost_capacity_perturbation_gate_config(
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -1820,7 +1785,6 @@ pub(crate) fn train_cost_capacity_perturbation_gate_config(
     }
 }
 
-
 pub(crate) fn train_cost_capacity_stress_aware_selection_enabled(
     train_gate_policy: &Value,
     gate: &OosCostCapacityGateConfig,
@@ -1836,8 +1800,9 @@ pub(crate) fn train_cost_capacity_stress_aware_selection_enabled(
     .unwrap_or(true)
 }
 
-
-pub(crate) fn best_effort_train_selection_for_diagnostics_enabled(train_gate_policy: &Value) -> bool {
+pub(crate) fn best_effort_train_selection_for_diagnostics_enabled(
+    train_gate_policy: &Value,
+) -> bool {
     constraint_bool(
         Some(train_gate_policy),
         "allow_best_effort_train_selection_for_diagnostics",
@@ -1851,7 +1816,6 @@ pub(crate) fn best_effort_train_selection_for_diagnostics_enabled(train_gate_pol
     .unwrap_or(false)
 }
 
-
 pub(crate) fn oos_cost_capacity_perturbation_name(
     perturbation: &OosCostCapacityPerturbationRequest,
     index: usize,
@@ -1864,7 +1828,6 @@ pub(crate) fn oos_cost_capacity_perturbation_name(
         .map(str::to_string)
         .unwrap_or_else(|| format!("cost_capacity_perturbation_{}", index + 1))
 }
-
 
 pub(crate) fn apply_cost_capacity_perturbation_to_parameters(
     parameters: &Value,
@@ -1904,7 +1867,6 @@ pub(crate) fn apply_cost_capacity_perturbation_to_parameters(
     Ok(Value::Object(object))
 }
 
-
 pub(crate) fn upsert_nested_number(
     object: &mut Map<String, Value>,
     parent: &str,
@@ -1928,7 +1890,6 @@ pub(crate) fn upsert_nested_number(
     }
     Ok(())
 }
-
 
 pub(crate) fn oos_cost_capacity_perturbation_passed(
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -1956,7 +1917,6 @@ pub(crate) fn oos_cost_capacity_perturbation_passed(
     cost_capacity_perturbation_passed_with_thresholds(output, min_calmar, max_drawdown)
 }
 
-
 pub(crate) fn cost_capacity_perturbation_passed_with_thresholds(
     output: &FactorBacktestRunOutput,
     min_calmar: f64,
@@ -1966,7 +1926,6 @@ pub(crate) fn cost_capacity_perturbation_passed_with_thresholds(
     let max_drawdown = Decimal::from_f64_retain(max_drawdown).unwrap_or(Decimal::MAX);
     output.metrics.calmar_ratio >= min_calmar && output.metrics.max_drawdown_pct <= max_drawdown
 }
-
 
 pub(crate) fn build_cost_capacity_pass_ratio_gate(
     gate_name: &str,
@@ -1987,7 +1946,6 @@ pub(crate) fn build_cost_capacity_pass_ratio_gate(
     })
 }
 
-
 pub(crate) fn cost_capacity_perturbation_pass_counts(
     results: &[OosCostCapacityPerturbationResult],
 ) -> (usize, usize) {
@@ -1996,7 +1954,6 @@ pub(crate) fn cost_capacity_perturbation_pass_counts(
         results.len(),
     )
 }
-
 
 pub(crate) fn cost_capacity_perturbation_summary(
     results: &[OosCostCapacityPerturbationResult],
@@ -2084,7 +2041,6 @@ pub(crate) fn cost_capacity_perturbation_summary(
     }
 }
 
-
 #[cfg(test)]
 pub(crate) fn cost_capacity_perturbation_summary_from_counts(
     passed_count: usize,
@@ -2119,11 +2075,9 @@ pub(crate) fn cost_capacity_perturbation_summary_from_counts(
     }
 }
 
-
 pub(crate) fn clamp_decimal(value: Decimal, lower: Decimal, upper: Decimal) -> Decimal {
     value.max(lower).min(upper)
 }
-
 
 pub(crate) fn train_cost_capacity_stress_score_profile(train_gate_policy: &Value) -> &'static str {
     let profile = constraint_str(Some(train_gate_policy), "train_stress_score_profile")
@@ -2167,7 +2121,6 @@ pub(crate) fn train_cost_capacity_stress_score_profile(train_gate_policy: &Value
     }
 }
 
-
 pub(crate) fn train_candidate_stress_adjusted_score(
     candidate: &DiscoveryCandidate,
     summary: &CostCapacityPerturbationSummary,
@@ -2207,7 +2160,6 @@ pub(crate) fn train_candidate_stress_adjusted_score(
         - drawdown_penalty
         + base_quality_score
 }
-
 
 pub(crate) fn train_candidate_capacity_stress_calmar_score(
     candidate: &DiscoveryCandidate,
@@ -2259,7 +2211,6 @@ pub(crate) fn train_candidate_capacity_stress_calmar_score(
         - annual_return_shortfall_penalty
 }
 
-
 pub(crate) fn train_candidate_capacity_stress_return_score(
     candidate: &DiscoveryCandidate,
     summary: &CostCapacityPerturbationSummary,
@@ -2299,7 +2250,6 @@ pub(crate) fn train_candidate_capacity_stress_return_score(
         - target_calmar_shortfall
         - execution_quality_penalty
 }
-
 
 pub(crate) fn train_execution_quality_penalty(
     candidate: &DiscoveryCandidate,
@@ -2356,7 +2306,6 @@ pub(crate) fn train_execution_quality_penalty(
     }
     penalty
 }
-
 
 pub(crate) fn train_candidate_stress_fill_objective_score(
     candidate: &DiscoveryCandidate,
@@ -2422,7 +2371,6 @@ pub(crate) fn train_candidate_stress_fill_objective_score(
         - fill_shortfall_penalty
 }
 
-
 pub(crate) fn candidate_prediction_confidence_score(candidate: &DiscoveryCandidate) -> Decimal {
     let Some(parameters) = candidate.parameters.as_object() else {
         return Decimal::ZERO;
@@ -2464,7 +2412,6 @@ pub(crate) fn candidate_prediction_confidence_score(candidate: &DiscoveryCandida
         - min_score_absence_penalty
 }
 
-
 pub(crate) fn train_candidate_prediction_confidence_stress_fill_objective_score(
     candidate: &DiscoveryCandidate,
     summary: &CostCapacityPerturbationSummary,
@@ -2473,7 +2420,6 @@ pub(crate) fn train_candidate_prediction_confidence_stress_fill_objective_score(
     train_candidate_stress_fill_objective_score(candidate, summary, train_gate_policy)
         + candidate_prediction_confidence_score(candidate)
 }
-
 
 pub(crate) fn prediction_confidence_stress_fill_quality_score_breakdown(
     candidate: &DiscoveryCandidate,
@@ -2564,7 +2510,6 @@ pub(crate) fn prediction_confidence_stress_fill_quality_score_breakdown(
     }
 }
 
-
 pub(crate) fn train_candidate_prediction_confidence_stress_fill_quality_score(
     candidate: &DiscoveryCandidate,
     summary: &CostCapacityPerturbationSummary,
@@ -2573,7 +2518,6 @@ pub(crate) fn train_candidate_prediction_confidence_stress_fill_quality_score(
     prediction_confidence_stress_fill_quality_score_breakdown(candidate, summary, train_gate_policy)
         .total_score
 }
-
 
 pub(crate) fn train_candidate_cash_drag_fill_gap_score(
     candidate: &DiscoveryCandidate,
@@ -2650,7 +2594,6 @@ pub(crate) fn train_candidate_cash_drag_fill_gap_score(
         - expired_penalty
 }
 
-
 pub(crate) fn train_candidate_stress_adjusted_score_for_policy(
     candidate: &DiscoveryCandidate,
     summary: &CostCapacityPerturbationSummary,
@@ -2686,7 +2629,6 @@ pub(crate) fn train_candidate_stress_adjusted_score_for_policy(
         _ => train_candidate_stress_adjusted_score(candidate, summary),
     }
 }
-
 
 pub(crate) fn train_candidate_stress_score_breakdown(
     candidate: &DiscoveryCandidate,
@@ -2742,7 +2684,6 @@ pub(crate) fn train_candidate_stress_score_breakdown(
     })
 }
 
-
 pub(crate) fn train_candidate_evaluation_order(
     left: &OosTrainCandidateEvaluation,
     right: &OosTrainCandidateEvaluation,
@@ -2784,7 +2725,6 @@ pub(crate) fn train_candidate_evaluation_order(
         .then_with(|| discovery_candidate_order(&left.candidate, &right.candidate))
 }
 
-
 pub(crate) fn attach_train_cost_capacity_gate_to_robustness(
     mut robustness: Value,
     passed_count: usize,
@@ -2820,7 +2760,6 @@ pub(crate) fn attach_train_cost_capacity_gate_to_robustness(
     }
     (robustness, passed)
 }
-
 
 pub(crate) fn attach_train_capacity_stress_return_gates_to_robustness(
     mut robustness: Value,
@@ -2879,7 +2818,6 @@ pub(crate) fn attach_train_capacity_stress_return_gates_to_robustness(
     }
     (robustness, passed)
 }
-
 
 pub(crate) fn attach_train_cash_drag_fill_gap_gates_to_robustness(
     mut robustness: Value,
@@ -3018,7 +2956,6 @@ pub(crate) fn attach_train_cash_drag_fill_gap_gates_to_robustness(
     (robustness, passed)
 }
 
-
 pub(crate) fn train_cost_capacity_overlay_persistence_fields(
     robustness: &Value,
 ) -> Result<RobustnessOverlayPersistenceFields, String> {
@@ -3042,7 +2979,6 @@ pub(crate) fn train_cost_capacity_overlay_persistence_fields(
         gate_results,
     })
 }
-
 
 pub(crate) async fn persist_train_cost_capacity_robustness_overlay(
     db: &sqlx::PgPool,
@@ -3073,7 +3009,6 @@ pub(crate) async fn persist_train_cost_capacity_robustness_overlay(
     })?;
     Ok(())
 }
-
 
 pub(crate) fn build_oos_discovery_plan(
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -3130,7 +3065,6 @@ pub(crate) fn build_oos_discovery_plan(
     })
 }
 
-
 pub(crate) fn default_phase7_oos_comparison_profiles() -> Vec<String> {
     vec![
         "phase7_ec".to_string(),
@@ -3139,15 +3073,12 @@ pub(crate) fn default_phase7_oos_comparison_profiles() -> Vec<String> {
     ]
 }
 
-
 pub(crate) const RETURN_RISK_CACHE_ECONOMICS_REPORT_ENDPOINT: &str =
     "/api/v1/quant/experiments/return-risk-cache-economics/report";
-
 
 pub(crate) fn return_risk_cache_comparison_enabled(value: Option<bool>) -> bool {
     value.unwrap_or(false)
 }
-
 
 pub(crate) fn normalize_profile_comparison_profiles(
     profiles: Option<Vec<String>>,
@@ -3169,8 +3100,9 @@ pub(crate) fn normalize_profile_comparison_profiles(
         .collect()
 }
 
-
-pub(crate) fn profile_comparison_return_risk_cache_modes(enabled: bool) -> Vec<Option<&'static str>> {
+pub(crate) fn profile_comparison_return_risk_cache_modes(
+    enabled: bool,
+) -> Vec<Option<&'static str>> {
     if enabled {
         vec![Some("raw_matrix"), Some("stats_matrix_experimental")]
     } else {
@@ -3178,8 +3110,9 @@ pub(crate) fn profile_comparison_return_risk_cache_modes(enabled: bool) -> Vec<O
     }
 }
 
-
-pub(crate) fn normalize_return_risk_feature_cache_mode(value: &str) -> Result<&'static str, String> {
+pub(crate) fn normalize_return_risk_feature_cache_mode(
+    value: &str,
+) -> Result<&'static str, String> {
     match value.trim() {
         "raw_matrix" | "raw-matrix" => Ok("raw_matrix"),
         "stats_matrix_experimental" | "stats-matrix-experimental" => {
@@ -3191,7 +3124,6 @@ pub(crate) fn normalize_return_risk_feature_cache_mode(value: &str) -> Result<&'
         )),
     }
 }
-
 
 pub(crate) fn set_request_return_risk_feature_cache_mode(
     req: &mut Phase7OosWalkForwardDiscoveryRequest,
@@ -3210,7 +3142,6 @@ pub(crate) fn set_request_return_risk_feature_cache_mode(
     Ok(())
 }
 
-
 pub(crate) fn request_return_risk_feature_cache_mode(
     req: &Phase7OosWalkForwardDiscoveryRequest,
 ) -> Option<String> {
@@ -3220,7 +3151,6 @@ pub(crate) fn request_return_risk_feature_cache_mode(
         .and_then(Value::as_str)
         .map(str::to_string)
 }
-
 
 pub(crate) fn profile_comparison_request(
     base: &Phase7OosWalkForwardDiscoveryRequest,
@@ -3238,7 +3168,6 @@ pub(crate) fn profile_comparison_request(
     req
 }
 
-
 pub(crate) fn profile_comparison_request_for_cache_mode(
     base: &Phase7OosWalkForwardDiscoveryRequest,
     search_profile: &str,
@@ -3250,7 +3179,6 @@ pub(crate) fn profile_comparison_request_for_cache_mode(
     }
     Ok(req)
 }
-
 
 pub(crate) fn oos_request_plan_json(req: &Phase7OosWalkForwardDiscoveryRequest) -> Value {
     json!({
@@ -3274,7 +3202,6 @@ pub(crate) fn oos_request_plan_json(req: &Phase7OosWalkForwardDiscoveryRequest) 
         "return_risk_feature_cache_mode": request_return_risk_feature_cache_mode(req),
     })
 }
-
 
 pub(crate) fn build_phase7_oos_profile_comparison_plan(
     base: &Phase7OosWalkForwardDiscoveryRequest,
@@ -3321,7 +3248,6 @@ pub(crate) fn build_phase7_oos_profile_comparison_plan(
     }))
 }
 
-
 pub(crate) fn bounded_profile_comparison_smoke_request(
     base: &Phase7OosWalkForwardDiscoveryRequest,
     search_profile: &str,
@@ -3340,7 +3266,6 @@ pub(crate) fn bounded_profile_comparison_smoke_request(
     req.oos_top_n = Some(req.oos_top_n.unwrap_or(3).clamp(1, 3));
     Ok(req)
 }
-
 
 pub(crate) fn build_phase7_oos_profile_comparison_launch_requests(
     base: &Phase7OosWalkForwardDiscoveryRequest,
@@ -3366,7 +3291,6 @@ pub(crate) fn build_phase7_oos_profile_comparison_launch_requests(
     Ok(requests)
 }
 
-
 pub(crate) fn return_risk_cache_comparison_plan(enabled: bool, pair_count: usize) -> Value {
     json!({
         "enabled": enabled,
@@ -3388,7 +3312,6 @@ pub(crate) fn return_risk_cache_comparison_plan(enabled: bool, pair_count: usize
         },
     })
 }
-
 
 pub(crate) fn cache_economics_report_launch_plan(enabled: bool, launches: &[Value]) -> Value {
     if !enabled {
@@ -3445,7 +3368,6 @@ pub(crate) fn cache_economics_report_launch_plan(enabled: bool, launches: &[Valu
     })
 }
 
-
 pub(crate) fn build_holdout_oos_windows(
     start_date: NaiveDate,
     end_date: NaiveDate,
@@ -3470,7 +3392,6 @@ pub(crate) fn build_holdout_oos_windows(
         test_end: end_date,
     }])
 }
-
 
 pub(crate) fn build_rolling_oos_windows(
     start_date: NaiveDate,
@@ -3512,8 +3433,11 @@ pub(crate) fn build_rolling_oos_windows(
     Ok(windows)
 }
 
-
-pub(crate) fn parse_template_date(template: &Value, key: &str, default: &str) -> Result<NaiveDate, String> {
+pub(crate) fn parse_template_date(
+    template: &Value,
+    key: &str,
+    default: &str,
+) -> Result<NaiveDate, String> {
     let value = template
         .get(key)
         .and_then(Value::as_str)
@@ -3522,16 +3446,13 @@ pub(crate) fn parse_template_date(template: &Value, key: &str, default: &str) ->
     parse_oos_yyyymmdd(value, key)
 }
 
-
 pub(crate) fn parse_oos_yyyymmdd(value: &str, field: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(value, "%Y%m%d").map_err(|_| format!("{} must be YYYYMMDD", field))
 }
 
-
 pub(crate) fn format_oos_yyyymmdd(date: NaiveDate) -> String {
     date.format("%Y%m%d").to_string()
 }
-
 
 pub(crate) fn backtest_template_for_window(
     mut template: Value,
@@ -3562,7 +3483,6 @@ pub(crate) fn backtest_template_for_window(
         .or_insert_with(|| json!({"enabled": true, "mode": "adjust_start"}));
     Ok(template)
 }
-
 
 pub(crate) async fn load_oos_training_candidates(
     db: &sqlx::PgPool,
@@ -3612,7 +3532,6 @@ pub(crate) async fn load_oos_training_candidates(
     candidates.truncate(limit.max(1));
     Ok(candidates)
 }
-
 
 pub(crate) async fn select_oos_training_candidate(
     db: &sqlx::PgPool,
@@ -3786,7 +3705,6 @@ pub(crate) async fn select_oos_training_candidate(
     ))
 }
 
-
 pub(crate) async fn load_oos_equity_points(
     db: &sqlx::PgPool,
     backtest_task_id: &str,
@@ -3815,7 +3733,6 @@ pub(crate) async fn load_oos_equity_points(
             .collect()
     })
 }
-
 
 pub(crate) fn append_stitched_oos_points(
     stitched: &mut Vec<RobustnessDailyPoint>,
@@ -3869,7 +3786,6 @@ pub(crate) fn append_stitched_oos_points(
         last_date = Some(next.trade_date);
     }
 }
-
 
 pub(crate) fn build_oos_gate_report(
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -4050,7 +3966,6 @@ pub(crate) fn build_oos_gate_report(
     Value::Array(gates)
 }
 
-
 pub(crate) fn oos_gate_status(gates: &Value) -> &'static str {
     let passed = gates
         .as_array()
@@ -4066,7 +3981,6 @@ pub(crate) fn oos_gate_status(gates: &Value) -> &'static str {
         "rejected"
     }
 }
-
 
 pub(crate) fn oos_discovery_plan_json(plan: &OosDiscoveryPlan) -> Value {
     json!({
@@ -4089,7 +4003,6 @@ pub(crate) fn oos_discovery_plan_json(plan: &OosDiscoveryPlan) -> Value {
     })
 }
 
-
 pub(crate) fn oos_window_json(window: &OosDiscoveryWindow) -> Value {
     json!({
         "window_index": window.window_index,
@@ -4101,8 +4014,10 @@ pub(crate) fn oos_window_json(window: &OosDiscoveryWindow) -> Value {
     })
 }
 
-
-pub(crate) fn oos_window_execution_json(execution: &OosWindowExecution, train_gate_policy: &Value) -> Value {
+pub(crate) fn oos_window_execution_json(
+    execution: &OosWindowExecution,
+    train_gate_policy: &Value,
+) -> Value {
     let train_cost_capacity_summary =
         cost_capacity_perturbation_summary(&execution.train_cost_capacity_perturbations);
     oos_window_execution_json_with_train_summary(
@@ -4111,7 +4026,6 @@ pub(crate) fn oos_window_execution_json(execution: &OosWindowExecution, train_ga
         &train_cost_capacity_summary,
     )
 }
-
 
 pub(crate) fn oos_window_execution_json_with_train_summary(
     execution: &OosWindowExecution,
@@ -4182,7 +4096,6 @@ pub(crate) fn oos_window_execution_json_with_train_summary(
     })
 }
 
-
 pub(crate) fn annotate_oos_train_batch_cache_mode(
     mut batch: Value,
     train_execution_policy: &OosTrainExecutionPolicy,
@@ -4215,8 +4128,9 @@ pub(crate) fn annotate_oos_train_batch_cache_mode(
     batch
 }
 
-
-pub(crate) fn cost_capacity_perturbation_summary_json(summary: &CostCapacityPerturbationSummary) -> Value {
+pub(crate) fn cost_capacity_perturbation_summary_json(
+    summary: &CostCapacityPerturbationSummary,
+) -> Value {
     json!({
         "passed_count": summary.passed_count,
         "total_count": summary.total_count,
@@ -4239,8 +4153,9 @@ pub(crate) fn cost_capacity_perturbation_summary_json(summary: &CostCapacityPert
     })
 }
 
-
-pub(crate) fn oos_cost_capacity_perturbation_result_json(result: &OosCostCapacityPerturbationResult) -> Value {
+pub(crate) fn oos_cost_capacity_perturbation_result_json(
+    result: &OosCostCapacityPerturbationResult,
+) -> Value {
     json!({
         "name": result.name,
         "perturbation": result.perturbation,
@@ -4266,7 +4181,6 @@ pub(crate) fn oos_cost_capacity_perturbation_result_json(result: &OosCostCapacit
         }
     })
 }
-
 
 pub(crate) async fn persist_oos_walk_forward_experiment(
     db: &sqlx::PgPool,
@@ -4297,9 +4211,13 @@ pub(crate) async fn persist_oos_walk_forward_experiment(
         "completed",
     )
     .await
-    .map_err(|error| format!("Failed to insert OOS walk-forward experiment_run: {}", error))
+    .map_err(|error| {
+        format!(
+            "Failed to insert OOS walk-forward experiment_run: {}",
+            error
+        )
+    })
 }
-
 
 pub(crate) async fn create_running_oos_walk_forward_experiment(
     db: &sqlx::PgPool,
@@ -4323,9 +4241,13 @@ pub(crate) async fn create_running_oos_walk_forward_experiment(
         "running",
     )
     .await
-    .map_err(|error| format!("Failed to insert running OOS walk-forward experiment_run: {}", error))
+    .map_err(|error| {
+        format!(
+            "Failed to insert running OOS walk-forward experiment_run: {}",
+            error
+        )
+    })
 }
-
 
 pub(crate) async fn update_oos_walk_forward_experiment_progress(
     db: &sqlx::PgPool,
@@ -4359,7 +4281,6 @@ pub(crate) async fn update_oos_walk_forward_experiment_progress(
     })?;
     Ok(())
 }
-
 
 pub(crate) async fn complete_oos_walk_forward_experiment(
     db: &sqlx::PgPool,
@@ -4403,7 +4324,6 @@ pub(crate) async fn complete_oos_walk_forward_experiment(
     Ok(())
 }
 
-
 pub(crate) async fn mark_oos_walk_forward_experiment_failed(
     db: &sqlx::PgPool,
     experiment_run_id: &str,
@@ -4432,7 +4352,6 @@ pub(crate) async fn mark_oos_walk_forward_experiment_failed(
     })?;
     Ok(())
 }
-
 
 pub(crate) fn oos_walk_forward_experiment_config(
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -4505,7 +4424,6 @@ pub(crate) fn oos_walk_forward_experiment_config(
     })
 }
 
-
 pub(crate) fn oos_walk_forward_progress_metrics(
     total_windows: usize,
     windows: &[Value],
@@ -4532,15 +4450,17 @@ pub(crate) fn oos_walk_forward_progress_metrics(
     })
 }
 
-
-pub(crate) fn oos_walk_forward_stage(stage: &str, window_index: Option<usize>, details: Value) -> Value {
+pub(crate) fn oos_walk_forward_stage(
+    stage: &str,
+    window_index: Option<usize>,
+    details: Value,
+) -> Value {
     json!({
         "stage": stage,
         "window_index": window_index,
         "details": details,
     })
 }
-
 
 pub(crate) fn append_oos_walk_forward_stage_metrics(mut metrics: Value, stage: Value) -> Value {
     if !metrics.is_object() {
@@ -4561,7 +4481,6 @@ pub(crate) fn append_oos_walk_forward_stage_metrics(mut metrics: Value, stage: V
     metrics["stage_history"] = json!(stage_history);
     metrics
 }
-
 
 pub(crate) async fn update_oos_walk_forward_experiment_stage(
     db: &sqlx::PgPool,
@@ -4605,8 +4524,10 @@ pub(crate) async fn update_oos_walk_forward_experiment_stage(
     Ok(())
 }
 
-
-pub(crate) fn oos_cache_report(signal_cache: &SignalDataCache, backtest_cache: &BacktestDataCache) -> Value {
+pub(crate) fn oos_cache_report(
+    signal_cache: &SignalDataCache,
+    backtest_cache: &BacktestDataCache,
+) -> Value {
     json!({
         "oos_signal_cache": signal_cache_stats_delta(
             SignalDataCacheStats::default(),
@@ -4618,7 +4539,6 @@ pub(crate) fn oos_cache_report(signal_cache: &SignalDataCache, backtest_cache: &
         ),
     })
 }
-
 
 pub(crate) async fn build_return_risk_cache_economics_report(
     db: &sqlx::PgPool,
@@ -4655,13 +4575,11 @@ pub(crate) async fn build_return_risk_cache_economics_report(
     }))
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct ExperimentRunMetrics {
     metrics: Value,
     status: String,
 }
-
 
 pub(crate) async fn load_experiment_run_metrics(
     db: &sqlx::PgPool,
@@ -4683,7 +4601,6 @@ pub(crate) async fn load_experiment_run_metrics(
     })
 }
 
-
 pub(crate) fn ensure_completed_cache_economics_input(
     experiment_run_id: &str,
     role: &str,
@@ -4697,7 +4614,6 @@ pub(crate) fn ensure_completed_cache_economics_input(
         role, experiment_run_id, status
     ))
 }
-
 
 pub(crate) async fn persist_return_risk_cache_economics_report(
     db: &sqlx::PgPool,
@@ -4720,9 +4636,13 @@ pub(crate) async fn persist_return_risk_cache_economics_report(
         "completed",
     )
     .await
-    .map_err(|error| format!("Failed to insert return/risk cache economics experiment_run: {}", error))
+    .map_err(|error| {
+        format!(
+            "Failed to insert return/risk cache economics experiment_run: {}",
+            error
+        )
+    })
 }
-
 
 pub(crate) fn return_risk_cache_economics_report_json(
     raw_experiment_run_id: &str,
@@ -4740,8 +4660,9 @@ pub(crate) fn return_risk_cache_economics_report_json(
     })
 }
 
-
-pub(crate) fn aggregate_signal_cache_stats_from_experiment_metrics(metrics: &Value) -> SignalDataCacheStats {
+pub(crate) fn aggregate_signal_cache_stats_from_experiment_metrics(
+    metrics: &Value,
+) -> SignalDataCacheStats {
     let mut total = SignalDataCacheStats::default();
     add_signal_cache_stats_from_value(&mut total, metrics.get("signal_cache"));
     let has_oos_signal_cache = add_signal_cache_stats_from_value(
@@ -4777,7 +4698,6 @@ pub(crate) fn aggregate_signal_cache_stats_from_experiment_metrics(metrics: &Val
     total
 }
 
-
 pub(crate) fn add_signal_cache_stats_from_value(
     total: &mut SignalDataCacheStats,
     value: Option<&Value>,
@@ -4793,5 +4713,3 @@ pub(crate) fn add_signal_cache_stats_from_value(
         Err(_) => false,
     }
 }
-
-

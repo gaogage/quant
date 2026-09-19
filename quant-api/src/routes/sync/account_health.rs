@@ -1,15 +1,8 @@
 /// 数据同步路由
-use axum::{
-    extract::State,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Duration, NaiveDate};
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
@@ -26,7 +19,6 @@ pub struct AccountDataHealthReq {
 }
 
 #[derive(Debug, Clone)]
-
 
 struct StrategyHealthConfig {
     combo_name: String,
@@ -47,8 +39,6 @@ pub(crate) const DEFAULT_MVO_ETFS: &[&str] = &[
     "501018.SH",
 ];
 
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EventSyncSourceQuality {
     Official,
@@ -58,15 +48,11 @@ pub(crate) enum EventSyncSourceQuality {
     Unknown,
 }
 
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataReadinessGate {
     BlockRequiredRed,
     BlockRequiredYellow,
 }
-
-
 
 async fn write_data_readiness_audit_event(
     db: &sqlx::PgPool,
@@ -91,8 +77,6 @@ async fn write_data_readiness_audit_event(
     .map_err(|error| format!("写入数据门禁审计失败: {}", error))
 }
 
-
-
 async fn write_data_health_check_audit_event(
     db: &sqlx::PgPool,
     entity_id: &str,
@@ -114,8 +98,6 @@ async fn write_data_health_check_audit_event(
     .map_err(|error| format!("写入数据健康检查审计失败: {}", error))
 }
 
-
-
 pub async fn check_paper_account_data_readiness(
     db: &sqlx::PgPool,
     account_id: &str,
@@ -136,7 +118,10 @@ pub async fn check_paper_account_data_readiness(
     // 账号未挂策略 → 数据未就绪(不再 fallback "v19",配置化原则)。
     // 该账号在批量门禁中被跳过,不阻塞其他账号。
     let sid = strategy_id.ok_or_else(|| {
-        format!("账号 {}({}) 未配置 strategy_version_id,数据未就绪", account_id, account_name)
+        format!(
+            "账号 {}({}) 未配置 strategy_version_id,数据未就绪",
+            account_id, account_name
+        )
     })?;
 
     let cfg: Option<(String, String, Option<String>, Option<Value>, String, f64)> = sqlx::query_as(
@@ -237,7 +222,6 @@ pub async fn check_paper_account_data_readiness(
 
 /// POST /api/v1/quant/data/account-data-health
 /// 遍历激活账号(模拟+实盘) → 其策略依赖的加工数据(combo因子/PIT combo/权益曲线/滚动IC) → 红黄绿。
-
 
 pub async fn account_data_health(
     State(state): State<Arc<AppState>>,
@@ -442,8 +426,6 @@ pub async fn account_data_health(
     }))
 }
 
-
-
 async fn latest_market_date(db: &sqlx::PgPool) -> NaiveDate {
     sqlx::query_scalar::<_, Option<NaiveDate>>(
         "SELECT GREATEST(
@@ -459,16 +441,12 @@ async fn latest_market_date(db: &sqlx::PgPool) -> NaiveDate {
     .unwrap_or_else(|| chrono::Utc::now().date_naive())
 }
 
-
-
 fn strategy_needs_prediction(cfg: &StrategyHealthConfig) -> bool {
     matches!(
         cfg.signal_source.as_str(),
         "prediction" | "prediction_blend"
     ) && (cfg.signal_source == "prediction" || cfg.prediction_blend_weight > f64::EPSILON)
 }
-
-
 
 async fn resolve_live_prediction_set(
     db: &sqlx::PgPool,
@@ -497,8 +475,6 @@ async fn resolve_live_prediction_set(
     .flatten()
 }
 
-
-
 async fn expected_open_day_count(db: &sqlx::PgPool, start: NaiveDate, end: NaiveDate) -> i64 {
     let calendar_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(DISTINCT trade_date)::int8 FROM market_trade_calendar
@@ -523,8 +499,6 @@ async fn expected_open_day_count(db: &sqlx::PgPool, start: NaiveDate, end: Naive
         .unwrap_or(0)
     }
 }
-
-
 
 async fn event_completion_latest_source(
     db: &sqlx::PgPool,
@@ -564,8 +538,6 @@ async fn event_completion_latest_source(
     }
 }
 
-
-
 async fn event_completed_day_count(
     db: &sqlx::PgPool,
     task_type: &str,
@@ -584,8 +556,6 @@ async fn event_completed_day_count(
     .await
     .unwrap_or(0)
 }
-
-
 
 async fn event_verified_day_count(
     db: &sqlx::PgPool,
@@ -616,8 +586,6 @@ async fn event_verified_day_count(
         .collect::<std::collections::BTreeSet<_>>()
         .len() as i64
 }
-
-
 
 async fn rolling_pit_ic_quarter_coverage(
     db: &sqlx::PgPool,
@@ -661,7 +629,6 @@ async fn rolling_pit_ic_quarter_coverage(
 }
 
 /// 检查单个账号策略依赖的数据。range=None 查新鲜度；range=Some 查区间覆盖率。
-
 
 async fn check_account_deps(
     db: &sqlx::PgPool,
@@ -1942,5 +1909,3 @@ async fn check_account_deps(
     }
     out
 }
-
-

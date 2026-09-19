@@ -67,7 +67,11 @@ pub(crate) fn default_chunk_size() -> usize {
 }
 
 // ─── Shared helpers ─────────────────────────────────────────────
-pub(crate) fn trim_or_default(value: Option<String>, default: &str, field: &str) -> Result<String, String> {
+pub(crate) fn trim_or_default(
+    value: Option<String>,
+    default: &str,
+    field: &str,
+) -> Result<String, String> {
     match value {
         Some(value) => {
             let trimmed = value.trim();
@@ -283,14 +287,14 @@ pub(crate) fn usize_to_i32(value: usize) -> i32 {
 }
 
 // ─── Submodules ─────────────────────────────────────────────────
+mod backfill;
 mod crud;
 mod icir_materialize;
-mod backfill;
 mod native_pv;
 
+pub use backfill::*;
 pub use crud::*;
 pub use icir_materialize::*;
-pub use backfill::*;
 pub use native_pv::*;
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -3481,4 +3485,3 @@ mod tests {
         assert_eq!(quick.source_column, "quick_ratio");
     }
 }
-

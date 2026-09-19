@@ -57,7 +57,6 @@ use quant_backtest::signal_generator::{
     SignalDataCacheSnapshot, SignalDataCacheStats,
 };
 
-
 use super::*;
 
 #[derive(Debug, Clone)]
@@ -76,7 +75,6 @@ pub(crate) struct SleeveAdmissionTrialDiagnosticRow {
     pub(crate) gate_results: Option<Value>,
 }
 
-
 pub(crate) struct SleeveAdmissionTrialDiagnostic {
     family: String,
     robustness_status: String,
@@ -91,7 +89,6 @@ pub(crate) struct SleeveAdmissionTrialDiagnostic {
     failed_gate_names: Vec<String>,
     json: Value,
 }
-
 
 #[derive(Default)]
 struct SleeveAdmissionFamilyAccumulator {
@@ -113,7 +110,6 @@ struct SleeveAdmissionFamilyAccumulator {
     failed_gates: BTreeMap<String, usize>,
 }
 
-
 #[derive(Default)]
 struct SleeveAdmissionActionAccumulator {
     total_trial_count: usize,
@@ -130,7 +126,6 @@ struct SleeveAdmissionActionAccumulator {
     underbenchmark_families: BTreeSet<String>,
 }
 
-
 pub async fn report_feature_profile_readiness(
     State(state): State<Arc<AppState>>,
     Json(req): Json<FeatureProfileReadinessRequest>,
@@ -140,7 +135,6 @@ pub async fn report_feature_profile_readiness(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub async fn report_alpha_source_diagnostics(
     State(state): State<Arc<AppState>>,
@@ -152,7 +146,6 @@ pub async fn report_alpha_source_diagnostics(
     }
 }
 
-
 pub async fn report_main_business_diagnostics(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MainBusinessDiagnosticsRequest>,
@@ -162,7 +155,6 @@ pub async fn report_main_business_diagnostics(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub async fn get_sleeve_admission_diagnostics(
     State(state): State<Arc<AppState>>,
@@ -174,7 +166,6 @@ pub async fn get_sleeve_admission_diagnostics(
     }
 }
 
-
 pub async fn report_return_risk_cache_economics(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReturnRiskCacheEconomicsReportRequest>,
@@ -184,7 +175,6 @@ pub async fn report_return_risk_cache_economics(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub(crate) async fn build_sleeve_admission_diagnostics(
     db: &sqlx::PgPool,
@@ -223,7 +213,6 @@ pub(crate) async fn build_sleeve_admission_diagnostics(
         &rows_by_task,
     ))
 }
-
 
 pub(crate) async fn load_sleeve_admission_trial_diagnostic_rows(
     db: &sqlx::PgPool,
@@ -346,7 +335,6 @@ pub(crate) async fn load_sleeve_admission_trial_diagnostic_rows(
         .collect())
 }
 
-
 pub(crate) fn sleeve_admission_train_task_ids(metrics: &Value) -> BTreeSet<String> {
     metrics
         .get("windows")
@@ -361,7 +349,6 @@ pub(crate) fn sleeve_admission_train_task_ids(metrics: &Value) -> BTreeSet<Strin
         })
         .collect()
 }
-
 
 pub(crate) fn sleeve_admission_diagnostic_matrix_json(
     experiment_run_id: &str,
@@ -451,7 +438,6 @@ pub(crate) fn sleeve_admission_diagnostic_matrix_json(
         },
     })
 }
-
 
 pub(crate) fn sleeve_admission_trial_diagnostic(
     row: &SleeveAdmissionTrialDiagnosticRow,
@@ -555,7 +541,6 @@ pub(crate) fn sleeve_admission_trial_diagnostic(
     }
 }
 
-
 pub(crate) fn sleeve_admission_family(parameters: &Value) -> String {
     [
         "alpha_sleeve_family",
@@ -569,7 +554,6 @@ pub(crate) fn sleeve_admission_family(parameters: &Value) -> String {
     .to_string()
 }
 
-
 pub(crate) fn sleeve_unevaluated_status(trial_status: &str) -> &str {
     if trial_status == "completed" {
         "not_evaluated"
@@ -577,7 +561,6 @@ pub(crate) fn sleeve_unevaluated_status(trial_status: &str) -> &str {
         "trial_not_completed"
     }
 }
-
 
 pub(crate) fn sleeve_failed_gate_reports(
     gate_results: Option<&Value>,
@@ -617,8 +600,10 @@ pub(crate) fn sleeve_failed_gate_reports(
     gates
 }
 
-
-pub(crate) fn sleeve_trial_skip_reason(robustness_status: &str, failed_gate_names: &[String]) -> Value {
+pub(crate) fn sleeve_trial_skip_reason(
+    robustness_status: &str,
+    failed_gate_names: &[String],
+) -> Value {
     if robustness_status == "approved_candidate" {
         return Value::Null;
     }
@@ -632,14 +617,15 @@ pub(crate) fn sleeve_trial_skip_reason(robustness_status: &str, failed_gate_name
     ))
 }
 
-
-pub(crate) fn sleeve_gate<'a>(gate_results: Option<&'a Value>, gate_name: &str) -> Option<&'a Value> {
+pub(crate) fn sleeve_gate<'a>(
+    gate_results: Option<&'a Value>,
+    gate_name: &str,
+) -> Option<&'a Value> {
     gate_results
         .and_then(Value::as_array)?
         .iter()
         .find(|gate| gate.get("gate").and_then(Value::as_str) == Some(gate_name))
 }
-
 
 pub(crate) fn sleeve_gate_actual(gate_results: Option<&Value>, gate_name: &str) -> Value {
     sleeve_gate(gate_results, gate_name)
@@ -648,14 +634,16 @@ pub(crate) fn sleeve_gate_actual(gate_results: Option<&Value>, gate_name: &str) 
         .unwrap_or(Value::Null)
 }
 
-
-pub(crate) fn sleeve_gate_field(gate_results: Option<&Value>, gate_name: &str, field_name: &str) -> Value {
+pub(crate) fn sleeve_gate_field(
+    gate_results: Option<&Value>,
+    gate_name: &str,
+    field_name: &str,
+) -> Value {
     sleeve_gate(gate_results, gate_name)
         .and_then(|gate| gate.get(field_name))
         .cloned()
         .unwrap_or(Value::Null)
 }
-
 
 pub(crate) fn sleeve_stress_pass_ratio(gate_results: Option<&Value>) -> Option<f64> {
     let gate = sleeve_gate(gate_results, "train_cost_capacity_perturbation_pass_ratio")?;
@@ -671,7 +659,6 @@ pub(crate) fn sleeve_stress_pass_ratio(gate_results: Option<&Value>) -> Option<f
     }
 }
 
-
 pub(crate) fn sleeve_weak_regime_windows(gate_results: Option<&Value>, limit: usize) -> Vec<Value> {
     let windows = sleeve_gate(gate_results, "walk_forward_min_window_count")
         .and_then(|gate| gate.get("details"))
@@ -682,14 +669,12 @@ pub(crate) fn sleeve_weak_regime_windows(gate_results: Option<&Value>, limit: us
     rank_weak_walk_forward_windows(&windows, limit)
 }
 
-
 pub(crate) fn metric_value(metrics: Option<&Value>, key: &str) -> Value {
     metrics
         .and_then(|metrics| metrics.get(key))
         .cloned()
         .unwrap_or(Value::Null)
 }
-
 
 pub(crate) fn sleeve_empty_portfolio_constraint_summary() -> Value {
     json!({
@@ -698,7 +683,6 @@ pub(crate) fn sleeve_empty_portfolio_constraint_summary() -> Value {
         "by_constraint": [],
     })
 }
-
 
 pub(crate) fn sleeve_value_at_path(value: Option<&Value>, path: &[&str]) -> Value {
     let mut current = match value {
@@ -714,7 +698,6 @@ pub(crate) fn sleeve_value_at_path(value: Option<&Value>, path: &[&str]) -> Valu
     current.clone()
 }
 
-
 pub(crate) fn sleeve_parameter_value(
     trial_parameters: &Value,
     backtest_parameters: Option<&Value>,
@@ -726,7 +709,6 @@ pub(crate) fn sleeve_parameter_value(
         .cloned()
         .unwrap_or(Value::Null)
 }
-
 
 pub(crate) fn sleeve_nested_parameter_value(
     trial_parameters: &Value,
@@ -740,23 +722,19 @@ pub(crate) fn sleeve_nested_parameter_value(
     sleeve_value_at_path(Some(trial_parameters), path)
 }
 
-
 pub(crate) fn sleeve_positive_shortfall_json(limit: f64, actual: Option<f64>) -> Value {
     actual.map_or(Value::Null, |actual| {
         json!(positive_shortfall(limit, actual))
     })
 }
 
-
 pub(crate) fn sleeve_positive_excess_json(actual: Option<f64>, limit: f64) -> Value {
     actual.map_or(Value::Null, |actual| json!((actual - limit).max(0.0)))
 }
 
-
 pub(crate) fn sleeve_portfolio_constraint_count(summary: &Value, key: &str) -> usize {
     summary.get(key).and_then(Value::as_u64).unwrap_or_default() as usize
 }
-
 
 pub(crate) fn sleeve_portfolio_expression_json(metrics: Option<&Value>) -> Value {
     let target_gross = metric_f64_value(metrics, "final_target_gross_exposure_pct");
@@ -774,7 +752,6 @@ pub(crate) fn sleeve_portfolio_expression_json(metrics: Option<&Value>) -> Value
         "source": "optimization_trial.metrics",
     })
 }
-
 
 pub(crate) fn sleeve_capacity_headroom_json(
     metrics: Option<&Value>,
@@ -806,7 +783,6 @@ pub(crate) fn sleeve_capacity_headroom_json(
         "hard_portfolio_constraint_violation_count": sleeve_portfolio_constraint_count(portfolio_constraint_summary, "hard_count"),
     })
 }
-
 
 pub(crate) fn sleeve_execution_capacity_json(
     trial_parameters: &Value,
@@ -859,7 +835,6 @@ pub(crate) fn sleeve_execution_capacity_json(
         },
     })
 }
-
 
 pub(crate) fn sleeve_trial_capacity_diagnosis_json(
     metrics: Option<&Value>,
@@ -938,8 +913,9 @@ pub(crate) fn sleeve_trial_capacity_diagnosis_json(
     })
 }
 
-
-pub(crate) fn sleeve_admission_best_trial_json(diagnostic: &SleeveAdmissionTrialDiagnostic) -> Value {
+pub(crate) fn sleeve_admission_best_trial_json(
+    diagnostic: &SleeveAdmissionTrialDiagnostic,
+) -> Value {
     json!({
         "trial_id": diagnostic.json.get("trial_id").cloned().unwrap_or(Value::Null),
         "family": diagnostic.family,
@@ -956,7 +932,6 @@ pub(crate) fn sleeve_admission_best_trial_json(diagnostic: &SleeveAdmissionTrial
     })
 }
 
-
 pub(crate) fn avg_json(sum: f64, count: usize) -> Value {
     if count == 0 {
         Value::Null
@@ -964,7 +939,6 @@ pub(crate) fn avg_json(sum: f64, count: usize) -> Value {
         json!(sum / count as f64)
     }
 }
-
 
 impl SleeveAdmissionFamilyAccumulator {
     fn record(&mut self, diagnostic: &SleeveAdmissionTrialDiagnostic) {
@@ -1030,7 +1004,6 @@ impl SleeveAdmissionFamilyAccumulator {
         })
     }
 }
-
 
 impl SleeveAdmissionActionAccumulator {
     fn record(&mut self, diagnostic: &SleeveAdmissionTrialDiagnostic) {
@@ -1129,7 +1102,6 @@ impl SleeveAdmissionActionAccumulator {
     }
 }
 
-
 pub(crate) fn alpha_source_diagnostics_combo_name(
     req: &AlphaSourceDiagnosticsRequest,
 ) -> Result<String, String> {
@@ -1140,7 +1112,6 @@ pub(crate) fn alpha_source_diagnostics_combo_name(
     Ok(combo_name.to_string())
 }
 
-
 pub(crate) fn alpha_source_diagnostics_version(req: &AlphaSourceDiagnosticsRequest) -> String {
     req.version
         .as_deref()
@@ -1150,8 +1121,9 @@ pub(crate) fn alpha_source_diagnostics_version(req: &AlphaSourceDiagnosticsReque
         .to_string()
 }
 
-
-pub(crate) fn alpha_source_diagnostics_thresholds(req: &AlphaSourceDiagnosticsRequest) -> ReadinessThresholds {
+pub(crate) fn alpha_source_diagnostics_thresholds(
+    req: &AlphaSourceDiagnosticsRequest,
+) -> ReadinessThresholds {
     ReadinessThresholds::from_options(
         req.min_day_coverage_ratio,
         req.min_daily_rows,
@@ -1159,18 +1131,15 @@ pub(crate) fn alpha_source_diagnostics_thresholds(req: &AlphaSourceDiagnosticsRe
     )
 }
 
-
 pub(crate) fn alpha_source_diagnostics_persist_default(value: Option<bool>) -> bool {
     value.unwrap_or(true)
 }
-
 
 pub(crate) fn alpha_source_diagnostics_gates_passed(gates: &[Value]) -> bool {
     gates
         .iter()
         .all(|gate| gate["passed"].as_bool().unwrap_or(false))
 }
-
 
 pub(crate) fn alpha_source_diagnostics_level(passed: bool) -> &'static str {
     if passed {
@@ -1179,7 +1148,6 @@ pub(crate) fn alpha_source_diagnostics_level(passed: bool) -> &'static str {
         "red"
     }
 }
-
 
 pub(crate) fn alpha_source_research_economic_admission(research_metrics: &Value) -> Value {
     if !research_metrics["included"].as_bool().unwrap_or(false) {
@@ -1270,7 +1238,6 @@ pub(crate) fn alpha_source_research_economic_admission(research_metrics: &Value)
     })
 }
 
-
 pub(crate) fn futures_price_chain_component_orientation_contract_json(
     include_research_metrics: bool,
 ) -> Value {
@@ -1330,7 +1297,6 @@ pub(crate) fn futures_price_chain_component_orientation_contract_json(
     })
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceDailyBreadthStatus {
     pub(crate) passed: bool,
@@ -1345,7 +1311,6 @@ pub(crate) struct AlphaSourceDailyBreadthStatus {
     pub(crate) first_weak_day: Option<NaiveDate>,
     pub(crate) last_weak_day: Option<NaiveDate>,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceMarketScopeBreadthStatus {
@@ -1364,7 +1329,6 @@ pub(crate) struct AlphaSourceMarketScopeBreadthStatus {
     pub(crate) first_weak_day: Option<NaiveDate>,
     pub(crate) last_weak_day: Option<NaiveDate>,
 }
-
 
 pub(crate) fn alpha_source_daily_breadth_status(
     daily_rows: &[(NaiveDate, i64)],
@@ -1437,7 +1401,6 @@ pub(crate) fn alpha_source_daily_breadth_status(
     }
 }
 
-
 pub(crate) fn alpha_source_market_scope_breadth_status(
     daily_rows: &[(NaiveDate, i64)],
     eligible_rows: &[(NaiveDate, i64)],
@@ -1497,8 +1460,9 @@ pub(crate) fn alpha_source_market_scope_breadth_status(
     }
 }
 
-
-pub(crate) fn alpha_source_market_scope_breadth_json(status: &AlphaSourceMarketScopeBreadthStatus) -> Value {
+pub(crate) fn alpha_source_market_scope_breadth_json(
+    status: &AlphaSourceMarketScopeBreadthStatus,
+) -> Value {
     json!({
         "status": status.status,
         "passed": status.passed,
@@ -1518,7 +1482,6 @@ pub(crate) fn alpha_source_market_scope_breadth_json(status: &AlphaSourceMarketS
     })
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AlphaSourceResearchDiagnosticsOptions {
     pub(crate) include_research_metrics: bool,
@@ -1528,7 +1491,6 @@ pub(crate) struct AlphaSourceResearchDiagnosticsOptions {
     pub(crate) max_rank_ic_days: i64,
     pub(crate) max_exposure_regime_days: i64,
 }
-
 
 pub(crate) fn alpha_source_research_diagnostics_options(
     req: &AlphaSourceDiagnosticsRequest,
@@ -1557,7 +1519,6 @@ pub(crate) fn alpha_source_research_diagnostics_options(
     }
 }
 
-
 pub(crate) fn alpha_source_market_scope_breadth_enabled(
     req: &AlphaSourceDiagnosticsRequest,
     combo_name: &str,
@@ -1578,13 +1539,11 @@ pub(crate) fn alpha_source_market_scope_breadth_enabled(
                 == Some(INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE)
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainBusinessDiagnosticsUniverse {
     ListedNonSt,
     MainChinextNonSt,
 }
-
 
 impl MainBusinessDiagnosticsUniverse {
     fn as_str(self) -> &'static str {
@@ -1611,7 +1570,6 @@ impl MainBusinessDiagnosticsUniverse {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MainBusinessDiagnosticsProfile {
     SalesYoy,
@@ -1619,7 +1577,6 @@ pub(crate) enum MainBusinessDiagnosticsProfile {
     GrossMarginDeltaYoy,
     SegmentConcentrationInverse,
 }
-
 
 impl MainBusinessDiagnosticsProfile {
     fn as_str(self) -> &'static str {
@@ -1661,8 +1618,9 @@ impl MainBusinessDiagnosticsProfile {
     }
 }
 
-
-pub(crate) fn main_business_diagnostics_business_type(req: &MainBusinessDiagnosticsRequest) -> String {
+pub(crate) fn main_business_diagnostics_business_type(
+    req: &MainBusinessDiagnosticsRequest,
+) -> String {
     req.business_type
         .as_deref()
         .map(str::trim)
@@ -1670,7 +1628,6 @@ pub(crate) fn main_business_diagnostics_business_type(req: &MainBusinessDiagnost
         .unwrap_or("P")
         .to_ascii_uppercase()
 }
-
 
 pub(crate) fn main_business_diagnostics_universe_profile(
     req: &MainBusinessDiagnosticsRequest,
@@ -1692,7 +1649,6 @@ pub(crate) fn main_business_diagnostics_universe_profile(
     }
 }
 
-
 pub(crate) fn parse_main_business_diagnostics_profile(
     value: &str,
 ) -> Result<MainBusinessDiagnosticsProfile, String> {
@@ -1710,7 +1666,6 @@ pub(crate) fn parse_main_business_diagnostics_profile(
         )),
     }
 }
-
 
 pub(crate) fn main_business_diagnostics_profiles(
     req: &MainBusinessDiagnosticsRequest,
@@ -1739,7 +1694,6 @@ pub(crate) fn main_business_diagnostics_profiles(
     Ok(profiles.into_iter().collect())
 }
 
-
 pub(crate) fn main_business_diagnostics_thresholds(
     req: &MainBusinessDiagnosticsRequest,
 ) -> ReadinessThresholds {
@@ -1750,24 +1704,27 @@ pub(crate) fn main_business_diagnostics_thresholds(
     )
 }
 
-
-pub(crate) fn bounded_main_business_f64(value: Option<f64>, default: f64, min: f64, max: f64) -> f64 {
+pub(crate) fn bounded_main_business_f64(
+    value: Option<f64>,
+    default: f64,
+    min: f64,
+    max: f64,
+) -> f64 {
     value
         .filter(|candidate| candidate.is_finite())
         .unwrap_or(default)
         .clamp(min, max)
 }
 
-
-pub(crate) fn main_business_daily_coverage_ratio_threshold(req: &MainBusinessDiagnosticsRequest) -> f64 {
+pub(crate) fn main_business_daily_coverage_ratio_threshold(
+    req: &MainBusinessDiagnosticsRequest,
+) -> f64 {
     bounded_main_business_f64(req.min_daily_coverage_ratio, 0.90, 0.0, 1.0)
 }
-
 
 pub(crate) fn main_business_diagnostics_persist_default(value: Option<bool>) -> bool {
     value.unwrap_or(true)
 }
-
 
 pub(crate) fn main_business_research_diagnostics_options(
     req: &MainBusinessDiagnosticsRequest,
@@ -1793,14 +1750,15 @@ pub(crate) fn main_business_research_diagnostics_options(
     alpha_source_research_diagnostics_options(&proxy)
 }
 
-
-pub(crate) fn parse_feature_profile_readiness_date(value: &str, field: &str) -> Result<NaiveDate, String> {
+pub(crate) fn parse_feature_profile_readiness_date(
+    value: &str,
+    field: &str,
+) -> Result<NaiveDate, String> {
     let trimmed = value.trim();
     NaiveDate::parse_from_str(trimmed, "%Y%m%d")
         .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y-%m-%d"))
         .map_err(|_| format!("{} must use YYYYMMDD or YYYY-MM-DD format", field))
 }
-
 
 pub(crate) fn profile_readiness_gate(
     gate: &str,
@@ -1818,14 +1776,12 @@ pub(crate) fn profile_readiness_gate(
     })
 }
 
-
 pub(crate) fn feature_profile_readiness_passed(report: &Value) -> bool {
     report
         .get("passed")
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
 }
-
 
 pub(crate) fn readiness_failure_summary(report: &Value) -> String {
     report
@@ -1850,7 +1806,6 @@ pub(crate) fn readiness_failure_summary(report: &Value) -> String {
         .filter(|summary| !summary.is_empty())
         .unwrap_or_else(|| "no failing gate detail".to_string())
 }
-
 
 pub(crate) async fn build_alpha_source_diagnostics_report_from_request(
     db: &sqlx::PgPool,
@@ -1888,7 +1843,6 @@ pub(crate) async fn build_alpha_source_diagnostics_report_from_request(
         "report": report,
     }))
 }
-
 
 pub(crate) async fn build_alpha_source_diagnostics_report(
     db: &sqlx::PgPool,
@@ -2095,7 +2049,6 @@ pub(crate) async fn build_alpha_source_diagnostics_report(
     }))
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct MainBusinessRawSummary {
     raw_rows: i64,
@@ -2110,14 +2063,12 @@ pub(crate) struct MainBusinessRawSummary {
     last_available_at: Option<NaiveDate>,
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct MainBusinessDailyCoverageRow {
     trade_date: NaiveDate,
     eligible_symbols: i64,
     covered_symbols: i64,
 }
-
 
 impl MainBusinessDailyCoverageRow {
     fn coverage_ratio(&self) -> f64 {
@@ -2129,7 +2080,6 @@ impl MainBusinessDailyCoverageRow {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct MainBusinessScoreRow {
     trade_date: NaiveDate,
@@ -2140,7 +2090,6 @@ pub(crate) struct MainBusinessScoreRow {
     total_mv: Option<f64>,
     industry: Option<String>,
 }
-
 
 pub(crate) async fn build_main_business_diagnostics_report_from_request(
     db: &sqlx::PgPool,
@@ -2188,7 +2137,6 @@ pub(crate) async fn build_main_business_diagnostics_report_from_request(
         "report": report,
     }))
 }
-
 
 pub(crate) async fn build_main_business_diagnostics_report(
     db: &sqlx::PgPool,
@@ -2398,7 +2346,6 @@ pub(crate) async fn build_main_business_diagnostics_report(
     }))
 }
 
-
 pub(crate) async fn load_main_business_raw_summary(
     db: &sqlx::PgPool,
     business_type: &str,
@@ -2454,8 +2401,9 @@ pub(crate) async fn load_main_business_raw_summary(
     })
 }
 
-
-pub(crate) fn main_business_daily_coverage_sql(universe: MainBusinessDiagnosticsUniverse) -> String {
+pub(crate) fn main_business_daily_coverage_sql(
+    universe: MainBusinessDiagnosticsUniverse,
+) -> String {
     format!(
         "WITH reports AS (
              SELECT symbol, end_date, MIN(available_at) AS available_at
@@ -2500,7 +2448,6 @@ pub(crate) fn main_business_daily_coverage_sql(universe: MainBusinessDiagnostics
     )
 }
 
-
 pub(crate) async fn load_main_business_daily_coverage(
     db: &sqlx::PgPool,
     business_type: &str,
@@ -2527,7 +2474,6 @@ pub(crate) async fn load_main_business_daily_coverage(
         )
         .collect())
 }
-
 
 pub(crate) async fn build_main_business_research_diagnostics(
     db: &sqlx::PgPool,
@@ -2704,7 +2650,6 @@ pub(crate) async fn build_main_business_research_diagnostics(
     }))
 }
 
-
 pub(crate) fn main_business_score_rows_sql(
     profile: MainBusinessDiagnosticsProfile,
     universe: MainBusinessDiagnosticsUniverse,
@@ -2791,7 +2736,6 @@ pub(crate) fn main_business_score_rows_sql(
     )
 }
 
-
 pub(crate) async fn load_main_business_score_rows(
     db: &sqlx::PgPool,
     business_type: &str,
@@ -2844,7 +2788,6 @@ pub(crate) async fn load_main_business_score_rows(
         )
         .collect())
 }
-
 
 pub(crate) async fn label_main_business_score_rows(
     db: &sqlx::PgPool,
@@ -2955,7 +2898,6 @@ pub(crate) async fn label_main_business_score_rows(
     Ok(labeled_rows)
 }
 
-
 pub(crate) fn validate_alpha_source_diagnostics_admission(
     req: &AlphaSourceDiagnosticsRequest,
     combo_name: &str,
@@ -3034,7 +2976,6 @@ pub(crate) fn validate_alpha_source_diagnostics_admission(
     )
 }
 
-
 #[derive(Debug)]
 pub(crate) struct AlphaSourceDiagnosticsSummary {
     usable_rows: i64,
@@ -3046,14 +2987,12 @@ pub(crate) struct AlphaSourceDiagnosticsSummary {
     last_trade_date: Option<NaiveDate>,
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceDailyRankIc {
     pub(crate) trade_date: NaiveDate,
     pub(crate) rank_ic: f64,
     pub(crate) sample_size: i64,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceRankIcSummary {
@@ -3069,7 +3008,6 @@ pub(crate) struct AlphaSourceRankIcSummary {
     pub(crate) min_daily_sample_size: i64,
     pub(crate) max_daily_sample_size: i64,
 }
-
 
 impl AlphaSourceRankIcSummary {
     fn to_json(&self) -> Value {
@@ -3089,14 +3027,12 @@ impl AlphaSourceRankIcSummary {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceBucketReturn {
     pub(crate) bucket: i64,
     pub(crate) avg_forward_return: f64,
     pub(crate) sample_count: i64,
 }
-
 
 impl AlphaSourceBucketReturn {
     fn to_json(&self) -> Value {
@@ -3108,14 +3044,12 @@ impl AlphaSourceBucketReturn {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceScoreRow {
     trade_date: NaiveDate,
     symbol: String,
     score: f64,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceLabeledRow {
@@ -3127,7 +3061,6 @@ pub(crate) struct AlphaSourceLabeledRow {
     pub(crate) circ_mv: Option<f64>,
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceExposureRow {
     pub(crate) trade_date: NaiveDate,
@@ -3137,7 +3070,6 @@ pub(crate) struct AlphaSourceExposureRow {
     pub(crate) total_mv: Option<f64>,
     pub(crate) industry: Option<String>,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceGroupReturnSummary {
@@ -3150,7 +3082,6 @@ pub(crate) struct AlphaSourceGroupReturnSummary {
     pub(crate) total_sample_count: i64,
     pub(crate) buckets: Vec<AlphaSourceBucketReturn>,
 }
-
 
 impl AlphaSourceGroupReturnSummary {
     fn to_json(&self) -> Value {
@@ -3167,7 +3098,6 @@ impl AlphaSourceGroupReturnSummary {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceIndustryExposure {
     pub(crate) industry: String,
@@ -3175,7 +3105,6 @@ pub(crate) struct AlphaSourceIndustryExposure {
     pub(crate) max_daily_weight: f64,
     pub(crate) active_days: i64,
 }
-
 
 impl AlphaSourceIndustryExposure {
     fn to_json(&self) -> Value {
@@ -3187,7 +3116,6 @@ impl AlphaSourceIndustryExposure {
         })
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceHighBucketExposureSummary {
@@ -3203,7 +3131,6 @@ pub(crate) struct AlphaSourceHighBucketExposureSummary {
     pub(crate) high_bucket_circ_mv_missing_ratio: f64,
     pub(crate) high_bucket_industry_missing_ratio: f64,
 }
-
 
 impl AlphaSourceHighBucketExposureSummary {
     fn to_json(&self) -> Value {
@@ -3229,7 +3156,6 @@ impl AlphaSourceHighBucketExposureSummary {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceMarketRegime {
     pub(crate) trade_date: NaiveDate,
@@ -3238,7 +3164,6 @@ pub(crate) struct AlphaSourceMarketRegime {
     pub(crate) annualized_volatility: f64,
     pub(crate) trailing_max_drawdown: f64,
 }
-
 
 impl AlphaSourceMarketRegime {
     fn to_json(&self) -> Value {
@@ -3252,7 +3177,6 @@ impl AlphaSourceMarketRegime {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceRegimeSplitSummary {
     pub(crate) horizon_days: i64,
@@ -3263,7 +3187,6 @@ pub(crate) struct AlphaSourceRegimeSplitSummary {
     pub(crate) rank_ic: AlphaSourceRankIcSummary,
     pub(crate) group_return: AlphaSourceGroupReturnSummary,
 }
-
 
 impl AlphaSourceRegimeSplitSummary {
     fn to_json(&self) -> Value {
@@ -3279,7 +3202,6 @@ impl AlphaSourceRegimeSplitSummary {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AlphaSourceTurnoverCapacitySummary {
     horizon_days: i64,
@@ -3294,7 +3216,6 @@ pub(crate) struct AlphaSourceTurnoverCapacitySummary {
     median_high_score_bucket_circ_mv: f64,
     p10_high_score_bucket_circ_mv: f64,
 }
-
 
 impl AlphaSourceTurnoverCapacitySummary {
     fn to_json(&self) -> Value {
@@ -3317,7 +3238,6 @@ impl AlphaSourceTurnoverCapacitySummary {
         })
     }
 }
-
 
 pub(crate) fn summarize_rank_ic_samples(
     horizon_days: i64,
@@ -3366,7 +3286,6 @@ pub(crate) fn summarize_rank_ic_samples(
     }
 }
 
-
 pub(crate) fn summarize_group_return_buckets(
     horizon_days: i64,
     bucket_count: i64,
@@ -3409,7 +3328,6 @@ pub(crate) fn summarize_group_return_buckets(
         buckets: sorted,
     }
 }
-
 
 pub(crate) async fn load_alpha_source_diagnostics_summary(
     db: &sqlx::PgPool,
@@ -3479,7 +3397,6 @@ pub(crate) async fn load_alpha_source_diagnostics_summary(
     })
 }
 
-
 pub(crate) async fn load_alpha_source_diagnostics_daily_rows(
     db: &sqlx::PgPool,
     combo_name: &str,
@@ -3515,7 +3432,6 @@ pub(crate) async fn load_alpha_source_diagnostics_daily_rows(
     .await
     .map_err(|error| format!("Failed to load alpha source diagnostics daily rows: {error}"))
 }
-
 
 pub(crate) async fn load_main_chinext_non_st_eligible_daily_rows(
     db: &sqlx::PgPool,
@@ -3575,7 +3491,6 @@ pub(crate) async fn load_main_chinext_non_st_eligible_daily_rows(
     .await
     .map_err(|error| format!("Failed to load main_chinext_non_st eligible daily rows: {error}"))
 }
-
 
 pub(crate) async fn build_alpha_source_research_diagnostics(
     db: &sqlx::PgPool,
@@ -3746,7 +3661,6 @@ pub(crate) async fn build_alpha_source_research_diagnostics(
     }))
 }
 
-
 pub(crate) async fn build_futures_price_chain_component_orientation_diagnostics(
     db: &sqlx::PgPool,
     combo_name: &str,
@@ -3884,7 +3798,6 @@ pub(crate) async fn build_futures_price_chain_component_orientation_diagnostics(
     Ok(report)
 }
 
-
 pub(crate) fn sample_alpha_source_research_days(
     daily_rows: &[(NaiveDate, i64)],
     max_sample_days: i64,
@@ -3906,7 +3819,6 @@ pub(crate) fn sample_alpha_source_research_days(
         .collect()
 }
 
-
 pub(crate) fn sample_alpha_source_regime_days(
     rank_ic_trade_dates: &[NaiveDate],
     exposure_trade_dates: &[NaiveDate],
@@ -3919,7 +3831,6 @@ pub(crate) fn sample_alpha_source_regime_days(
         .into_iter()
         .collect()
 }
-
 
 pub(crate) fn rank_values(values: &[f64]) -> Vec<f64> {
     let mut indexed = values
@@ -3948,7 +3859,6 @@ pub(crate) fn rank_values(values: &[f64]) -> Vec<f64> {
     ranks
 }
 
-
 pub(crate) fn pearson_corr(left: &[f64], right: &[f64]) -> Option<f64> {
     if left.len() != right.len() || left.len() < 2 {
         return None;
@@ -3973,7 +3883,6 @@ pub(crate) fn pearson_corr(left: &[f64], right: &[f64]) -> Option<f64> {
         Some(numerator / denominator)
     }
 }
-
 
 pub(crate) fn daily_rank_ic_from_labeled_rows(
     horizon_days: i64,
@@ -4010,7 +3919,6 @@ pub(crate) fn daily_rank_ic_from_labeled_rows(
         })
         .collect()
 }
-
 
 pub(crate) fn group_return_rows_from_labeled_rows(
     rows: &[AlphaSourceLabeledRow],
@@ -4052,7 +3960,6 @@ pub(crate) fn group_return_rows_from_labeled_rows(
         .collect()
 }
 
-
 pub(crate) fn avg_finite(values: &[f64]) -> f64 {
     if values.is_empty() {
         0.0
@@ -4061,13 +3968,11 @@ pub(crate) fn avg_finite(values: &[f64]) -> f64 {
     }
 }
 
-
 pub(crate) fn sorted_finite(values: impl Iterator<Item = f64>) -> Vec<f64> {
     let mut values = values.filter(|value| value.is_finite()).collect::<Vec<_>>();
     values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     values
 }
-
 
 pub(crate) fn turnover_capacity_summary_from_labeled_rows(
     horizon_days: i64,
@@ -4158,7 +4063,6 @@ pub(crate) fn turnover_capacity_summary_from_labeled_rows(
         ),
     }
 }
-
 
 pub(crate) fn high_bucket_exposure_summary_from_rows(
     rows: &[AlphaSourceExposureRow],
@@ -4355,7 +4259,6 @@ pub(crate) fn high_bucket_exposure_summary_from_rows(
     }
 }
 
-
 pub(crate) fn classify_alpha_source_market_regime(
     trailing_return: f64,
     annualized_volatility: f64,
@@ -4374,8 +4277,9 @@ pub(crate) fn classify_alpha_source_market_regime(
     }
 }
 
-
-pub(crate) fn market_regime_distribution(regimes: &BTreeMap<NaiveDate, AlphaSourceMarketRegime>) -> Value {
+pub(crate) fn market_regime_distribution(
+    regimes: &BTreeMap<NaiveDate, AlphaSourceMarketRegime>,
+) -> Value {
     let mut counts = BTreeMap::<String, i64>::new();
     for regime in regimes.values() {
         *counts.entry(regime.regime.clone()).or_insert(0) += 1;
@@ -4396,7 +4300,6 @@ pub(crate) fn market_regime_distribution(regimes: &BTreeMap<NaiveDate, AlphaSour
         "regimes": regimes,
     })
 }
-
 
 pub(crate) fn regime_split_summaries_from_labeled_rows(
     horizon_days: i64,
@@ -4454,7 +4357,6 @@ pub(crate) fn regime_split_summaries_from_labeled_rows(
         .collect()
 }
 
-
 pub(crate) async fn load_alpha_source_labeled_rows(
     db: &sqlx::PgPool,
     combo_name: &str,
@@ -4466,7 +4368,6 @@ pub(crate) async fn load_alpha_source_labeled_rows(
         load_alpha_source_score_rows(db, combo_name, version, sampled_trade_dates).await?;
     label_alpha_source_score_rows(db, &score_rows, sampled_trade_dates, horizon_days).await
 }
-
 
 pub(crate) async fn load_alpha_source_score_rows(
     db: &sqlx::PgPool,
@@ -4503,7 +4404,6 @@ pub(crate) async fn load_alpha_source_score_rows(
             .collect()
     })
 }
-
 
 pub(crate) fn futures_price_chain_component_score_rows_sql() -> &'static str {
     "WITH requested_days AS (
@@ -4645,7 +4545,6 @@ pub(crate) fn futures_price_chain_component_score_rows_sql() -> &'static str {
      ORDER BY trade_date, symbol"
 }
 
-
 pub(crate) async fn load_futures_price_chain_component_score_rows(
     db: &sqlx::PgPool,
     signal_code: &str,
@@ -4674,7 +4573,6 @@ pub(crate) async fn load_futures_price_chain_component_score_rows(
                 .collect()
         })
 }
-
 
 pub(crate) async fn label_alpha_source_score_rows(
     db: &sqlx::PgPool,
@@ -4810,7 +4708,6 @@ pub(crate) async fn label_alpha_source_score_rows(
     Ok(labeled_rows)
 }
 
-
 pub(crate) async fn load_alpha_source_exposure_rows(
     db: &sqlx::PgPool,
     combo_name: &str,
@@ -4910,7 +4807,6 @@ pub(crate) async fn load_alpha_source_exposure_rows(
         .collect())
 }
 
-
 pub(crate) async fn load_alpha_source_market_regimes(
     db: &sqlx::PgPool,
     sampled_trade_dates: &[NaiveDate],
@@ -4992,7 +4888,6 @@ pub(crate) async fn load_alpha_source_market_regimes(
     Ok(regimes)
 }
 
-
 pub(crate) fn alpha_source_diagnostics_repair_hint(
     passed: bool,
     summary: &AlphaSourceDiagnosticsSummary,
@@ -5026,7 +4921,6 @@ pub(crate) fn alpha_source_diagnostics_repair_hint(
         "reason": "coverage or daily breadth gate failed; repair missing days/symbol coverage before WFA"
     })
 }
-
 
 pub(crate) async fn build_feature_profile_readiness_report_from_request(
     db: &sqlx::PgPool,
@@ -5066,7 +4960,6 @@ pub(crate) async fn build_feature_profile_readiness_report_from_request(
         "report": report,
     }))
 }
-
 
 pub(crate) async fn build_feature_profile_readiness_report(
     db: &sqlx::PgPool,
@@ -5229,7 +5122,6 @@ pub(crate) async fn build_feature_profile_readiness_report(
     }))
 }
 
-
 #[derive(Debug)]
 pub(crate) struct FeatureProfileFactorReadinessRow {
     factor_code: String,
@@ -5239,7 +5131,6 @@ pub(crate) struct FeatureProfileFactorReadinessRow {
     usable_symbols: i64,
     future_leak_rows: i64,
 }
-
 
 impl FeatureProfileFactorReadinessRow {
     fn to_json(&self) -> Value {
@@ -5253,7 +5144,6 @@ impl FeatureProfileFactorReadinessRow {
         })
     }
 }
-
 
 pub(crate) async fn load_feature_profile_factor_readiness_rows(
     db: &sqlx::PgPool,
@@ -5335,7 +5225,6 @@ pub(crate) async fn load_feature_profile_factor_readiness_rows(
         .collect())
 }
 
-
 pub(crate) async fn load_feature_profile_intersection_daily_rows(
     db: &sqlx::PgPool,
     factors: &[LinearFactorRef],
@@ -5395,7 +5284,6 @@ pub(crate) async fn load_feature_profile_intersection_daily_rows(
         })
 }
 
-
 pub(crate) async fn persist_alpha_source_diagnostics_report(
     db: &sqlx::PgPool,
     combo_name: &str,
@@ -5418,9 +5306,13 @@ pub(crate) async fn persist_alpha_source_diagnostics_report(
         "completed",
     )
     .await
-    .map_err(|error| format!("Failed to persist alpha source diagnostics report: {}", error))
+    .map_err(|error| {
+        format!(
+            "Failed to persist alpha source diagnostics report: {}",
+            error
+        )
+    })
 }
-
 
 pub(crate) async fn persist_main_business_diagnostics_report(
     db: &sqlx::PgPool,
@@ -5452,9 +5344,13 @@ pub(crate) async fn persist_main_business_diagnostics_report(
         "completed",
     )
     .await
-    .map_err(|error| format!("Failed to persist main_business source diagnostics report: {}", error))
+    .map_err(|error| {
+        format!(
+            "Failed to persist main_business source diagnostics report: {}",
+            error
+        )
+    })
 }
-
 
 pub(crate) async fn persist_feature_profile_readiness_report(
     db: &sqlx::PgPool,
@@ -5476,7 +5372,10 @@ pub(crate) async fn persist_feature_profile_readiness_report(
         "completed",
     )
     .await
-    .map_err(|error| format!("Failed to persist feature-profile readiness report: {}", error))
+    .map_err(|error| {
+        format!(
+            "Failed to persist feature-profile readiness report: {}",
+            error
+        )
+    })
 }
-
-

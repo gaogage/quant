@@ -120,7 +120,9 @@ impl Account<MarginAccount> {
 
     /// 杠杆配置（编译期保证只有 MarginAccount 可调用）。
     pub fn leverage_config(&self) -> &LeverageConfig {
-        self.leverage_config.as_ref().expect("MarginAccount 必有 leverage_config")
+        self.leverage_config
+            .as_ref()
+            .expect("MarginAccount 必有 leverage_config")
     }
 }
 
@@ -181,10 +183,7 @@ impl LoadedAccount {
 /// 类型门禁：leverage_enabled=false → CashAccount（编译期无杠杆路径），
 /// leverage_enabled=true → MarginAccount（携带 LeverageConfig）。
 /// 调用方 match LoadedAccount 后调 rebalance_cash_account / rebalance_margin_account。
-pub async fn load_account(
-    db: &sqlx::PgPool,
-    account_id: &str,
-) -> Result<LoadedAccount, String> {
+pub async fn load_account(db: &sqlx::PgPool, account_id: &str) -> Result<LoadedAccount, String> {
     use sqlx::Row;
     let row = sqlx::query(
         "SELECT leverage_enabled, leverage_multiplier, leverage_mode,
@@ -201,7 +200,8 @@ pub async fn load_account(
 
     let leverage_enabled: bool = row.get("leverage_enabled");
     let name: String = row.get("name");
-    let strategy_version_id: String = row.get::<Option<String>, _>("strategy_version_id")
+    let strategy_version_id: String = row
+        .get::<Option<String>, _>("strategy_version_id")
         .unwrap_or_default();
 
     if !leverage_enabled {
@@ -213,13 +213,13 @@ pub async fn load_account(
     } else {
         let config = LeverageConfig {
             multiplier: row.get::<f64, _>("leverage_multiplier"),
-            mode: row.get::<Option<String>, _>("leverage_mode").unwrap_or_else(|| "fixed".into()),
+            mode: row
+                .get::<Option<String>, _>("leverage_mode")
+                .unwrap_or_else(|| "fixed".into()),
             liquidation_threshold: row
                 .try_get::<f64, _>("liquidation_threshold")
                 .unwrap_or(1.3),
-            warning_threshold: row
-                .try_get::<f64, _>("warning_threshold")
-                .unwrap_or(1.5),
+            warning_threshold: row.try_get::<f64, _>("warning_threshold").unwrap_or(1.5),
         };
         Ok(LoadedAccount::Margin(Account::<MarginAccount>::new_margin(
             account_id,
@@ -259,7 +259,12 @@ mod tests {
 
     #[test]
     fn margin_account_holds_leverage_config() {
-        let margin = Account::<MarginAccount>::new_margin("acc_v24", "v24 lev", "h20_v1", sample_leverage_config());
+        let margin = Account::<MarginAccount>::new_margin(
+            "acc_v24",
+            "v24 lev",
+            "h20_v1",
+            sample_leverage_config(),
+        );
         // 编译期门禁：leverage_config() 仅 MarginAccount 可调用
         assert_eq!(margin.leverage_config().mode, "fixed");
         assert_eq!(margin.leverage_config().liquidation_threshold, 1.3);
@@ -275,7 +280,8 @@ mod tests {
 
     #[test]
     fn loaded_account_leverage_params_margin_carries_config() {
-        let margin = Account::<MarginAccount>::new_margin("acc", "name", "sv", sample_leverage_config());
+        let margin =
+            Account::<MarginAccount>::new_margin("acc", "name", "sv", sample_leverage_config());
         let loaded = LoadedAccount::Margin(margin);
         assert_eq!(loaded.leverage_params(), (true, 2.0, "fixed".to_string()));
     }

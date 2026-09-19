@@ -81,7 +81,6 @@ pub enum ReturnRiskFeatureCacheMode {
     StatsMatrixExperimental,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct MarketFeatureSnapshotScope {
     pub data_version_id: String,
@@ -128,7 +127,11 @@ impl MarketFeatureSnapshotScope {
         )
     }
 
-    pub(crate) fn snapshot_key(&self, lookback_days: usize, symbols: &[String]) -> MarketFeatureSnapshotKey {
+    pub(crate) fn snapshot_key(
+        &self,
+        lookback_days: usize,
+        symbols: &[String],
+    ) -> MarketFeatureSnapshotKey {
         MarketFeatureSnapshotKey::new(
             &self.data_version_id,
             self.train_start,

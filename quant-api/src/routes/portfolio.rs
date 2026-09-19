@@ -1710,21 +1710,24 @@ async fn run_mvo_simulate(
     }
 
     // 策略 ID 解析：请求参数 > 账号 strategy_version_id > 报错（不 fallback 到具体策略）。
-    let strategy_id = match req.strategy_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let strategy_id = match req
+        .strategy_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(sid) => sid.to_string(),
-        None => {
-            sqlx::query_scalar::<_, Option<String>>(
-                "SELECT strategy_version_id FROM paper_account WHERE paper_account_id = $1",
-            )
-            .bind(account_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|e| format!("query account strategy: {e}"))?
-            .flatten()
-            .ok_or_else(|| {
-                "策略 ID 未指定：请求未传 strategy_id 且账号 strategy_version_id 为空".to_string()
-            })?
-        }
+        None => sqlx::query_scalar::<_, Option<String>>(
+            "SELECT strategy_version_id FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| format!("query account strategy: {e}"))?
+        .flatten()
+        .ok_or_else(|| {
+            "策略 ID 未指定：请求未传 strategy_id 且账号 strategy_version_id 为空".to_string()
+        })?,
     };
 
     // 以策略配置为基底，用传入的回测曲线作为 A 股权益源。
@@ -1815,7 +1818,10 @@ async fn run_mvo_simulate(
     // 单序列绩效（基于 navs 的 net_return）——废弃 mvo_gross/a_share_only 对比口径
     let net_rets: Vec<f64> = navs.iter().map(|d| d.net_return).collect();
     // TODO: mvo_backtest 路径无 ResolvedStrategy 上下文，暂用默认无风险利率；后续应从策略配置读 risk_free_rate
-    let m = crate::routes::mvo_engine::compute_metrics(&net_rets, crate::routes::mvo_engine::DEFAULT_RISK_FREE_RATE);
+    let m = crate::routes::mvo_engine::compute_metrics(
+        &net_rets,
+        crate::routes::mvo_engine::DEFAULT_RISK_FREE_RATE,
+    );
 
     // 逐年收益（内联本地实现，避免跨模块调私有 fn）
     let yearly = compute_yearly_from_navs(&navs);

@@ -888,7 +888,6 @@ async fn simulate_paper_nav_inner(
     }))
 }
 
-
 // ── Multi-Window Simulation ──
 
 #[derive(Debug, Deserialize)]
@@ -1460,7 +1459,18 @@ async fn fill_paper_order_inner(
 async fn paper_account_summary_inner(db: &sqlx::PgPool, account_id: &str) -> Result<Value, String> {
     // 2026-09-09 修复: 旧实现 "nav": account.3 把 cash 当 NAV 返回——全仓/融资账户 cash=0,
     // 页面净值显示 0（生产杠杆账户实测命中）。NAV 直接取 current_nav（EOD 盯市维护）。
-    let account = sqlx::query_as::<_, (String, String, Decimal, Decimal, String, Option<Decimal>, Option<Decimal>)>(
+    let account = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Decimal,
+            Decimal,
+            String,
+            Option<Decimal>,
+            Option<Decimal>,
+        ),
+    >(
         "SELECT paper_account_id, name, initial_capital, cash, status, current_nav, peak_nav
          FROM paper_account
          WHERE paper_account_id = $1",

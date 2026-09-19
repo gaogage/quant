@@ -1,8 +1,6 @@
 use serde::Deserialize;
 use serde_json::json;
-use std::{
-    sync::Arc,
-};
+use std::sync::Arc;
 
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
 
@@ -34,7 +32,6 @@ pub struct Phase7OptionalSourceCoverageSyncReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct Phase7OptionalSourceCoverageBatchReq {
     #[serde(default)]
     pub sources: Vec<String>,
@@ -55,7 +52,6 @@ pub struct Phase7OptionalSourceCoverageBatchReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct Phase7CoverageExpansionRunnerReq {
     #[serde(default)]
@@ -86,7 +82,6 @@ pub struct Phase7CoverageExpansionRunnerReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct Phase7ShareFloatCoverageReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -103,8 +98,6 @@ pub struct Phase7ShareFloatCoverageReq {
     #[serde(default)]
     pub data_version_prefix: Option<String>,
 }
-
-
 
 pub(crate) async fn execute_sync_task(
     state: Arc<AppState>,
@@ -578,4 +571,3 @@ pub(crate) async fn execute_sync_task(
         other => Err(format!("unsupported dataset: {}", other)),
     }
 }
-

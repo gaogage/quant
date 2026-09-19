@@ -1315,7 +1315,10 @@ mod tests {
         let symbol = bars[0].symbol.clone();
         let dates = bars.iter().map(|b| b.trade_date).collect();
         m.insert(symbol, bars);
-        FactorInput { bars: m, trade_dates: dates }
+        FactorInput {
+            bars: m,
+            trade_dates: dates,
+        }
     }
 
     #[test]
@@ -1376,11 +1379,7 @@ mod tests {
             &[10.0, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6],
             &[1000.0; 7],
         );
-        let wild = make_bars(
-            "T2",
-            &[10.0, 12.0, 9.0, 13.0, 8.0, 12.5, 9.5],
-            &[1000.0; 7],
-        );
+        let wild = make_bars("T2", &[10.0, 12.0, 9.0, 13.0, 8.0, 12.5, 9.5], &[1000.0; 7]);
         let calm_out = factor.compute(&make_input(calm));
         let wild_out = factor.compute(&make_input(wild));
         assert_eq!(wild_out.name, "atr_5d");
@@ -1395,15 +1394,15 @@ mod tests {
     fn test_amplitude_factor_positive_and_scales() {
         let factor = AmplitudeFactor::new(5);
         // make_bars 固定 high/low = close*1.02/0.98 → 振幅约 4%，与价格水平无关但为正
-        let bars = make_bars(
-            "A1",
-            &[10.0, 10.5, 11.0, 11.5, 12.0, 12.5],
-            &[1000.0; 6],
-        );
+        let bars = make_bars("A1", &[10.0, 10.5, 11.0, 11.5, 12.0, 12.5], &[1000.0; 6]);
         let out = factor.compute(&make_input(bars));
         assert_eq!(out.name, "amp_5d");
         let last = out.values.last().unwrap().value;
-        assert!(last > 0.0 && last < 1.0, "振幅应在 (0,1) 区间，实际 {}", last);
+        assert!(
+            last > 0.0 && last < 1.0,
+            "振幅应在 (0,1) 区间，实际 {}",
+            last
+        );
     }
 
     #[test]
@@ -1458,17 +1457,24 @@ mod tests {
         // 单边上涨 → 无回撤，值≈0
         let up = make_bars(
             "M1",
-            &[10.0, 10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5, 15.0, 15.5],
+            &[
+                10.0, 10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5, 15.0, 15.5,
+            ],
             &[100.0; 12],
         );
         let out = factor.compute(&make_input(up));
         assert_eq!(out.name, "maxdd_10d");
-        assert!(out.values.last().unwrap().value.abs() < 1e-9, "单边涨无回撤");
+        assert!(
+            out.values.last().unwrap().value.abs() < 1e-9,
+            "单边涨无回撤"
+        );
 
         // 先涨后崩 40% → 回撤接近 -0.4
         let crash = make_bars(
             "M2",
-            &[10.0, 11.0, 12.0, 13.0, 14.0, 12.0, 9.5, 8.4, 8.6, 8.8, 9.0, 9.2],
+            &[
+                10.0, 11.0, 12.0, 13.0, 14.0, 12.0, 9.5, 8.4, 8.6, 8.8, 9.0, 9.2,
+            ],
             &[100.0; 12],
         );
         let out2 = factor.compute(&make_input(crash));
@@ -1476,5 +1482,4 @@ mod tests {
         assert!(dd < -0.35, "崩盘回撤应≈-40%，实际 {}", dd);
         assert!(dd > -0.45);
     }
-
 }

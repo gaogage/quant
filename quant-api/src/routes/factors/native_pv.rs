@@ -23,7 +23,13 @@ use tracing::{error, info};
 /// 夜间增量覆盖的 7 因子(full PIT 76 白名单中的 quant-factor 原生量价族)。
 /// 增删因子只需改此表——batch_compute_factors 按名字前缀路由公式。
 pub const NATIVE_PV_FACTORS: &[&str] = &[
-    "mom_5d", "vol_20d", "turn_20d", "mom_20d", "rsi_14d", "amp_5d", "bb_pos_20d",
+    "mom_5d",
+    "vol_20d",
+    "turn_20d",
+    "mom_20d",
+    "rsi_14d",
+    "amp_5d",
+    "bb_pos_20d",
 ];
 
 /// 分批股票数(内存受控: 单批 bar 预载约 500 股 × 40 天, 与 pv_std_backfill_2605 同参)。
@@ -87,7 +93,11 @@ pub async fn native_pv_increment_background(
         if status == "completed" {
             info!("[native_pv] 手动增量完成 task={} 落库 {} 行", tid, n_rows);
         } else {
-            error!("[native_pv] 手动增量失败 task={} {}", tid, err_msg.unwrap_or_default());
+            error!(
+                "[native_pv] 手动增量失败 task={} {}",
+                tid,
+                err_msg.unwrap_or_default()
+            );
         }
     });
 
@@ -133,7 +143,11 @@ async fn native_pv_increment_inner(db: &PgPool) -> Result<usize, String> {
         // 2. 本批预载(复权价视图, 与历史补数同源) + 全量返回 loader
         let bars = load_bars(db, &chunk_syms, preload_start, latest).await?;
         let loader: Arc<
-            dyn Fn(&[String], chrono::NaiveDate, chrono::NaiveDate) -> Result<HashMap<String, Vec<DailyBar>>, String>
+            dyn Fn(
+                    &[String],
+                    chrono::NaiveDate,
+                    chrono::NaiveDate,
+                ) -> Result<HashMap<String, Vec<DailyBar>>, String>
                 + Send
                 + Sync,
         > = {
@@ -152,7 +166,10 @@ async fn native_pv_increment_inner(db: &PgPool) -> Result<usize, String> {
         > = {
             let collected = collected.clone();
             Arc::new(move |name, _ver, vals| {
-                collected.lock().unwrap().push((name.to_string(), vals.to_vec()));
+                collected
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), vals.to_vec()));
                 Ok(vals.len())
             })
         };
@@ -179,8 +196,10 @@ async fn native_pv_increment_inner(db: &PgPool) -> Result<usize, String> {
         let collected_vec = std::mem::take(&mut *collected.lock().unwrap());
         let mut batch_saved = 0usize;
         for (code, vals) in collected_vec.iter() {
-            let recent: Vec<&(String, chrono::NaiveDate, f64, bool)> =
-                vals.iter().filter(|(_, d, _, _)| *d >= increment_start).collect();
+            let recent: Vec<&(String, chrono::NaiveDate, f64, bool)> = vals
+                .iter()
+                .filter(|(_, d, _, _)| *d >= increment_start)
+                .collect();
             batch_saved += save_factor_values(db, code, &recent).await?;
         }
         total_saved += batch_saved;

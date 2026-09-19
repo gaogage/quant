@@ -57,7 +57,6 @@ use quant_backtest::signal_generator::{
     SignalDataCacheSnapshot, SignalDataCacheStats,
 };
 
-
 use super::*;
 
 #[derive(Clone)]
@@ -69,13 +68,11 @@ pub(crate) struct OptimizationTaskExecutionContext {
     pub(crate) constraints: Option<Value>,
 }
 
-
 pub(crate) struct ScoredTrial {
     pub(crate) score: Decimal,
     pub(crate) metrics: Value,
     pub(crate) constraint_violations: Value,
 }
-
 
 pub(crate) fn backtest_cache_stats_delta(
     before: BacktestDataCacheStats,
@@ -115,7 +112,6 @@ pub(crate) fn backtest_cache_stats_delta(
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct DiscoveryCandidate {
     pub(crate) trial_id: String,
@@ -127,12 +123,10 @@ pub(crate) struct DiscoveryCandidate {
     pub(crate) parameters: Value,
 }
 
-
 pub(crate) enum OptimizationTrialBacktestRequest {
     Factor(RunFactorBacktestReq),
     Prediction(RunPredictionBacktestReq),
 }
-
 
 pub(crate) struct FactorSignalBatchPrewarmPlan {
     pub(crate) requested_trials: usize,
@@ -140,7 +134,6 @@ pub(crate) struct FactorSignalBatchPrewarmPlan {
     pub(crate) prediction_trials: usize,
     pub(crate) invalid_trials: usize,
 }
-
 
 pub async fn run_optimization_trials(
     State(state): State<Arc<AppState>>,
@@ -160,7 +153,6 @@ pub async fn run_optimization_trials(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub(crate) async fn evaluate_discovery_candidates(
     db: &sqlx::PgPool,
@@ -188,7 +180,6 @@ pub(crate) async fn evaluate_discovery_candidates(
     Ok(results)
 }
 
-
 pub(crate) fn generate_trial_parameters(
     search_space: &Value,
     seed: u64,
@@ -212,7 +203,6 @@ pub(crate) fn generate_trial_parameters(
     Ok(trials)
 }
 
-
 pub(crate) async fn execute_pending_trials(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -231,7 +221,6 @@ pub(crate) async fn execute_pending_trials(
     )
     .await
 }
-
 
 pub(crate) async fn execute_pending_trials_with_caches(
     db: &sqlx::PgPool,
@@ -252,7 +241,6 @@ pub(crate) async fn execute_pending_trials_with_caches(
     )
     .await
 }
-
 
 pub(crate) fn plan_factor_signal_batch_prewarm_requests(
     task: &OptimizationTaskExecutionContext,
@@ -280,7 +268,6 @@ pub(crate) fn plan_factor_signal_batch_prewarm_requests(
         invalid_trials,
     }
 }
-
 
 pub(crate) async fn execute_pending_trials_with_caches_and_concurrency(
     db: &sqlx::PgPool,
@@ -516,7 +503,6 @@ pub(crate) async fn execute_pending_trials_with_caches_and_concurrency(
     }))
 }
 
-
 pub(crate) async fn execute_loaded_pending_trials_concurrently(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -647,7 +633,6 @@ pub(crate) async fn execute_loaded_pending_trials_concurrently(
     }))
 }
 
-
 pub(crate) fn merge_trial_execution_join(
     result: Result<TrialExecutionOutcome, tokio::task::JoinError>,
     completed: &mut i64,
@@ -667,7 +652,6 @@ pub(crate) fn merge_trial_execution_join(
         }
     }
 }
-
 
 pub(crate) async fn execute_single_pending_trial(
     db: sqlx::PgPool,
@@ -738,8 +722,10 @@ pub(crate) async fn execute_single_pending_trial(
     }
 }
 
-
-pub(crate) fn add_signal_cache_stats(total: &mut SignalDataCacheStats, value: SignalDataCacheStats) {
+pub(crate) fn add_signal_cache_stats(
+    total: &mut SignalDataCacheStats,
+    value: SignalDataCacheStats,
+) {
     total.combo_score_hits += value.combo_score_hits;
     total.combo_score_misses += value.combo_score_misses;
     total.trading_day_hits += value.trading_day_hits;
@@ -807,8 +793,10 @@ pub(crate) fn add_signal_cache_stats(total: &mut SignalDataCacheStats, value: Si
     total.benchmark_return_misses += value.benchmark_return_misses;
 }
 
-
-pub(crate) fn add_backtest_cache_stats(total: &mut BacktestDataCacheStats, value: BacktestDataCacheStats) {
+pub(crate) fn add_backtest_cache_stats(
+    total: &mut BacktestDataCacheStats,
+    value: BacktestDataCacheStats,
+) {
     total.trading_day_hits += value.trading_day_hits;
     total.trading_day_misses += value.trading_day_misses;
     total.benchmark_data_hits += value.benchmark_data_hits;
@@ -820,7 +808,6 @@ pub(crate) fn add_backtest_cache_stats(total: &mut BacktestDataCacheStats, value
     total.trading_profile_symbol_hits += value.trading_profile_symbol_hits;
     total.trading_profile_symbol_misses += value.trading_profile_symbol_misses;
 }
-
 
 pub(crate) async fn load_discovery_candidates(
     db: &sqlx::PgPool,
@@ -884,7 +871,6 @@ pub(crate) async fn load_discovery_candidates(
     Ok(candidates)
 }
 
-
 pub(crate) fn discovery_candidate_order(
     left: &DiscoveryCandidate,
     right: &DiscoveryCandidate,
@@ -900,7 +886,6 @@ pub(crate) fn discovery_candidate_order(
         .then_with(|| right.metrics.sharpe.cmp(&left.metrics.sharpe))
         .then_with(|| right.metrics.annual_return.cmp(&left.metrics.annual_return))
 }
-
 
 pub(crate) fn professional_candidate_gap_score(
     metrics: &CandidateMetrics,
@@ -919,11 +904,9 @@ pub(crate) fn professional_candidate_gap_score(
         + drawdown_gap * Decimal::new(5, 0)
 }
 
-
 pub(crate) fn positive_gap(limit: Decimal, actual: Decimal) -> Decimal {
     (limit - actual).max(Decimal::ZERO)
 }
-
 
 pub(crate) fn discovery_candidate_rank(candidate_type: CandidateType) -> u8 {
     match candidate_type {
@@ -933,7 +916,6 @@ pub(crate) fn discovery_candidate_rank(candidate_type: CandidateType) -> u8 {
         CandidateType::Research => 3,
     }
 }
-
 
 pub(crate) fn discovery_candidate_json(candidate: &DiscoveryCandidate) -> Value {
     json!({
@@ -965,7 +947,6 @@ pub(crate) fn discovery_candidate_json(candidate: &DiscoveryCandidate) -> Value 
     })
 }
 
-
 pub(crate) fn build_optimization_trial_request(
     task: &OptimizationTaskExecutionContext,
     parameters: &Value,
@@ -982,7 +963,6 @@ pub(crate) fn build_optimization_trial_request(
         Some(other) => Err(format!("unsupported signal_source: {}", other)),
     }
 }
-
 
 pub(crate) fn trial_signal_source(
     task: &OptimizationTaskExecutionContext,
@@ -1030,7 +1010,6 @@ pub(crate) fn trial_signal_source(
         Some(_) => Err("signal_source must be a string or null".to_string()),
     }
 }
-
 
 pub(crate) fn build_factor_trial_request(
     task: &OptimizationTaskExecutionContext,
@@ -1302,14 +1281,12 @@ pub(crate) fn build_factor_trial_request(
     })
 }
 
-
 pub(crate) fn optional_cost_model_from_maps(
     params: &Map<String, Value>,
     template: &Map<String, Value>,
 ) -> Result<Option<CostModelReq>, String> {
     optional_struct_from_merged_maps(params, template, "cost_model")
 }
-
 
 pub(crate) fn optional_execution_rules_from_maps(
     params: &Map<String, Value>,
@@ -1356,7 +1333,6 @@ pub(crate) fn optional_execution_rules_from_maps(
     }
 }
 
-
 pub(crate) fn optional_struct_from_merged_maps<T>(
     params: &Map<String, Value>,
     template: &Map<String, Value>,
@@ -1372,7 +1348,6 @@ where
         .map(Some)
         .map_err(|error| format!("{} must be a valid object: {}", key, error))
 }
-
 
 pub(crate) fn merged_object_from_maps(
     params: &Map<String, Value>,
@@ -1397,7 +1372,6 @@ pub(crate) fn merged_object_from_maps(
         Ok(Some(merged))
     }
 }
-
 
 pub(crate) fn build_prediction_trial_request(
     task: &OptimizationTaskExecutionContext,
@@ -1522,7 +1496,6 @@ pub(crate) fn build_prediction_trial_request(
         trailing_stop_pct: optional_f64_value("trailing_stop_pct")?,
     })
 }
-
 
 pub(crate) fn market_regime_request_from_value(
     value: Option<&Value>,
@@ -1667,7 +1640,6 @@ pub(crate) fn market_regime_request_from_value(
     }
 }
 
-
 pub(crate) fn optional_usize_from_object(
     map: &Map<String, Value>,
     key: &str,
@@ -1686,14 +1658,12 @@ pub(crate) fn optional_usize_from_object(
     }
 }
 
-
 pub(crate) struct ReusableTrial {
     backtest_task_id: Option<String>,
     score: Decimal,
     metrics: Value,
     constraint_violations: Value,
 }
-
 
 pub(crate) async fn find_reusable_trial(
     db: &sqlx::PgPool,
@@ -1744,7 +1714,6 @@ pub(crate) async fn find_reusable_trial(
     }))
 }
 
-
 pub(crate) async fn mark_trial_reused(
     db: &sqlx::PgPool,
     trial_id: &str,
@@ -1769,7 +1738,6 @@ pub(crate) async fn mark_trial_reused(
     Ok(())
 }
 
-
 pub(crate) fn trial_reuse_key(
     strategy_version_id: &str,
     data_version_id: &str,
@@ -1784,7 +1752,6 @@ pub(crate) fn trial_reuse_key(
         canonical_json(parameters)
     )
 }
-
 
 pub(crate) fn canonical_json(value: &Value) -> String {
     match value {
@@ -1809,7 +1776,6 @@ pub(crate) fn canonical_json(value: &Value) -> String {
         _ => value.to_string(),
     }
 }
-
 
 pub(crate) fn score_trial(
     metrics: &quant_backtest::metrics::BacktestMetrics,
@@ -1993,7 +1959,6 @@ pub(crate) fn score_trial(
     }
 }
 
-
 pub(crate) fn professional_candidate_objective_score(
     metrics: &quant_backtest::metrics::BacktestMetrics,
     constraints: Option<&Value>,
@@ -2051,11 +2016,9 @@ pub(crate) fn professional_candidate_objective_score(
         - metrics.max_drawdown_pct
 }
 
-
 pub(crate) fn positive_decimal_gap(limit: Decimal, actual: Decimal) -> Decimal {
     (limit - actual).max(Decimal::ZERO)
 }
-
 
 pub(crate) fn score_trial_with_output(
     output: &FactorBacktestRunOutput,
@@ -2071,8 +2034,11 @@ pub(crate) fn score_trial_with_output(
     scored
 }
 
-
-pub(crate) fn sample_parameter(name: &str, spec: &Value, rng: &mut DeterministicRng) -> Result<Value, String> {
+pub(crate) fn sample_parameter(
+    name: &str,
+    spec: &Value,
+    rng: &mut DeterministicRng,
+) -> Result<Value, String> {
     let spec = spec
         .as_object()
         .ok_or_else(|| format!("search_space.{} must be an object", name))?;
@@ -2124,11 +2090,9 @@ pub(crate) fn sample_parameter(name: &str, spec: &Value, rng: &mut Deterministic
     }
 }
 
-
 pub(crate) struct DeterministicRng {
     state: u64,
 }
-
 
 impl DeterministicRng {
     pub(crate) fn new(seed: u64) -> Self {
@@ -2157,5 +2121,3 @@ impl DeterministicRng {
         ((self.next_u64() >> 32) as usize) % upper_exclusive
     }
 }
-
-

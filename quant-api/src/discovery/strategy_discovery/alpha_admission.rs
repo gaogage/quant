@@ -4,7 +4,10 @@
 
 use rust_decimal::Decimal;
 
-use super::profiles::{AlphaBlendProfile, AlphaBlendSource, ComboVersion, Phase7AlphaSourceAdmission, Phase7AlphaSourceRole};
+use super::profiles::{
+    AlphaBlendProfile, AlphaBlendSource, ComboVersion, Phase7AlphaSourceAdmission,
+    Phase7AlphaSourceRole,
+};
 
 pub fn phase7_alpha_source_admission(combo_name: &str) -> Phase7AlphaSourceAdmission {
     let (role, reason) = match combo_name {

@@ -23,14 +23,13 @@ use tracing::{info, warn};
 /// list_date 为 NULL 时 fallback 到 market_stock_daily_bar_adj 的 MIN(trade_date) 推断首发日。
 pub async fn is_etf_listed_on(db: &PgPool, symbol: &str, date: NaiveDate) -> bool {
     // 优先:market_stock.list_date(Task 0 修复 tushare 后回填)
-    let list_date: Option<NaiveDate> = sqlx::query_scalar(
-        "SELECT list_date FROM market_stock WHERE symbol = $1",
-    )
-    .bind(symbol)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
+    let list_date: Option<NaiveDate> =
+        sqlx::query_scalar("SELECT list_date FROM market_stock WHERE symbol = $1")
+            .bind(symbol)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
     if let Some(ld) = list_date {
         return ld <= date;
     }
@@ -181,8 +180,7 @@ pub async fn sync_strategy_equity_curve(
             payload["prediction_blend_weight"] = serde_json::json!(sc.prediction_blend_weight);
             // P1-4 配置化:从 sc 读,原硬编码 0.25/200
             payload["kelly_fraction"] = serde_json::json!(sc.kelly_fraction);
-            payload["score_candidate_pool_size"] =
-                serde_json::json!(sc.score_candidate_pool_size);
+            payload["score_candidate_pool_size"] = serde_json::json!(sc.score_candidate_pool_size);
             info!(
                 "[equity-sync] {} prediction_blend: set={} w={}",
                 strategy_id, pid, sc.prediction_blend_weight
@@ -196,10 +194,7 @@ pub async fn sync_strategy_equity_curve(
         std::time::Duration::from_secs(600)
     };
     match client
-        .post(format!(
-            "{}/api/v1/quant/backtests/run-factor",
-            api_base
-        ))
+        .post(format!("{}/api/v1/quant/backtests/run-factor", api_base))
         .json(&payload)
         .timeout(timeout)
         .send()
@@ -415,7 +410,7 @@ pub async fn audit_equity_curve_readiness(
 
 #[derive(Debug, Deserialize)]
 pub struct EquityCurveSyncRequest {
-    pub start_date: Option<String>,  // YYYYMMDD
+    pub start_date: Option<String>, // YYYYMMDD
     pub end_date: Option<String>,
     pub background: Option<bool>,
 }
@@ -431,19 +426,25 @@ pub async fn handle_equity_curve_sync(
         Ok(db) => db,
         Err(e) => return Json(serde_json::json!({"code": 1, "message": format!("db: {}", e)})),
     };
-    let parse_date = |s: &Option<String>, default: chrono::NaiveDate| -> Result<chrono::NaiveDate, String> {
-        match s {
-            Some(d) => chrono::NaiveDate::parse_from_str(d, "%Y%m%d")
-                .or_else(|_| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d"))
-                .map_err(|e| format!("日期格式错误 {}: {}", d, e)),
-            None => Ok(default),
-        }
-    };
-    let start = match parse_date(&req.start_date, chrono::NaiveDate::from_ymd_opt(2014, 1, 2).unwrap()) {
-        Ok(d) => d, Err(e) => return Json(serde_json::json!({"code": 1, "message": e})),
+    let parse_date =
+        |s: &Option<String>, default: chrono::NaiveDate| -> Result<chrono::NaiveDate, String> {
+            match s {
+                Some(d) => chrono::NaiveDate::parse_from_str(d, "%Y%m%d")
+                    .or_else(|_| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d"))
+                    .map_err(|e| format!("日期格式错误 {}: {}", d, e)),
+                None => Ok(default),
+            }
+        };
+    let start = match parse_date(
+        &req.start_date,
+        chrono::NaiveDate::from_ymd_opt(2014, 1, 2).unwrap(),
+    ) {
+        Ok(d) => d,
+        Err(e) => return Json(serde_json::json!({"code": 1, "message": e})),
     };
     let end = match parse_date(&req.end_date, chrono::Utc::now().date_naive()) {
-        Ok(d) => d, Err(e) => return Json(serde_json::json!({"code": 1, "message": e})),
+        Ok(d) => d,
+        Err(e) => return Json(serde_json::json!({"code": 1, "message": e})),
     };
     if start > end {
         return Json(serde_json::json!({"code": 1, "message": "start_date > end_date"}));
@@ -534,17 +535,17 @@ async fn ensure_composite_curve_table(db: &PgPool) -> Result<(), String> {
 ///
 /// 落库:INSERT ... ON CONFLICT (strategy_id, trade_date) DO UPDATE。
 /// 返回写入行数。
-pub async fn sync_composite_equity_curve(
-    db: &PgPool,
-    strategy_id: &str,
-) -> Result<usize, String> {
+pub async fn sync_composite_equity_curve(db: &PgPool, strategy_id: &str) -> Result<usize, String> {
     use std::collections::HashMap;
 
     ensure_composite_curve_table(db).await?;
 
     let rs = crate::routes::strategy::load_resolved_strategy(db, strategy_id).await?;
     if rs.strategy_type != crate::routes::strategy::StrategyType::Composite {
-        return Err(format!("{} 非 composite 策略,无法合成 composite 曲线", strategy_id));
+        return Err(format!(
+            "{} 非 composite 策略,无法合成 composite 曲线",
+            strategy_id
+        ));
     }
     let mvo = rs.mvo.as_ref().ok_or("composite 缺 MVO 参数")?;
 
@@ -592,17 +593,18 @@ pub async fn sync_composite_equity_curve(
     let etf_w_norm: Vec<f64> = etf_ws.iter().map(|w| w / total).collect();
 
     // 1. 取 A 股回测曲线 portfolio_value 序列(按 trade_date 升序)
-    let a_curve: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as::<_, (chrono::NaiveDate, rust_decimal::Decimal)>(
-        "SELECT trade_date, portfolio_value FROM backtest_equity_curve \
+    let a_curve: Vec<(chrono::NaiveDate, f64)> =
+        sqlx::query_as::<_, (chrono::NaiveDate, rust_decimal::Decimal)>(
+            "SELECT trade_date, portfolio_value FROM backtest_equity_curve \
          WHERE task_id = $1 ORDER BY trade_date ASC",
-    )
-    .bind(a_task_id)
-    .fetch_all(db)
-    .await
-    .map_err(|e| format!("load a_share curve: {}", e))?
-    .into_iter()
-    .map(|(d, v)| (d, v.to_string().parse::<f64>().unwrap_or(0.0)))
-    .collect();
+        )
+        .bind(a_task_id)
+        .fetch_all(db)
+        .await
+        .map_err(|e| format!("load a_share curve: {}", e))?
+        .into_iter()
+        .map(|(d, v)| (d, v.to_string().parse::<f64>().unwrap_or(0.0)))
+        .collect();
     if a_curve.is_empty() {
         return Err(format!("A 股回测曲线为空 (task_id={})", a_task_id));
     }
@@ -620,19 +622,20 @@ pub async fn sync_composite_equity_curve(
     // 复权体系定版: 曲线合成属信号层, 用后复权(总回报连续, 分红再投语义)。
     let mut etf_prices: HashMap<String, HashMap<chrono::NaiveDate, f64>> = HashMap::new();
     for sym in etf_syms.iter() {
-        let prices: Vec<(chrono::NaiveDate, f64)> = sqlx::query_as::<_, (chrono::NaiveDate, rust_decimal::Decimal)>(
-            "SELECT trade_date, close FROM market_stock_daily_bar_adj \
+        let prices: Vec<(chrono::NaiveDate, f64)> =
+            sqlx::query_as::<_, (chrono::NaiveDate, rust_decimal::Decimal)>(
+                "SELECT trade_date, close FROM market_stock_daily_bar_adj \
              WHERE symbol = $1 AND trade_date BETWEEN $2 AND $3 ORDER BY trade_date ASC",
-        )
-        .bind(sym)
-        .bind(start_date)
-        .bind(end_date)
-        .fetch_all(db)
-        .await
-        .map_err(|e| format!("load etf {} prices: {}", sym, e))?
-        .into_iter()
-        .map(|(d, v)| (d, v.to_string().parse::<f64>().unwrap_or(0.0)))
-        .collect();
+            )
+            .bind(sym)
+            .bind(start_date)
+            .bind(end_date)
+            .fetch_all(db)
+            .await
+            .map_err(|e| format!("load etf {} prices: {}", sym, e))?
+            .into_iter()
+            .map(|(d, v)| (d, v.to_string().parse::<f64>().unwrap_or(0.0)))
+            .collect();
         let m: HashMap<chrono::NaiveDate, f64> = prices.into_iter().collect();
         etf_prices.insert(sym.clone(), m);
     }
@@ -741,7 +744,10 @@ mod tests {
         // v21 和 v21_lev 共用 fbt-ab3eecf6 → detect_combo_sharing(v21) 应含 v21_lev
         let sharing = detect_combo_sharing(&db, "v21").await;
         assert!(sharing.contains(&"v21".to_string()), "含自身");
-        assert!(sharing.contains(&"v21_lev".to_string()), "v21_lev 共用 v21 曲线");
+        assert!(
+            sharing.contains(&"v21_lev".to_string()),
+            "v21_lev 共用 v21 曲线"
+        );
     }
 
     #[tokio::test]

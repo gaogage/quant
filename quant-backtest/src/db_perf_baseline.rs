@@ -228,8 +228,11 @@ pub fn hash_signals(signals: &HashMap<NaiveDate, StrategySignal>) -> String {
     let mut entries: Vec<(NaiveDate, Vec<(String, Decimal)>)> = signals
         .iter()
         .map(|(date, sig)| {
-            let mut weights: Vec<(String, Decimal)> =
-                sig.target_weights.iter().map(|(s, w)| (s.clone(), *w)).collect();
+            let mut weights: Vec<(String, Decimal)> = sig
+                .target_weights
+                .iter()
+                .map(|(s, w)| (s.clone(), *w))
+                .collect();
             weights.sort_by(|a, b| a.0.cmp(&b.0));
             (*date, weights)
         })

@@ -130,16 +130,25 @@ pub(crate) async fn compute_lw_mvo_weights(
         let etf_sum: f64 = sc.default_weights.iter().skip(1).sum();
         for (i, _) in sc.etf_symbols.iter().enumerate() {
             let dw = sc.default_weights.get(i + 1).copied().unwrap_or(0.0);
-            let w = if etf_sum > 0.0 { dw / etf_sum * remaining } else { remaining / n_etf as f64 };
+            let w = if etf_sum > 0.0 {
+                dw / etf_sum * remaining
+            } else {
+                remaining / n_etf as f64
+            };
             weights.push(w);
         }
         // 归一化（浮点安全）
         let total: f64 = weights.iter().sum();
         if total > 0.0 {
-            for w in weights.iter_mut() { *w /= total; }
+            for w in weights.iter_mut() {
+                *w /= total;
+            }
         }
         let mut guard = cache.lock().await;
-        *guard = Some(MvoWeightCache { quarter: quarter.clone(), weights: weights.clone() });
+        *guard = Some(MvoWeightCache {
+            quarter: quarter.clone(),
+            weights: weights.clone(),
+        });
         info!(quarter = %quarter, weights = ?weights, "固定权重分配（绕过 MVO）");
         return weights;
     }
@@ -172,10 +181,16 @@ pub(crate) async fn compute_lw_mvo_weights(
         // 实测:原实现取到 2020 年最老 3 月累计 +3.08%，而真实最近 3 月为 -8.60%(熊市信号完全颠倒)。
         // 修复:统一用尾部切片(最近 N 月)替代头部切片(最老 N 月)。
         let tail_start_3 = a_monthly.len().saturating_sub(3);
-        let trail_3m: f64 = a_monthly[tail_start_3..].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+        let trail_3m: f64 = a_monthly[tail_start_3..]
+            .iter()
+            .fold(1.0, |acc, r| acc * (1.0 + r))
+            - 1.0;
         let trail_6m: f64 = if a_monthly.len() >= 6 {
             let tail_start_6 = a_monthly.len().saturating_sub(6);
-            a_monthly[tail_start_6..].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0
+            a_monthly[tail_start_6..]
+                .iter()
+                .fold(1.0, |acc, r| acc * (1.0 + r))
+                - 1.0
         } else {
             trail_3m * 2.0
         };
@@ -297,8 +312,10 @@ pub(crate) async fn compute_lw_mvo_weights(
                 // P4 修复:取最近 12 个月(尾部)而非最老 12 个月(头部)。
                 // 同 trail_3m/trail_6m 修复理由:daily_to_monthly_returns 升序返回,头部切片=最老。
                 let tail_start = a_monthly.len() - 12;
-                let trail_12m: f64 =
-                    a_monthly[tail_start..].iter().fold(1.0, |acc, r| acc * (1.0 + r)) - 1.0;
+                let trail_12m: f64 = a_monthly[tail_start..]
+                    .iter()
+                    .fold(1.0, |acc, r| acc * (1.0 + r))
+                    - 1.0;
                 (trail_12m + 0.05).clamp(target_floor.min(target_cap), target_cap)
             } else {
                 target_floor.min(target_cap)
@@ -331,8 +348,8 @@ pub(crate) async fn compute_lw_mvo_weights(
                         .map(|j| {
                             let col: Vec<f64> = all_monthly.iter().map(|r| r[j]).collect();
                             let mean = col.iter().sum::<f64>() / col.len() as f64;
-                            let var =
-                                col.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / col.len() as f64;
+                            let var = col.iter().map(|r| (r - mean).powi(2)).sum::<f64>()
+                                / col.len() as f64;
                             let ann_vol = var.sqrt() * (12.0f64).sqrt();
                             if ann_vol > 1e-8 {
                                 (mean * 12.0) / ann_vol * 0.10 // Sharpe × σ_target(0.10)
@@ -523,18 +540,48 @@ mod tests {
         use chrono::NaiveDate;
         use rust_decimal::Decimal;
         let rows: Vec<(NaiveDate, Decimal)> = vec![
-            (NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(), Decimal::new(100, 0)),
-            (NaiveDate::from_ymd_opt(2020, 1, 31).unwrap(), Decimal::new(110, 0)), // +10%
-            (NaiveDate::from_ymd_opt(2020, 2, 3).unwrap(), Decimal::new(110, 0)),
-            (NaiveDate::from_ymd_opt(2020, 2, 28).unwrap(), Decimal::new(132, 0)), // +20%
-            (NaiveDate::from_ymd_opt(2020, 3, 2).unwrap(), Decimal::new(132, 0)),
-            (NaiveDate::from_ymd_opt(2020, 3, 31).unwrap(), Decimal::new(99, 0)),  // -25%
+            (
+                NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(),
+                Decimal::new(100, 0),
+            ),
+            (
+                NaiveDate::from_ymd_opt(2020, 1, 31).unwrap(),
+                Decimal::new(110, 0),
+            ), // +10%
+            (
+                NaiveDate::from_ymd_opt(2020, 2, 3).unwrap(),
+                Decimal::new(110, 0),
+            ),
+            (
+                NaiveDate::from_ymd_opt(2020, 2, 28).unwrap(),
+                Decimal::new(132, 0),
+            ), // +20%
+            (
+                NaiveDate::from_ymd_opt(2020, 3, 2).unwrap(),
+                Decimal::new(132, 0),
+            ),
+            (
+                NaiveDate::from_ymd_opt(2020, 3, 31).unwrap(),
+                Decimal::new(99, 0),
+            ), // -25%
         ];
         let result = daily_to_monthly_returns(&rows);
         assert_eq!(result.len(), 3, "应产生 3 个月度收益");
-        assert!((result[0] - 0.10).abs() < 0.001, "1月应为 +10%, 实际: {}", result[0]);
-        assert!((result[1] - 0.20).abs() < 0.001, "2月应为 +20%, 实际: {}", result[1]);
-        assert!((result[2] - (-0.25)).abs() < 0.001, "3月应为 -25%, 实际: {}", result[2]);
+        assert!(
+            (result[0] - 0.10).abs() < 0.001,
+            "1月应为 +10%, 实际: {}",
+            result[0]
+        );
+        assert!(
+            (result[1] - 0.20).abs() < 0.001,
+            "2月应为 +20%, 实际: {}",
+            result[1]
+        );
+        assert!(
+            (result[2] - (-0.25)).abs() < 0.001,
+            "3月应为 -25%, 实际: {}",
+            result[2]
+        );
     }
 
     #[test]
@@ -557,7 +604,12 @@ mod tests {
         assert_eq!(monthly.len(), 36, "36 个月应产生 36 条收益");
         // 每月均为 +5%
         for (i, r) in monthly.iter().enumerate() {
-            assert!((r - 0.05).abs() < 0.005, "第{}(0-based)月应为 5%, 实际: {}", i, r);
+            assert!(
+                (r - 0.05).abs() < 0.005,
+                "第{}(0-based)月应为 5%, 实际: {}",
+                i,
+                r
+            );
         }
         // 最近3月 = 尾部切片 (monthly.len()-3..)
         let recent_3 = &monthly[monthly.len() - 3..];
@@ -573,7 +625,10 @@ mod tests {
         use chrono::NaiveDate;
         use rust_decimal::Decimal;
         // 单条记录 → 无法跨月比较
-        let rows = vec![(NaiveDate::from_ymd_opt(2020, 1, 15).unwrap(), Decimal::new(100, 0))];
+        let rows = vec![(
+            NaiveDate::from_ymd_opt(2020, 1, 15).unwrap(),
+            Decimal::new(100, 0),
+        )];
         assert!(daily_to_monthly_returns(&rows).is_empty());
         // 空输入
         let empty: Vec<(NaiveDate, Decimal)> = vec![];

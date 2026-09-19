@@ -91,10 +91,7 @@ pub(crate) const PROFILE_CATALOG: &[ProfileCatalogEntry] = &[
         canonical: "professional_ensemble_discovery",
         category: SearchProfileCategory::Ensemble,
         gate_category: GateCategory::CapacityStressReturn,
-        aliases: &[
-            "professional_ensemble_discovery",
-            "phase7_ensemble_v1",
-        ],
+        aliases: &["professional_ensemble_discovery", "phase7_ensemble_v1"],
     },
     ProfileCatalogEntry {
         canonical: "professional_execution_alpha_capacity_bridge",
@@ -936,7 +933,6 @@ use quant_backtest::signal_generator::{
     SignalDataCacheSnapshot, SignalDataCacheStats,
 };
 
-
 use super::*;
 
 pub(crate) fn default_professional_robustness_policy() -> Value {
@@ -962,7 +958,6 @@ pub(crate) fn default_professional_robustness_policy() -> Value {
         "bootstrap_seed": 42
     })
 }
-
 
 pub(crate) fn default_professional_elite_robustness_policy() -> Value {
     json!({
@@ -994,7 +989,6 @@ pub(crate) fn default_professional_elite_robustness_policy() -> Value {
     })
 }
 
-
 pub(crate) fn default_oos_train_selection_gate_policy() -> Value {
     json!({
         "candidate_tier": "oos_train_selection",
@@ -1018,81 +1012,90 @@ pub(crate) fn default_oos_train_selection_gate_policy() -> Value {
     })
 }
 
+static CASH_DRAG_BASIC_GATE: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "enable_train_cost_capacity_perturbation_gate": true,
+        "enable_train_cost_capacity_stress_aware_selection": true,
+        "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
+        "min_train_perturbed_calmar": 1.2,
+        "max_train_perturbed_drawdown_pct": 0.35,
+        "train_stress_score_profile": "cash_drag_fill_gap_score_v1",
+        "max_train_final_unfilled_target_gap_pct": 0.08,
+        "min_train_final_execution_fill_ratio": 0.90,
+        "max_train_execution_schedule_expired_count": 0
+    })
+});
 
-static CASH_DRAG_BASIC_GATE: LazyLock<Value> = LazyLock::new(|| json!({
-                "enable_train_cost_capacity_perturbation_gate": true,
-                "enable_train_cost_capacity_stress_aware_selection": true,
-                "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
-                "min_train_perturbed_calmar": 1.2,
-                "max_train_perturbed_drawdown_pct": 0.35,
-                "train_stress_score_profile": "cash_drag_fill_gap_score_v1",
-                "max_train_final_unfilled_target_gap_pct": 0.08,
-                "min_train_final_execution_fill_ratio": 0.90,
-                "max_train_execution_schedule_expired_count": 0
-            }));
+static CAPACITY_STRESS_RETURN_GATE: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "enable_train_cost_capacity_perturbation_gate": true,
+        "enable_train_cost_capacity_stress_aware_selection": true,
+        "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
+        "min_train_perturbed_calmar": 1.2,
+        "max_train_perturbed_drawdown_pct": 0.35,
+        "train_stress_score_profile": "capacity_stress_return_score_v1",
+        "capacity_stress_target_calmar": 2.0,
+        "capacity_stress_target_annual_return": 0.15,
+        "min_train_perturbed_annual_return": 0.05,
+        "min_train_avg_perturbed_calmar": 1.2,
+        "min_train_trade_count": 50,
+        "min_train_final_actual_gross_exposure_pct": 0.25,
+        "max_train_final_cash_weight_pct": 0.75,
+        "max_train_final_unfilled_target_gap_pct": 0.08,
+        "min_train_final_execution_fill_ratio": 0.90,
+        "max_train_execution_schedule_expired_count": 0
+    })
+});
 
-static CAPACITY_STRESS_RETURN_GATE: LazyLock<Value> = LazyLock::new(|| json!({
-                "enable_train_cost_capacity_perturbation_gate": true,
-                "enable_train_cost_capacity_stress_aware_selection": true,
-                "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
-                "min_train_perturbed_calmar": 1.2,
-                "max_train_perturbed_drawdown_pct": 0.35,
-                "train_stress_score_profile": "capacity_stress_return_score_v1",
-                "capacity_stress_target_calmar": 2.0,
-                "capacity_stress_target_annual_return": 0.15,
-                "min_train_perturbed_annual_return": 0.05,
-                "min_train_avg_perturbed_calmar": 1.2,
-                "min_train_trade_count": 50,
-                "min_train_final_actual_gross_exposure_pct": 0.25,
-                "max_train_final_cash_weight_pct": 0.75,
-                "max_train_final_unfilled_target_gap_pct": 0.08,
-                "min_train_final_execution_fill_ratio": 0.90,
-                "max_train_execution_schedule_expired_count": 0
-            }));
+static PREDICTION_CONFIDENCE_STRESS_FILL_GATE: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "enable_train_cost_capacity_perturbation_gate": true,
+        "enable_train_cost_capacity_stress_aware_selection": true,
+        "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
+        "min_train_perturbed_calmar": 1.2,
+        "max_train_perturbed_drawdown_pct": 0.35,
+        "train_stress_score_profile": "prediction_confidence_stress_fill_quality_score_v1",
+        "capacity_stress_target_calmar": 2.0,
+        "capacity_stress_target_annual_return": 0.15,
+        "min_train_perturbed_annual_return": 0.05,
+        "min_train_avg_perturbed_calmar": 1.2,
+        "min_train_trade_count": 100,
+        "min_train_final_actual_gross_exposure_pct": 0.35,
+        "max_train_final_cash_weight_pct": 0.65,
+        "max_train_final_unfilled_target_gap_pct": 0.06,
+        "min_train_final_execution_fill_ratio": 0.95,
+        "max_train_execution_schedule_expired_count": 0
+    })
+});
 
-static PREDICTION_CONFIDENCE_STRESS_FILL_GATE: LazyLock<Value> = LazyLock::new(|| json!({
-                "enable_train_cost_capacity_perturbation_gate": true,
-                "enable_train_cost_capacity_stress_aware_selection": true,
-                "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
-                "min_train_perturbed_calmar": 1.2,
-                "max_train_perturbed_drawdown_pct": 0.35,
-                "train_stress_score_profile": "prediction_confidence_stress_fill_quality_score_v1",
-                "capacity_stress_target_calmar": 2.0,
-                "capacity_stress_target_annual_return": 0.15,
-                "min_train_perturbed_annual_return": 0.05,
-                "min_train_avg_perturbed_calmar": 1.2,
-                "min_train_trade_count": 100,
-                "min_train_final_actual_gross_exposure_pct": 0.35,
-                "max_train_final_cash_weight_pct": 0.65,
-                "max_train_final_unfilled_target_gap_pct": 0.06,
-                "min_train_final_execution_fill_ratio": 0.95,
-                "max_train_execution_schedule_expired_count": 0
-            }));
+static CASH_DRAG_FILL_RATIO_GATE: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "enable_train_cost_capacity_perturbation_gate": true,
+        "enable_train_cost_capacity_stress_aware_selection": true,
+        "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
+        "min_train_perturbed_calmar": 1.2,
+        "max_train_perturbed_drawdown_pct": 0.35,
+        "train_stress_score_profile": "cash_drag_fill_gap_score_v1",
+        "max_train_execution_target_gap_pct": 0.08,
+        "max_train_final_unfilled_target_gap_pct": 0.08,
+        "min_train_final_execution_fill_ratio": 0.90,
+        "max_train_execution_schedule_expired_count": 0
+    })
+});
 
-static CASH_DRAG_FILL_RATIO_GATE: LazyLock<Value> = LazyLock::new(|| json!({
-                "enable_train_cost_capacity_perturbation_gate": true,
-                "enable_train_cost_capacity_stress_aware_selection": true,
-                "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
-                "min_train_perturbed_calmar": 1.2,
-                "max_train_perturbed_drawdown_pct": 0.35,
-                "train_stress_score_profile": "cash_drag_fill_gap_score_v1",
-                "max_train_execution_target_gap_pct": 0.08,
-                "max_train_final_unfilled_target_gap_pct": 0.08,
-                "min_train_final_execution_fill_ratio": 0.90,
-                "max_train_execution_schedule_expired_count": 0
-            }));
-
-static CASH_DRAG_AWARE_GATE: LazyLock<Value> = LazyLock::new(|| json!({
-                "enable_train_cost_capacity_perturbation_gate": true,
-                "enable_train_cost_capacity_stress_aware_selection": true,
-                "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
-                "min_train_perturbed_calmar": 1.2,
-                "max_train_perturbed_drawdown_pct": 0.35,
-                "train_stress_score_profile": "cash_drag_fill_gap_score_v1",
-                "max_train_final_cash_weight_pct": 0.20,
-                "max_train_execution_target_gap_pct": 0.08,
-                "max_train_execution_schedule_expired_count": 0
-            }));
+static CASH_DRAG_AWARE_GATE: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "enable_train_cost_capacity_perturbation_gate": true,
+        "enable_train_cost_capacity_stress_aware_selection": true,
+        "min_train_cost_capacity_perturbation_pass_ratio": 0.80,
+        "min_train_perturbed_calmar": 1.2,
+        "max_train_perturbed_drawdown_pct": 0.35,
+        "train_stress_score_profile": "cash_drag_fill_gap_score_v1",
+        "max_train_final_cash_weight_pct": 0.20,
+        "max_train_execution_target_gap_pct": 0.08,
+        "max_train_execution_schedule_expired_count": 0
+    })
+});
 
 pub(crate) fn default_oos_train_selection_gate_policy_for_search_profile(
     search_profile: Option<&str>,
@@ -1102,9 +1105,7 @@ pub(crate) fn default_oos_train_selection_gate_policy_for_search_profile(
     // 消除原 6 组 301 别名的手动重复维护（如 phase7_en 遗漏 bug）。
     match resolve_gate_category(search_profile) {
         GateCategory::CashDragBasic => merge_gate_policy(base, &CASH_DRAG_BASIC_GATE),
-        GateCategory::CapacityStressReturn => {
-            merge_gate_policy(base, &CAPACITY_STRESS_RETURN_GATE)
-        }
+        GateCategory::CapacityStressReturn => merge_gate_policy(base, &CAPACITY_STRESS_RETURN_GATE),
         GateCategory::PredictionConfidenceStressFill => {
             merge_gate_policy(base, &PREDICTION_CONFIDENCE_STRESS_FILL_GATE)
         }
@@ -1113,7 +1114,6 @@ pub(crate) fn default_oos_train_selection_gate_policy_for_search_profile(
         GateCategory::Base => base,
     }
 }
-
 
 pub(crate) fn default_oos_final_promotion_gate_policy(validation_mode: &str) -> Value {
     let min_oos_window_count = if validation_mode == "holdout_80_20" {
@@ -1136,7 +1136,6 @@ pub(crate) fn default_oos_final_promotion_gate_policy(validation_mode: &str) -> 
     })
 }
 
-
 pub(crate) fn profile_accepts_prediction_set_override(search_profile: &str) -> bool {
     // 查 category 派生：非执行型/非门控型 profile 接受外部预测集覆盖。
     // 别名列表仅在 PROFILE_CATALOG 中维护一次，消除多处重复。
@@ -1158,7 +1157,6 @@ pub(crate) fn profile_accepts_prediction_set_override(search_profile: &str) -> b
     )
 }
 
-
 pub(crate) fn is_train_window_ml_stress_fill_profile(search_profile: Option<&str>) -> bool {
     // 查 category 派生：匹配 stress_fill + ensemble + simple_nlqr + 6 个 v19 变体。
     // 等价于原 40 别名 matches! 列表，别名列表仅在 PROFILE_CATALOG 中维护一次。
@@ -1176,7 +1174,6 @@ pub(crate) fn is_train_window_ml_stress_fill_profile(search_profile: Option<&str
     )
 }
 
-
 pub(crate) fn is_ensemble_profile(search_profile: Option<&str>) -> bool {
     matches!(
         resolve_profile_category(search_profile),
@@ -1184,14 +1181,12 @@ pub(crate) fn is_ensemble_profile(search_profile: Option<&str>) -> bool {
     )
 }
 
-
 pub(crate) fn is_simple_nlqr_profile(search_profile: Option<&str>) -> bool {
     matches!(
         resolve_profile_category(search_profile),
         SearchProfileCategory::SimpleNlqr
     )
 }
-
 
 pub(crate) fn is_v19_train_window_ml_alpha_rebuild_profile(search_profile: Option<&str>) -> bool {
     // 历史命名陷阱：此谓词名为 alpha_rebuild，但实际匹配全部 6 个 v19 变体
@@ -1208,14 +1203,14 @@ pub(crate) fn is_v19_train_window_ml_alpha_rebuild_profile(search_profile: Optio
     )
 }
 
-
-pub(crate) fn is_v19_train_window_ml_event_sentiment_rebuild_profile(search_profile: Option<&str>) -> bool {
+pub(crate) fn is_v19_train_window_ml_event_sentiment_rebuild_profile(
+    search_profile: Option<&str>,
+) -> bool {
     matches!(
         resolve_profile_category(search_profile),
         SearchProfileCategory::V19TrainWindowMlEventSentiment
     )
 }
-
 
 pub(crate) fn is_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile(
     search_profile: Option<&str>,
@@ -1226,16 +1221,18 @@ pub(crate) fn is_v19_train_window_ml_rae_h120_residual_capacity_rebuild_profile(
     )
 }
 
-
-pub(crate) fn is_v19_train_window_ml_h120_low_impact_rebuild_profile(search_profile: Option<&str>) -> bool {
+pub(crate) fn is_v19_train_window_ml_h120_low_impact_rebuild_profile(
+    search_profile: Option<&str>,
+) -> bool {
     matches!(
         resolve_profile_category(search_profile),
         SearchProfileCategory::V19TrainWindowMlH120LowImpact
     )
 }
 
-
-pub(crate) fn is_v19_train_window_ml_simple_excess_rebuild_profile(search_profile: Option<&str>) -> bool {
+pub(crate) fn is_v19_train_window_ml_simple_excess_rebuild_profile(
+    search_profile: Option<&str>,
+) -> bool {
     // simple_excess + simple_excess_low_impact 两个变体（与原 10 别名等价）。
     matches!(
         resolve_profile_category(search_profile),
@@ -1243,7 +1240,6 @@ pub(crate) fn is_v19_train_window_ml_simple_excess_rebuild_profile(search_profil
             | SearchProfileCategory::V19TrainWindowMlSimpleExcessLowImpact
     )
 }
-
 
 pub(crate) fn apply_internal_train_window_ml_prediction_set_to_seed_trials(
     seed_trials: &mut [Value],
@@ -1267,7 +1263,6 @@ pub(crate) fn apply_internal_train_window_ml_prediction_set_to_seed_trials(
         seed["train_window_ml_prediction_set_scope"] = json!("generated_per_wfa_window_train_only");
     }
 }
-
 
 pub(crate) fn train_window_ml_oos_parameters(
     train_parameters: &Value,
@@ -1299,7 +1294,6 @@ pub(crate) fn train_window_ml_oos_parameters(
     );
     Ok(parameters)
 }
-
 
 pub(crate) fn phase7_discovery_layered_request(
     req: &Phase7ProfessionalDiscoveryRequest,
@@ -1341,7 +1335,6 @@ pub(crate) fn phase7_discovery_layered_request(
     }
 }
 
-
 pub(crate) fn default_phase7_backtest_template() -> Value {
     json!({
         "mode": "standard",
@@ -1360,7 +1353,6 @@ pub(crate) fn default_phase7_backtest_template() -> Value {
     })
 }
 
-
 pub(crate) fn normalize_prediction_set_ids(values: &[String]) -> Vec<String> {
     values
         .iter()
@@ -1369,7 +1361,6 @@ pub(crate) fn normalize_prediction_set_ids(values: &[String]) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
-
 
 pub(crate) fn apply_prediction_set_override_to_seed_trials(
     seed_trials: &mut [Value],
@@ -1387,7 +1378,6 @@ pub(crate) fn apply_prediction_set_override_to_seed_trials(
     }
 }
 
-
 pub(crate) fn default_effective_coverage_policy(top_n: usize) -> EffectiveCoverageReq {
     EffectiveCoverageReq {
         enabled: Some(true),
@@ -1397,7 +1387,6 @@ pub(crate) fn default_effective_coverage_policy(top_n: usize) -> EffectiveCovera
         warmup_trading_days: Some(19),
     }
 }
-
 
 pub(crate) fn effective_coverage_policy_from_value(
     value: Option<&Value>,
@@ -1462,29 +1451,27 @@ pub(crate) fn effective_coverage_policy_from_value(
     }
 }
 
-
 pub(crate) fn train_window_ml_label_horizon_days(window: &OosDiscoveryWindow) -> i64 {
     let train_days = (window.train_end - window.train_start).num_days().max(1);
     45.min((train_days / 4).max(5)).max(5)
 }
 
-
-pub(crate) fn train_window_ml_lookback_days(window: &OosDiscoveryWindow, label_horizon_days: i64) -> i64 {
+pub(crate) fn train_window_ml_lookback_days(
+    window: &OosDiscoveryWindow,
+    label_horizon_days: i64,
+) -> i64 {
     let train_days = (window.train_end - window.train_start).num_days().max(1);
     let max_lookback = (train_days - label_horizon_days - 5).max(30);
     252.min(max_lookback).max(30)
 }
 
-
 pub(crate) fn phase7_train_window_ml_feature_profile() -> &'static str {
     "phase7_gb_quality_value_recovery_low_impact_v5"
 }
 
-
 pub(crate) fn phase7_simple_nlqr_feature_profile() -> &'static str {
     "phase7_simple_nlqr_core_15f_v1"
 }
-
 
 pub(crate) fn phase7_train_window_ml_label_config_for_search(
     search_profile: Option<&str>,
@@ -1509,8 +1496,9 @@ pub(crate) fn phase7_train_window_ml_label_config_for_search(
     }
 }
 
-
-pub(crate) fn phase7_train_window_ml_feature_profile_for_search(search_profile: Option<&str>) -> &'static str {
+pub(crate) fn phase7_train_window_ml_feature_profile_for_search(
+    search_profile: Option<&str>,
+) -> &'static str {
     if is_simple_nlqr_profile(search_profile) {
         phase7_simple_nlqr_feature_profile()
     } else if is_v19_train_window_ml_event_sentiment_rebuild_profile(search_profile) {
@@ -1522,8 +1510,9 @@ pub(crate) fn phase7_train_window_ml_feature_profile_for_search(search_profile: 
     }
 }
 
-
-pub(crate) fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> Vec<LinearFactorRef> {
+pub(crate) fn phase7_train_window_ml_factor_refs_for_profile(
+    profile: &str,
+) -> Vec<LinearFactorRef> {
     let factor_codes: &[&str] = match profile {
         "phase7_gb_quality_value_recovery_low_impact_v2" => &[
             "fin_roe_daily_std",
@@ -1907,7 +1896,6 @@ pub(crate) fn phase7_train_window_ml_factor_refs_for_profile(profile: &str) -> V
         .collect()
 }
 
-
 pub(crate) fn default_oos_cost_capacity_perturbations() -> Vec<OosCostCapacityPerturbationRequest> {
     vec![
         OosCostCapacityPerturbationRequest {
@@ -1936,5 +1924,3 @@ pub(crate) fn default_oos_cost_capacity_perturbations() -> Vec<OosCostCapacityPe
         },
     ]
 }
-
-

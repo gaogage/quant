@@ -1,9 +1,5 @@
 /// 数据同步路由
-use axum::{
-    extract::State,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -64,25 +60,17 @@ pub struct TusharePermissionSmokeReq {
     pub limit: Option<usize>,
 }
 
-
-
 pub(crate) fn default_source() -> String {
     "tushare".into()
 }
-
-
 
 pub(crate) fn stale_cleanup_default_timeout_seconds(value: Option<i64>) -> i64 {
     value.unwrap_or(3600).clamp(60, 86_400)
 }
 
-
-
 pub(crate) fn stale_cleanup_limit(value: Option<i64>) -> i64 {
     value.unwrap_or(100).clamp(1, 1000)
 }
-
-
 
 pub(crate) fn stale_sync_task_cleanup_terminal_status(status: &str) -> Option<&'static str> {
     match status {
@@ -92,8 +80,6 @@ pub(crate) fn stale_sync_task_cleanup_terminal_status(status: &str) -> Option<&'
     }
 }
 
-
-
 pub(crate) fn stale_sync_task_cleanup_action(status: &str) -> &'static str {
     match stale_sync_task_cleanup_terminal_status(status) {
         Some("cancelled") => "finalize_cancel_requested",
@@ -102,14 +88,10 @@ pub(crate) fn stale_sync_task_cleanup_action(status: &str) -> &'static str {
     }
 }
 
-
-
 pub(crate) fn generated_data_version_id() -> String {
     // R11/R12: 转调 versioning 集中化（data_version ID 生成逻辑单一出口）。
     quant_data::versioning::generate_version_id().to_string()
 }
-
-
 
 pub(crate) fn bounded_phase7_task_id(parts: &[&str]) -> String {
     const MAX_ID_LEN: usize = 64;
@@ -146,8 +128,6 @@ pub(crate) fn bounded_phase7_task_id(parts: &[&str]) -> String {
         .to_string();
     format!("{}{}", prefix, suffix)
 }
-
-
 
 pub(crate) fn parse_optional_date(value: Option<&str>) -> Result<Option<NaiveDate>, String> {
     value
@@ -215,7 +195,8 @@ const AKSHARE_ANALYST_REVISION_SYNC_PLAN_MAX_BATCHES: usize = 80;
 const AKSHARE_ANALYST_REVISION_SYNC_MAX_CALENDAR_DAYS: i64 = 100;
 pub(crate) const AKSHARE_ANALYST_REVISION_SYNC_MAX_RETRIES: usize = 2;
 pub(crate) const AKSHARE_ANALYST_REVISION_TASK_SOURCE: &str = "akshare_cninfo_revision";
-pub(crate) const AKSHARE_ANALYST_REVISION_ATTEMPT_SOURCE: &str = "akshare:stock_rank_forecast_cninfo";
+pub(crate) const AKSHARE_ANALYST_REVISION_ATTEMPT_SOURCE: &str =
+    "akshare:stock_rank_forecast_cninfo";
 pub(crate) const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_TASK_SOURCE: &str = "ak_cninfo_exann_oc";
 pub(crate) const EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE: &str =
     "akshare:stock_zh_a_disclosure_report_cninfo";
@@ -261,7 +242,6 @@ const PHASE7_SHARE_FLOAT_COVERAGE_MAX_CHUNKS: usize = 64;
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct Phase7ShareFloatReadinessAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -271,7 +251,6 @@ pub struct Phase7ShareFloatReadinessAuditReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct Phase7IndustryMembershipCoverageAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -280,8 +259,6 @@ pub struct Phase7IndustryMembershipCoverageAuditReq {
     #[serde(default)]
     pub limit: Option<i64>,
 }
-
-
 
 pub(crate) fn phase7_permission_smoke_sources(requested: &[String]) -> Vec<String> {
     let raw_sources: Vec<String> = if requested.is_empty() {
@@ -304,15 +281,11 @@ pub(crate) fn phase7_permission_smoke_sources(requested: &[String]) -> Vec<Strin
         .collect()
 }
 
-
-
 pub(crate) fn phase7_permission_smoke_limit(limit: Option<usize>) -> usize {
     limit
         .unwrap_or(1)
         .clamp(1, PHASE7_PERMISSION_SMOKE_MAX_ROWS)
 }
-
-
 
 pub(crate) fn akshare_analyst_revision_smoke_sources(requested: &[String]) -> Vec<String> {
     let raw_sources: Vec<String> = if requested.is_empty() {
@@ -336,16 +309,12 @@ pub(crate) fn akshare_analyst_revision_smoke_sources(requested: &[String]) -> Ve
         .collect()
 }
 
-
-
 pub(crate) fn akshare_analyst_revision_python_path(requested: Option<String>) -> String {
     requested
         .filter(|path| !path.trim().is_empty())
         .or_else(|| env::var("AKSHARE_PYTHON").ok())
         .unwrap_or_else(|| "/tmp/akshare-smoke/bin/python".to_string())
 }
-
-
 
 pub(crate) fn akshare_analyst_revision_timeout_seconds() -> u64 {
     env::var("AKSHARE_SMOKE_TIMEOUT_SECONDS")
@@ -354,8 +323,6 @@ pub(crate) fn akshare_analyst_revision_timeout_seconds() -> u64 {
         .unwrap_or(AKSHARE_ANALYST_REVISION_SMOKE_TIMEOUT_SECONDS)
         .clamp(5, 300)
 }
-
-
 
 pub(crate) fn command_exists_on_path(command: &str) -> bool {
     env::var_os("PATH")
@@ -368,13 +335,9 @@ pub(crate) fn command_exists_on_path(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_raw_sync_row_limit() -> usize {
     EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_RAW_SYNC_MAX_ROWS
 }
-
-
 
 pub(crate) fn exchange_announcement_order_capacity_smoke_plan(
     req: &ExchangeAnnouncementOrderCapacitySmokeReq,
@@ -444,8 +407,6 @@ pub(crate) fn exchange_announcement_order_capacity_smoke_plan(
     }))
 }
 
-
-
 pub(crate) fn parse_cninfo_announcement_link_metadata(link: &str) -> Value {
     let announcement_id = cninfo_query_param(link, "announcementId")
         .or_else(|| cninfo_announcement_id_from_path(link));
@@ -484,8 +445,6 @@ pub(crate) fn parse_cninfo_announcement_link_metadata(link: &str) -> Value {
         "missing_fields": missing_fields,
     })
 }
-
-
 
 pub(crate) fn exchange_announcement_order_capacity_detail_audit_plan(
     req: &ExchangeAnnouncementOrderCapacityDetailAuditReq,
@@ -550,8 +509,6 @@ pub(crate) fn exchange_announcement_order_capacity_detail_audit_plan(
     }))
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_pdf_detail_audit_plan(
     req: &ExchangeAnnouncementOrderCapacityPdfDetailAuditReq,
 ) -> Result<Value, String> {
@@ -614,8 +571,6 @@ pub(crate) fn exchange_announcement_order_capacity_pdf_detail_audit_plan(
         ],
     }))
 }
-
-
 
 pub(crate) fn exchange_announcement_order_capacity_ocr_blocked_row_audit_plan(
     req: &ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq,
@@ -694,8 +649,6 @@ pub(crate) fn exchange_announcement_order_capacity_ocr_blocked_row_audit_plan(
     }))
 }
 
-
-
 pub(crate) fn decide_exchange_announcement_detail_audit(
     total_links: usize,
     fetched_text_count: usize,
@@ -738,8 +691,6 @@ pub(crate) fn decide_exchange_announcement_detail_audit(
         },
     })
 }
-
-
 
 pub(crate) fn decide_exchange_announcement_order_capacity_pdf_detail_audit(
     total_links: usize,
@@ -791,8 +742,6 @@ pub(crate) fn decide_exchange_announcement_order_capacity_pdf_detail_audit(
         },
     })
 }
-
-
 
 pub(crate) fn decide_exchange_announcement_order_capacity_ocr_blocked_row_audit(
     total_rows: usize,
@@ -874,8 +823,6 @@ pub(crate) fn decide_exchange_announcement_order_capacity_ocr_blocked_row_audit(
     })
 }
 
-
-
 pub(crate) fn summarize_exchange_announcement_detail_probes(
     probes: &[Value],
 ) -> ExchangeAnnouncementDetailProbeSummary {
@@ -944,8 +891,6 @@ pub(crate) fn summarize_exchange_announcement_detail_probes(
         pdf_parser_required_count,
     }
 }
-
-
 
 pub(crate) fn validate_exchange_announcement_order_capacity_sync_request(
     req: &ExchangeAnnouncementOrderCapacitySyncReq,
@@ -1021,13 +966,9 @@ pub(crate) fn validate_exchange_announcement_order_capacity_sync_request(
     })
 }
 
-
-
 pub(crate) fn quarter_index(date: NaiveDate) -> u32 {
     ((date.month() - 1) / 3) + 1
 }
-
-
 
 pub(crate) fn validate_exchange_announcement_order_capacity_bounded_sync_request(
     req: &ExchangeAnnouncementOrderCapacityBoundedSyncReq,
@@ -1120,8 +1061,6 @@ pub(crate) fn validate_exchange_announcement_order_capacity_bounded_sync_request
     )
 }
 
-
-
 fn exchange_announcement_event_type_from_title_and_spans(
     title: &str,
     spans: &Value,
@@ -1132,8 +1071,6 @@ fn exchange_announcement_event_type_from_title_and_spans(
     }
     exchange_announcement_event_type_from_spans(spans)
 }
-
-
 
 // 测试辅助函数：仅在 sync/tests.rs 的单元测试中调用，非测试编译时标记为允许死代码。
 #[allow(dead_code)]
@@ -1180,8 +1117,6 @@ fn exchange_announcement_order_capacity_ocr_taxonomy_exclusion_reason(
     }
     None
 }
-
-
 
 pub(crate) fn exchange_announcement_order_capacity_taxonomy_risk_title_reason(
     category: &str,
@@ -1259,8 +1194,6 @@ pub(crate) fn exchange_announcement_order_capacity_taxonomy_risk_title_reason(
     None
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_probe_is_truncated(probe: &Value) -> bool {
     let row_count = probe.get("row_count").and_then(Value::as_i64).unwrap_or(0);
     let sample_count = probe
@@ -1270,8 +1203,6 @@ pub(crate) fn exchange_announcement_order_capacity_probe_is_truncated(probe: &Va
         .unwrap_or(0);
     row_count > sample_count
 }
-
-
 
 pub(crate) fn exchange_announcement_raw_row_from_list_and_pdf_probe(
     list_row: &Value,
@@ -1436,8 +1367,6 @@ pub(crate) fn exchange_announcement_raw_row_from_list_and_pdf_probe(
     })
 }
 
-
-
 pub(crate) fn decide_exchange_announcement_order_capacity_coverage_quality_audit(
     metrics: ExchangeAnnouncementOrderCapacityCoverageQualityMetrics,
 ) -> Value {
@@ -1589,8 +1518,6 @@ pub(crate) fn decide_exchange_announcement_order_capacity_coverage_quality_audit
     })
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_target_event_yield_report(
     raw_row_count: i64,
     target_event_rows: i64,
@@ -1631,9 +1558,9 @@ pub(crate) fn exchange_announcement_order_capacity_target_event_yield_report(
     })
 }
 
-
-
-pub(crate) fn exchange_announcement_order_capacity_admission_readiness_report(coverage: &Value) -> Value {
+pub(crate) fn exchange_announcement_order_capacity_admission_readiness_report(
+    coverage: &Value,
+) -> Value {
     let row_count =
         exchange_announcement_order_capacity_json_path_i64(coverage, &["summary", "row_count"]);
     let target_event_rows = exchange_announcement_order_capacity_json_path_i64(
@@ -1770,8 +1697,6 @@ pub(crate) fn exchange_announcement_order_capacity_admission_readiness_report(co
     })
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_manual_precision_sample_report(
     admissible_target_event_rows: i64,
     required_target_sample_size: i64,
@@ -1834,8 +1759,6 @@ pub(crate) fn exchange_announcement_order_capacity_manual_precision_sample_repor
     })
 }
 
-
-
 pub(crate) fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
     let (next_year, next_month) = if month == 12 {
         (year + 1, 1)
@@ -1844,8 +1767,6 @@ pub(crate) fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
     };
     NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap() - Duration::days(1)
 }
-
-
 
 pub(crate) fn akshare_analyst_revision_sync_plan_batches(
     start: NaiveDate,
@@ -1884,8 +1805,6 @@ pub(crate) fn akshare_analyst_revision_sync_plan_batches(
     Ok(batches)
 }
 
-
-
 pub(crate) fn akshare_stable_hash(parts: &[String]) -> String {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
@@ -1900,8 +1819,6 @@ pub(crate) fn akshare_stable_hash(parts: &[String]) -> String {
     }
     format!("{hash:016x}")
 }
-
-
 
 pub(crate) fn akshare_analyst_revision_raw_row_from_record(
     record: &serde_json::Map<String, Value>,
@@ -1955,8 +1872,6 @@ pub(crate) fn akshare_analyst_revision_raw_row_from_record(
     })
 }
 
-
-
 pub(crate) fn validate_akshare_analyst_revision_sync_range(
     start: NaiveDate,
     end: NaiveDate,
@@ -1974,19 +1889,13 @@ pub(crate) fn validate_akshare_analyst_revision_sync_range(
     Ok(calendar_day_count)
 }
 
-
-
 pub(crate) fn akshare_analyst_revision_should_retry_fetch_status(status: &str) -> bool {
     matches!(status, "timeout" | "error")
 }
 
-
-
 pub(crate) fn safe_ratio(numerator: i64, denominator: i64) -> Option<f64> {
     (denominator > 0).then_some(numerator as f64 / denominator as f64)
 }
-
-
 
 pub(crate) fn decide_broad_analyst_revision_audit(
     available_at_rule_violations: i64,
@@ -2038,8 +1947,6 @@ pub(crate) fn decide_broad_analyst_revision_audit(
         }
     }
 }
-
-
 
 pub(crate) fn decide_akshare_analyst_revision_history_replay_audit(
     requested_date_count: usize,
@@ -2121,8 +2028,6 @@ pub(crate) fn decide_akshare_analyst_revision_history_replay_audit(
         }
     })
 }
-
-
 
 pub(crate) fn decide_akshare_analyst_revision_readiness(
     schema_exists: bool,
@@ -2210,8 +2115,6 @@ pub(crate) fn decide_akshare_analyst_revision_readiness(
     })
 }
 
-
-
 pub(crate) fn decide_akshare_analyst_revision_coverage_audit(
     table_exists: bool,
     row_count: i64,
@@ -2292,8 +2195,6 @@ pub(crate) fn decide_akshare_analyst_revision_coverage_audit(
     })
 }
 
-
-
 pub(crate) fn main_business_raw_source_readiness(
     row_count: i64,
     expected_periods: usize,
@@ -2316,8 +2217,6 @@ pub(crate) fn main_business_raw_source_readiness(
     "raw_source_ready_for_full_history_coverage_audit"
 }
 
-
-
 pub(crate) fn main_business_readiness_summary_sql() -> &'static str {
     r#"
     SELECT
@@ -2335,19 +2234,13 @@ pub(crate) fn main_business_readiness_summary_sql() -> &'static str {
     "#
 }
 
-
-
 pub(crate) fn main_business_missing_available_at_rows(error_message: Option<&str>) -> i64 {
     main_business_attempt_metric(error_message, "missing_available_at_rows=")
 }
 
-
-
 pub(crate) fn main_business_out_of_universe_rows(error_message: Option<&str>) -> i64 {
     main_business_attempt_metric(error_message, "out_of_universe_rows=")
 }
-
-
 
 pub(crate) fn decide_main_business_available_at_join_audit(
     total_periods: usize,
@@ -2412,35 +2305,25 @@ pub(crate) fn decide_main_business_available_at_join_audit(
     }
 }
 
-
-
 fn phase7_optional_source_sync_limit(limit: Option<usize>) -> usize {
     limit
         .unwrap_or(PHASE7_OPTIONAL_SOURCE_SYNC_DEFAULT_SYMBOLS)
         .clamp(1, PHASE7_OPTIONAL_SOURCE_SYNC_MAX_SYMBOLS)
 }
 
-
-
 fn phase7_optional_source_sync_plan_only(plan_only: Option<bool>) -> bool {
     plan_only.unwrap_or(true)
 }
 
-
-
 fn phase7_optional_source_batch_size(batch_size: Option<usize>) -> usize {
     phase7_optional_source_sync_limit(batch_size)
 }
-
-
 
 fn phase7_optional_source_batch_count(batch_count: Option<usize>) -> usize {
     batch_count
         .unwrap_or(1)
         .clamp(1, PHASE7_OPTIONAL_SOURCE_BATCH_MAX_COUNT)
 }
-
-
 
 fn phase7_optional_source_batch_offsets(
     start_offset: usize,
@@ -2452,16 +2335,12 @@ fn phase7_optional_source_batch_offsets(
         .collect()
 }
 
-
-
 fn phase7_optional_source_batch_next_offset(offsets: &[usize], batch_size: usize) -> usize {
     offsets
         .last()
         .map(|offset| offset + batch_size)
         .unwrap_or_default()
 }
-
-
 
 fn phase7_optional_source_batch_recommended_resume_offset(
     plan_only: bool,
@@ -2475,13 +2354,9 @@ fn phase7_optional_source_batch_recommended_resume_offset(
     }
 }
 
-
-
 fn phase7_optional_source_batch_child_background(plan_only: bool) -> bool {
     !plan_only
 }
-
-
 
 fn phase7_coverage_runner_profile(profile: Option<&str>) -> String {
     profile
@@ -2491,15 +2366,11 @@ fn phase7_coverage_runner_profile(profile: Option<&str>) -> String {
         .to_string()
 }
 
-
-
 fn phase7_coverage_runner_batch_size(batch_size: Option<usize>) -> usize {
     batch_size
         .unwrap_or(PHASE7_COVERAGE_RUNNER_DEFAULT_BATCH_SIZE)
         .clamp(1, PHASE7_COVERAGE_RUNNER_MAX_BATCH_SIZE)
 }
-
-
 
 fn phase7_coverage_runner_batch_count(batch_count: Option<usize>) -> usize {
     batch_count
@@ -2507,19 +2378,13 @@ fn phase7_coverage_runner_batch_count(batch_count: Option<usize>) -> usize {
         .clamp(1, PHASE7_COVERAGE_RUNNER_MAX_BATCH_COUNT)
 }
 
-
-
 fn phase7_coverage_runner_plan_only(plan_only: Option<bool>) -> bool {
     plan_only.unwrap_or(true)
 }
 
-
-
 fn phase7_coverage_runner_auto_continue(auto_continue: Option<bool>) -> bool {
     auto_continue.unwrap_or(false)
 }
-
-
 
 fn phase7_coverage_runner_max_rounds(max_rounds: Option<usize>, auto_continue: bool) -> usize {
     if auto_continue {
@@ -2531,8 +2396,6 @@ fn phase7_coverage_runner_max_rounds(max_rounds: Option<usize>, auto_continue: b
     }
 }
 
-
-
 fn phase7_coverage_runner_should_build_immediate_batches(
     plan_only: bool,
     auto_continue: bool,
@@ -2540,13 +2403,9 @@ fn phase7_coverage_runner_should_build_immediate_batches(
     plan_only || !auto_continue
 }
 
-
-
 fn phase7_coverage_autopilot_batch_offsets(batch_count: usize) -> Vec<usize> {
     vec![0; batch_count]
 }
-
-
 
 fn phase7_coverage_runner_target_ratio(target: Option<f64>) -> f64 {
     target
@@ -2557,8 +2416,6 @@ fn phase7_coverage_runner_target_ratio(target: Option<f64>) -> f64 {
             PHASE7_COVERAGE_RUNNER_DEFAULT_TARGET_COVERAGE_RATIO,
         )
 }
-
-
 
 fn phase7_share_float_chunk_granularity(granularity: Option<&str>) -> &'static str {
     match granularity
@@ -2573,13 +2430,9 @@ fn phase7_share_float_chunk_granularity(granularity: Option<&str>) -> &'static s
     }
 }
 
-
-
 fn phase7_share_float_coverage_plan_only(plan_only: Option<bool>) -> bool {
     plan_only.unwrap_or(true)
 }
-
-
 
 fn phase7_share_float_coverage_max_chunks(max_chunks: Option<usize>) -> usize {
     max_chunks
@@ -2587,16 +2440,12 @@ fn phase7_share_float_coverage_max_chunks(max_chunks: Option<usize>) -> usize {
         .clamp(1, PHASE7_SHARE_FLOAT_COVERAGE_MAX_CHUNKS)
 }
 
-
-
 pub(crate) fn add_months_clamped(date: NaiveDate, months: u32) -> NaiveDate {
     let month0 = date.month0() + months;
     let year = date.year() + (month0 / 12) as i32;
     let month = (month0 % 12) + 1;
     NaiveDate::from_ymd_opt(year, month, 1).expect("valid first day")
 }
-
-
 
 fn phase7_share_float_date_chunks(
     start: NaiveDate,
@@ -2615,8 +2464,6 @@ fn phase7_share_float_date_chunks(
     chunks
 }
 
-
-
 fn phase7_share_float_readiness_sql() -> &'static str {
     r#"
     SELECT
@@ -2634,15 +2481,11 @@ fn phase7_share_float_readiness_sql() -> &'static str {
     "#
 }
 
-
-
 fn phase7_share_float_expected_days(start: NaiveDate, end: NaiveDate) -> i64 {
     end.signed_duration_since(start)
         .num_days()
         .saturating_add(1)
 }
-
-
 
 fn phase7_share_float_covered_days_from_windows(
     mut windows: Vec<(NaiveDate, NaiveDate)>,
@@ -2687,8 +2530,6 @@ fn phase7_share_float_covered_days_from_windows(
     covered_days
 }
 
-
-
 fn phase7_share_float_feature_readiness(
     row_count: i64,
     covered_days: i64,
@@ -2705,8 +2546,6 @@ fn phase7_share_float_feature_readiness(
         "ready_for_pit_feature_factory"
     }
 }
-
-
 
 fn phase7_coverage_runner_sources(requested: &[String]) -> Result<Vec<String>, String> {
     let raw_sources: Vec<String> = if requested.is_empty() {
@@ -2739,16 +2578,12 @@ fn phase7_coverage_runner_sources(requested: &[String]) -> Result<Vec<String>, S
     Ok(sources)
 }
 
-
-
 fn phase7_coverage_runner_should_plan_source(readiness: &str) -> bool {
     !matches!(
         readiness,
         "partial_feature_candidate" | "ready_for_feature_factory"
     )
 }
-
-
 
 fn phase7_coverage_runner_should_plan_source_for_target(
     readiness: Option<&str>,
@@ -2764,8 +2599,6 @@ fn phase7_coverage_runner_should_plan_source_for_target(
     let ratio = coverage_ratio.unwrap_or(0.0);
     ratio < target_ratio
 }
-
-
 
 fn phase7_coverage_runner_source_state_for_window(
     audit: &Value,
@@ -2884,8 +2717,6 @@ fn phase7_coverage_runner_source_state_for_window(
     (readiness_by_source, coverage_by_source)
 }
 
-
-
 pub(crate) fn phase7_financial_source_readiness(coverage_grade: &str) -> &'static str {
     match coverage_grade {
         "broad" => "ready_for_feature_factory",
@@ -2895,8 +2726,6 @@ pub(crate) fn phase7_financial_source_readiness(coverage_grade: &str) -> &'stati
         _ => "undercovered_do_not_train",
     }
 }
-
-
 
 fn phase7_optional_source_sync_sources(requested: &[String]) -> Result<Vec<String>, String> {
     let raw_sources: Vec<String> = if requested.is_empty() {
@@ -2929,8 +2758,6 @@ fn phase7_optional_source_sync_sources(requested: &[String]) -> Result<Vec<Strin
     Ok(sources)
 }
 
-
-
 fn phase7_optional_source_table(source: &str) -> Option<&'static str> {
     match source {
         "cashflow" => Some("market_stock_cashflow"),
@@ -2943,8 +2770,6 @@ fn phase7_optional_source_table(source: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-
-
 
 pub(crate) fn classify_tushare_permission_error(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
@@ -2962,8 +2787,6 @@ pub(crate) fn classify_tushare_permission_error(error: &str) -> &'static str {
     }
 }
 
-
-
 pub(crate) fn exchange_announcement_order_capacity_is_excluded_unsupported_category_attempt(
     attempt_symbol: &str,
     error: &str,
@@ -2971,9 +2794,9 @@ pub(crate) fn exchange_announcement_order_capacity_is_excluded_unsupported_categ
     attempt_symbol.ends_with(":重大事项") && error.trim_matches('"') == "'重大事项'"
 }
 
-
-
-pub(crate) fn normalize_exchange_announcement_order_capacity_probe_payload(payload: Value) -> Value {
+pub(crate) fn normalize_exchange_announcement_order_capacity_probe_payload(
+    payload: Value,
+) -> Value {
     let status = payload
         .get("status")
         .and_then(Value::as_str)
@@ -3037,8 +2860,6 @@ pub(crate) fn normalize_exchange_announcement_order_capacity_probe_payload(paylo
 
     payload
 }
-
-
 
 pub(crate) fn exchange_announcement_order_capacity_pdf_parser_readiness_report(
     python: &str,
@@ -3110,8 +2931,6 @@ pub(crate) fn exchange_announcement_order_capacity_pdf_parser_readiness_report(
     })
 }
 
-
-
 pub(crate) fn normalize_akshare_analyst_revision_full_fetch_payload(payload: Value) -> Value {
     if !akshare_analyst_revision_is_empty_dataframe_length_mismatch(&payload) {
         return payload;
@@ -3131,8 +2950,6 @@ pub(crate) fn normalize_akshare_analyst_revision_full_fetch_payload(payload: Val
     })
 }
 
-
-
 pub(crate) fn phase7_coverage_grade(symbols: i64, reference_symbols: i64) -> &'static str {
     if symbols <= 0 {
         "missing"
@@ -3149,8 +2966,6 @@ pub(crate) fn phase7_coverage_grade(symbols: i64, reference_symbols: i64) -> &'s
         }
     }
 }
-
-
 
 fn phase7_optional_source_readiness(
     table_exists: bool,
@@ -3171,8 +2986,6 @@ fn phase7_optional_source_readiness(
         }
     }
 }
-
-
 
 fn phase7_coverage_json(
     name: String,
@@ -3198,8 +3011,6 @@ fn phase7_coverage_json(
     })
 }
 
-
-
 fn phase7_coverage_rows_to_json(
     rows: Vec<(String, i64, Option<NaiveDate>, Option<NaiveDate>, i64)>,
     reference_symbols: i64,
@@ -3213,14 +3024,11 @@ fn phase7_coverage_rows_to_json(
 
 #[derive(Debug, Clone, Copy)]
 
-
 struct Phase7OptionalSourceSpec {
     source: &'static str,
     table: &'static str,
     next_feature: &'static str,
 }
-
-
 
 fn phase7_optional_source_specs() -> &'static [Phase7OptionalSourceSpec] {
     &[
@@ -3264,57 +3072,53 @@ fn phase7_optional_source_specs() -> &'static [Phase7OptionalSourceSpec] {
 
 #[derive(Debug, Clone, Copy)]
 
-
 pub(crate) struct Phase7MarketLevelSourceAudit {
-    pub(crate) data_rows:i64,
-    pub(crate) min_trade_date:Option<NaiveDate>,
-    pub(crate) latest_trade_date:Option<NaiveDate>,
-    pub(crate) open_day_lag:Option<i64>,
+    pub(crate) data_rows: i64,
+    pub(crate) min_trade_date: Option<NaiveDate>,
+    pub(crate) latest_trade_date: Option<NaiveDate>,
+    pub(crate) open_day_lag: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
 
-
 pub(crate) struct Phase7MarketLevelSyncAudit {
-    pub(crate) task_id:String,
-    pub(crate) task_type:String,
-    pub(crate) start_date:Option<NaiveDate>,
-    pub(crate) end_date:Option<NaiveDate>,
-    pub(crate) status:String,
-    pub(crate) total_count:i32,
-    pub(crate) success_count:i32,
-    pub(crate) failed_count:i32,
+    pub(crate) task_id: String,
+    pub(crate) task_type: String,
+    pub(crate) start_date: Option<NaiveDate>,
+    pub(crate) end_date: Option<NaiveDate>,
+    pub(crate) status: String,
+    pub(crate) total_count: i32,
+    pub(crate) success_count: i32,
+    pub(crate) failed_count: i32,
     error_message: Option<String>,
     completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Copy)]
 
-
 pub(crate) struct Phase7BlockTradeSourceAudit {
-    pub(crate) data_rows:i64,
-    pub(crate) symbols:i64,
-    pub(crate) covered_trade_days:i64,
-    pub(crate) open_days_in_range:i64,
-    pub(crate) min_trade_date:Option<NaiveDate>,
-    pub(crate) latest_trade_date:Option<NaiveDate>,
-    pub(crate) min_available_at:Option<NaiveDate>,
-    pub(crate) latest_available_at:Option<NaiveDate>,
+    pub(crate) data_rows: i64,
+    pub(crate) symbols: i64,
+    pub(crate) covered_trade_days: i64,
+    pub(crate) open_days_in_range: i64,
+    pub(crate) min_trade_date: Option<NaiveDate>,
+    pub(crate) latest_trade_date: Option<NaiveDate>,
+    pub(crate) min_available_at: Option<NaiveDate>,
+    pub(crate) latest_available_at: Option<NaiveDate>,
     pit_violation_rows: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
 
-
 pub(crate) struct Phase7IndustryMembershipSourceAudit {
-    pub(crate) data_rows:i64,
-    pub(crate) symbols:i64,
-    pub(crate) index_codes:i64,
-    pub(crate) current_active_stock_symbols:i64,
-    pub(crate) current_covered_stock_symbols:i64,
-    pub(crate) min_in_date:Option<NaiveDate>,
-    pub(crate) latest_in_date:Option<NaiveDate>,
-    pub(crate) min_out_date:Option<NaiveDate>,
+    pub(crate) data_rows: i64,
+    pub(crate) symbols: i64,
+    pub(crate) index_codes: i64,
+    pub(crate) current_active_stock_symbols: i64,
+    pub(crate) current_covered_stock_symbols: i64,
+    pub(crate) min_in_date: Option<NaiveDate>,
+    pub(crate) latest_in_date: Option<NaiveDate>,
+    pub(crate) min_out_date: Option<NaiveDate>,
     latest_out_date: Option<NaiveDate>,
     min_available_at: Option<NaiveDate>,
     latest_available_at: Option<NaiveDate>,
@@ -3322,8 +3126,6 @@ pub(crate) struct Phase7IndustryMembershipSourceAudit {
     invalid_interval_rows: i64,
     duplicate_key_rows: i64,
 }
-
-
 
 fn phase7_market_level_sync_dataset(source: &str) -> Option<&'static str> {
     match source {
@@ -3333,20 +3135,14 @@ fn phase7_market_level_sync_dataset(source: &str) -> Option<&'static str> {
     }
 }
 
-
-
 pub(crate) fn phase7_date_json(date: Option<NaiveDate>) -> Value {
     date.map(|date| json!(date.to_string()))
         .unwrap_or(Value::Null)
 }
 
-
-
 fn phase7_datetime_json(date: Option<chrono::DateTime<chrono::Utc>>) -> Value {
     json!(fmt_rfc3339_local(date))
 }
-
-
 
 pub(crate) fn phase7_ratio(numerator: i64, denominator: i64) -> Option<f64> {
     if denominator <= 0 {
@@ -3355,8 +3151,6 @@ pub(crate) fn phase7_ratio(numerator: i64, denominator: i64) -> Option<f64> {
         Some(numerator as f64 / denominator as f64)
     }
 }
-
-
 
 fn phase7_p315_sync_start_date(
     stats: &Phase7MarketLevelSourceAudit,
@@ -3367,8 +3161,6 @@ fn phase7_p315_sync_start_date(
         .map(|date| (date + Duration::days(1)).min(today))
         .unwrap_or(today)
 }
-
-
 
 fn phase7_new_alpha_candidate_sources() -> Vec<Value> {
     vec![
@@ -3431,8 +3223,6 @@ fn phase7_new_alpha_candidate_sources() -> Vec<Value> {
         }),
     ]
 }
-
-
 
 pub(crate) fn phase7_futures_price_chain_schema_contract() -> Value {
     json!({
@@ -3530,8 +3320,6 @@ pub(crate) fn phase7_futures_price_chain_schema_contract() -> Value {
     })
 }
 
-
-
 pub(crate) fn phase7_equity_pledge_schema_contract() -> Value {
     json!({
         "audit_version": "p3.20b-equity-pledge-pressure-schema-contract-v1",
@@ -3602,8 +3390,6 @@ pub(crate) fn phase7_equity_pledge_schema_contract() -> Value {
     })
 }
 
-
-
 pub(crate) fn phase7_margin_detail_schema_contract() -> Value {
     json!({
         "audit_version": "p3.22c-margin-detail-schema-contract-v1",
@@ -3659,8 +3445,6 @@ pub(crate) fn phase7_margin_detail_schema_contract() -> Value {
         "next_step": "run_full_history_bounded_sync_by_year_or_quarter_then_rerun_coverage_pit_quality_correlation_audit"
     })
 }
-
-
 
 pub(crate) fn phase7_shareholder_structure_schema_contract() -> Value {
     json!({
@@ -3755,8 +3539,6 @@ pub(crate) fn phase7_shareholder_structure_schema_contract() -> Value {
         }
     })
 }
-
-
 
 pub(crate) fn phase7_exchange_announcement_order_capacity_schema_contract() -> Value {
     json!({
@@ -3946,8 +3728,6 @@ pub(crate) fn phase7_exchange_announcement_order_capacity_schema_contract() -> V
     })
 }
 
-
-
 pub(crate) fn phase7_exchange_announcement_order_capacity_next_source_admission_plan() -> Value {
     let blocked_promotion_gate = json!({
         "schema_apply": "blocked",
@@ -4050,8 +3830,6 @@ pub(crate) fn phase7_exchange_announcement_order_capacity_next_source_admission_
         ]
     })
 }
-
-
 
 fn phase7_structured_order_capacity_price_chain_source_contract() -> Value {
     json!({
@@ -4239,8 +4017,6 @@ fn phase7_structured_order_capacity_price_chain_source_contract() -> Value {
     })
 }
 
-
-
 fn phase7_structured_order_capacity_price_chain_vendor_admission_plan() -> Value {
     let blocked_promotion_gate = json!({
         "permission_smoke": "blocked_until_candidate_vendor_and_endpoint_selected",
@@ -4370,8 +4146,6 @@ fn phase7_structured_order_capacity_price_chain_vendor_admission_plan() -> Value
     })
 }
 
-
-
 fn phase7_structured_order_capacity_price_chain_source_evidence_inventory() -> Value {
     let blocked_promotion_gate = json!({
         "schema_apply": "blocked",
@@ -4486,8 +4260,6 @@ fn phase7_structured_order_capacity_price_chain_source_evidence_inventory() -> V
     })
 }
 
-
-
 pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_access_smoke_contract() -> Value {
     let blocked_promotion_gate = json!({
         "schema_apply": "blocked",
@@ -4590,9 +4362,8 @@ pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_access_smoke_c
     })
 }
 
-
-
-pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_contract() -> Value {
+pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_contract(
+) -> Value {
     let blocked_promotion_gate = json!({
         "permission_smoke": "blocked_until_manifest_exists_and_manual_review_passes",
         "schema_apply": "blocked",
@@ -4704,8 +4475,6 @@ pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_operator_evide
         "next_step": "prepare_redacted_external_cninfo_evidence_manifest_then_manual_review_before_any_read_only_network_probe"
     })
 }
-
-
 
 pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_audit_from_manifest(
     manifest_path: Option<&str>,
@@ -4922,9 +4691,8 @@ pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_operator_evide
     response
 }
 
-
-
-pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan() -> Value {
+pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_permission_sample_smoke_plan(
+) -> Value {
     let promotion_gate = json!({
         "permission_smoke": "blocked_until_p3_25g_manifest_audit_passes",
         "schema_apply": "blocked",
@@ -5044,10 +4812,8 @@ pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_permission_sam
     })
 }
 
-
-
-pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template() -> Value
-{
+pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_operator_evidence_manifest_template(
+) -> Value {
     let artifacts: Vec<Value> = cninfo_operator_evidence_required_categories()
         .into_iter()
         .enumerate()
@@ -5135,8 +4901,6 @@ pub(crate) fn phase7_structured_order_capacity_price_chain_cninfo_operator_evide
     })
 }
 
-
-
 fn ddl_contains_all(ddl: &str, required: &[&str]) -> (Vec<String>, Vec<String>) {
     let mut present = Vec::new();
     let mut missing = Vec::new();
@@ -5150,11 +4914,10 @@ fn ddl_contains_all(ddl: &str, required: &[&str]) -> (Vec<String>, Vec<String>) 
     (present, missing)
 }
 
-
-
 pub(crate) fn phase7_exchange_announcement_order_capacity_manual_schema_review() -> Value {
     const DDL_PATH: &str = "sql/phase7_exchange_announcement_order_capacity_source.sql";
-    let ddl = include_str!("../../../../sql/phase7_exchange_announcement_order_capacity_source.sql");
+    let ddl =
+        include_str!("../../../../sql/phase7_exchange_announcement_order_capacity_source.sql");
 
     let required_fields = [
         "vendor",
@@ -5299,9 +5062,8 @@ pub(crate) fn phase7_exchange_announcement_order_capacity_manual_schema_review()
     })
 }
 
-
-
-pub(crate) fn phase7_exchange_announcement_order_capacity_coverage_quality_audit_contract() -> Value {
+pub(crate) fn phase7_exchange_announcement_order_capacity_coverage_quality_audit_contract() -> Value
+{
     json!({
         "audit_version": "p3.24h-exchange-announcement-order-capacity-coverage-quality-audit-contract-v1",
         "source_id": "exchange_announcement_order_capacity_text",
@@ -5427,8 +5189,6 @@ pub(crate) fn phase7_exchange_announcement_order_capacity_coverage_quality_audit
     })
 }
 
-
-
 pub(crate) fn build_exchange_announcement_order_capacity_sync_plan(
     req: ExchangeAnnouncementOrderCapacitySyncPlanReq,
 ) -> Result<Value, String> {
@@ -5478,8 +5238,6 @@ pub(crate) fn build_exchange_announcement_order_capacity_sync_plan(
         batches,
     ))
 }
-
-
 
 pub(crate) fn phase7_akshare_analyst_revision_schema_contract() -> Value {
     json!({
@@ -5606,8 +5364,6 @@ pub(crate) fn phase7_akshare_analyst_revision_schema_contract() -> Value {
     })
 }
 
-
-
 pub(crate) fn phase7_akshare_analyst_revision_available_at_contract() -> Value {
     json!({
         "audit_version": "p3.23a-akshare-analyst-revision-available-at-contract-v1",
@@ -5680,8 +5436,6 @@ pub(crate) fn phase7_akshare_analyst_revision_available_at_contract() -> Value {
         "next_step": "permission_history_date_smoke_for_stock_rank_forecast_cninfo_across_multiple_years"
     })
 }
-
-
 
 fn phase7_multi_vendor_analyst_revision_candidate() -> Value {
     json!({
@@ -5793,8 +5547,6 @@ fn phase7_multi_vendor_analyst_revision_candidate() -> Value {
     })
 }
 
-
-
 pub(crate) fn shareholder_structure_expected_schema() -> Vec<(&'static str, Vec<&'static str>)> {
     vec![
         (
@@ -5829,8 +5581,6 @@ pub(crate) fn shareholder_structure_expected_schema() -> Vec<(&'static str, Vec<
     ]
 }
 
-
-
 pub(crate) async fn table_exists(db: &sqlx::PgPool, table: &str) -> Result<bool, String> {
     let regclass_name = format!("public.{table}");
     sqlx::query_scalar("SELECT to_regclass($1)::text IS NOT NULL")
@@ -5839,8 +5589,6 @@ pub(crate) async fn table_exists(db: &sqlx::PgPool, table: &str) -> Result<bool,
         .await
         .map_err(|error| format!("Failed to inspect table {table}: {error}"))
 }
-
-
 
 pub(crate) fn decide_equity_pledge_readiness(
     schema_passed: bool,
@@ -5893,8 +5641,6 @@ pub(crate) fn decide_equity_pledge_readiness(
         "next_step": next_step,
     })
 }
-
-
 
 pub(crate) fn decide_margin_detail_readiness(
     schema_passed: bool,
@@ -5967,8 +5713,6 @@ pub(crate) fn decide_margin_detail_readiness(
     })
 }
 
-
-
 pub(crate) fn margin_detail_correlation_decision(max_abs_correlation: Option<f64>) -> &'static str {
     match max_abs_correlation {
         Some(value) if value >= 0.70 => "blocked_same_family_high_correlation",
@@ -5979,8 +5723,6 @@ pub(crate) fn margin_detail_correlation_decision(max_abs_correlation: Option<f64
         None => "blocked_until_correlation_sample_available",
     }
 }
-
-
 
 pub(crate) fn decide_margin_detail_coverage_audit(
     schema_passed: bool,
@@ -6082,8 +5824,6 @@ pub(crate) fn decide_margin_detail_coverage_audit(
     })
 }
 
-
-
 pub(crate) fn decide_shareholder_structure_coverage_audit(
     schema_passed: bool,
     raw_rows: i64,
@@ -6168,8 +5908,6 @@ pub(crate) fn decide_shareholder_structure_coverage_audit(
     })
 }
 
-
-
 pub(crate) fn decide_shareholder_structure_strict_low_fanout_gate(
     schema_passed: bool,
     admissible_rows: i64,
@@ -6239,8 +5977,6 @@ pub(crate) fn decide_shareholder_structure_strict_low_fanout_gate(
         "next_step": next_step,
     })
 }
-
-
 
 pub(crate) fn shareholder_structure_sync_plan_response(
     start: NaiveDate,
@@ -6320,8 +6056,6 @@ pub(crate) fn shareholder_structure_sync_plan_response(
     })
 }
 
-
-
 pub(crate) fn decide_equity_pledge_coverage_audit(
     schema_passed: bool,
     raw_rows: i64,
@@ -6390,8 +6124,6 @@ pub(crate) fn decide_equity_pledge_coverage_audit(
     })
 }
 
-
-
 pub(crate) fn decide_futures_price_chain_readiness(
     schema_passed: bool,
     raw_rows: i64,
@@ -6442,7 +6174,6 @@ pub(crate) fn decide_futures_price_chain_readiness(
 
 #[cfg(test)]
 
-
 fn futures_price_chain_product_symbol_from_daily_ts_code(ts_code: &str) -> Option<String> {
     let value = ts_code.trim();
     let product = value
@@ -6462,8 +6193,6 @@ fn futures_price_chain_product_symbol_from_daily_ts_code(ts_code: &str) -> Optio
     }
     futures_price_chain_normalize_raw_product_symbol(&product)
 }
-
-
 
 pub(crate) fn decide_futures_price_chain_mapping_audit(
     schema_passed: bool,
@@ -6556,8 +6285,6 @@ pub(crate) fn decide_futures_price_chain_mapping_audit(
     })
 }
 
-
-
 pub(crate) fn decide_futures_price_chain_coverage_audit(
     schema_passed: bool,
     raw_rows: i64,
@@ -6631,8 +6358,6 @@ pub(crate) fn decide_futures_price_chain_coverage_audit(
     })
 }
 
-
-
 pub(crate) fn futures_price_chain_coverage_promotion_gate(decision: &Value) -> Value {
     let p310_status = decision
         .get("p310_status")
@@ -6651,8 +6376,6 @@ pub(crate) fn futures_price_chain_coverage_promotion_gate(decision: &Value) -> V
         "v19_train_selection": "blocked"
     })
 }
-
-
 
 pub(crate) fn futures_price_chain_raw_product_summary_sql() -> &'static str {
     r#"
@@ -6720,8 +6443,6 @@ pub(crate) fn futures_price_chain_raw_product_summary_sql() -> &'static str {
     ORDER BY product_symbol
     "#
 }
-
-
 
 pub(crate) fn futures_price_chain_coverage_breakdown_sql() -> &'static str {
     r#"
@@ -6797,8 +6518,6 @@ pub(crate) fn futures_price_chain_coverage_breakdown_sql() -> &'static str {
     "#
 }
 
-
-
 pub(crate) fn futures_price_chain_sync_attempt_breakdown_sql() -> &'static str {
     r#"
     WITH futures_calendar AS (
@@ -6853,8 +6572,6 @@ pub(crate) fn futures_price_chain_sync_attempt_breakdown_sql() -> &'static str {
     ORDER BY source, status
     "#
 }
-
-
 
 pub(crate) fn futures_price_chain_raw_endpoint_breakdown_sql() -> &'static str {
     r#"
@@ -6917,8 +6634,6 @@ pub(crate) fn futures_price_chain_raw_endpoint_breakdown_sql() -> &'static str {
     "#
 }
 
-
-
 pub(crate) fn futures_price_chain_mapping_summary_sql() -> &'static str {
     r#"
     SELECT
@@ -6940,8 +6655,6 @@ pub(crate) fn futures_price_chain_mapping_summary_sql() -> &'static str {
     "#
 }
 
-
-
 pub(crate) fn futures_price_chain_exclusion_summary_sql() -> &'static str {
     r#"
     SELECT
@@ -6961,8 +6674,6 @@ pub(crate) fn futures_price_chain_exclusion_summary_sql() -> &'static str {
     "#
 }
 
-
-
 pub(crate) fn futures_price_chain_industry_targets_sql() -> &'static str {
     r#"
     SELECT
@@ -6981,8 +6692,6 @@ pub(crate) fn futures_price_chain_industry_targets_sql() -> &'static str {
     ORDER BY index_code
     "#
 }
-
-
 
 pub(crate) fn validate_futures_price_chain_mapping_candidate(
     candidate: &FuturesPriceChainMappingCandidate,
@@ -7075,8 +6784,6 @@ pub(crate) fn validate_futures_price_chain_mapping_candidate(
     }
 }
 
-
-
 pub(crate) fn decide_futures_price_chain_mapping_candidate_validation(
     raw_product_count: i64,
     covered_product_count: i64,
@@ -7124,8 +6831,6 @@ pub(crate) fn decide_futures_price_chain_mapping_candidate_validation(
         "next_step": next_step,
     })
 }
-
-
 
 fn phase7_exchange_announcement_order_capacity_candidate() -> Value {
     json!({
@@ -7187,8 +6892,6 @@ fn phase7_exchange_announcement_order_capacity_candidate() -> Value {
         "next_step": "implement_read_only_permission_history_category_smoke_for_akshare_cninfo_disclosure_then_cninfo_detail_text_fetch_audit"
     })
 }
-
-
 
 fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option<&Value>) -> Value {
     let mut admission = json!({
@@ -7671,8 +7374,6 @@ fn phase7_p319_candidate_admission_sources(futures_price_chain_readiness: Option
     admission
 }
 
-
-
 fn apply_p320_equity_pledge_readiness(admission: &mut Value, readiness: &Value) {
     let Some(candidates) = admission
         .get_mut("candidates")
@@ -7768,8 +7469,6 @@ fn apply_p320_equity_pledge_readiness(admission: &mut Value, readiness: &Value) 
     }
 }
 
-
-
 fn phase7_new_alpha_candidate_sources_with_market_status(
     market_stats: &BTreeMap<String, Phase7MarketLevelSourceAudit>,
     market_sync_tasks: &BTreeMap<String, Phase7MarketLevelSyncAudit>,
@@ -7858,8 +7557,6 @@ fn phase7_new_alpha_candidate_sources_with_market_status(
     sources
 }
 
-
-
 fn phase7_new_alpha_candidate_sources_with_block_trade_status(
     mut sources: Vec<Value>,
     stats: &Phase7BlockTradeSourceAudit,
@@ -7909,8 +7606,6 @@ fn phase7_new_alpha_candidate_sources_with_block_trade_status(
     sources
 }
 
-
-
 fn phase7_new_alpha_candidate_sources_with_equity_pledge_status(
     mut sources: Vec<Value>,
     readiness: Option<&Value>,
@@ -7954,8 +7649,6 @@ fn phase7_new_alpha_candidate_sources_with_equity_pledge_status(
     }
     sources
 }
-
-
 
 fn phase7_new_alpha_candidate_sources_with_industry_membership_status(
     mut sources: Vec<Value>,
@@ -8012,8 +7705,6 @@ fn phase7_new_alpha_candidate_sources_with_industry_membership_status(
     sources
 }
 
-
-
 fn phase7_industry_membership_snapshot_readiness(
     expected_symbol_days: i64,
     covered_symbol_days: i64,
@@ -8043,13 +7734,9 @@ fn phase7_industry_membership_snapshot_readiness(
     "snapshot_ready_for_p310_diagnostics"
 }
 
-
-
 fn phase7_industry_membership_audit_limit(limit: Option<i64>) -> i64 {
     limit.unwrap_or(20).clamp(1, 100)
 }
-
-
 
 fn phase7_industry_membership_market_scope_eligible(
     coverage_ratio: Option<f64>,
@@ -8057,8 +7744,6 @@ fn phase7_industry_membership_market_scope_eligible(
 ) -> bool {
     multi_membership_symbol_days == 0 && coverage_ratio.unwrap_or(0.0) >= 0.995
 }
-
-
 
 fn phase7_industry_membership_snapshot_summary_sql() -> &'static str {
     r#"
@@ -8149,8 +7834,6 @@ fn phase7_industry_membership_snapshot_summary_sql() -> &'static str {
     "#
 }
 
-
-
 fn phase7_industry_membership_year_breakdown_sql() -> &'static str {
     r#"
     WITH params AS (
@@ -8212,8 +7895,6 @@ fn phase7_industry_membership_year_breakdown_sql() -> &'static str {
     ORDER BY period_start
     "#
 }
-
-
 
 fn phase7_industry_membership_market_breakdown_sql() -> &'static str {
     r#"
@@ -8280,8 +7961,6 @@ fn phase7_industry_membership_market_breakdown_sql() -> &'static str {
     "#
 }
 
-
-
 fn phase7_optional_source_json(
     source: &str,
     table: &str,
@@ -8332,8 +8011,6 @@ fn phase7_optional_source_json(
     value
 }
 
-
-
 pub(crate) async fn register_sync_task(
     state: &AppState,
     task_id: &str,
@@ -8373,8 +8050,6 @@ pub(crate) async fn register_sync_task(
     .map_err(|e| e.to_string())
 }
 
-
-
 pub(crate) fn require_range(req: &DataSyncTaskReq) -> Result<(&str, &str), String> {
     let start = req
         .start_date
@@ -8387,13 +8062,9 @@ pub(crate) fn require_range(req: &DataSyncTaskReq) -> Result<(&str, &str), Strin
     Ok((start, end))
 }
 
-
-
 pub(crate) fn optional_source_all_symbols_allowed(mode: Option<&str>) -> bool {
     mode == Some("full_market")
 }
-
-
 
 pub async fn structured_order_capacity_price_chain_source_contract() -> impl IntoResponse {
     Json(json!({
@@ -8404,7 +8075,6 @@ pub async fn structured_order_capacity_price_chain_source_contract() -> impl Int
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/vendor-admission-plan
 
-
 pub async fn structured_order_capacity_price_chain_vendor_admission_plan() -> impl IntoResponse {
     Json(json!({
         "code": 0,
@@ -8413,7 +8083,6 @@ pub async fn structured_order_capacity_price_chain_vendor_admission_plan() -> im
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/source-evidence-inventory
-
 
 pub async fn structured_order_capacity_price_chain_source_evidence_inventory() -> impl IntoResponse
 {
@@ -8424,7 +8093,6 @@ pub async fn structured_order_capacity_price_chain_source_evidence_inventory() -
 }
 
 /// GET /api/v1/quant/data/structured-order-capacity-price-chain/cninfo-access-smoke-contract
-
 
 pub(crate) fn akshare_analyst_revision_sync_plan_response(
     start: NaiveDate,
@@ -8498,8 +8166,6 @@ pub(crate) fn akshare_analyst_revision_sync_plan_response(
         ]
     })
 }
-
-
 
 pub(crate) async fn build_phase7_optional_source_coverage_sync(
     state: Arc<AppState>,
@@ -8659,8 +8325,6 @@ pub(crate) async fn build_phase7_optional_source_coverage_sync(
     }))
 }
 
-
-
 pub(crate) async fn build_phase7_optional_source_coverage_batches(
     state: Arc<AppState>,
     req: Phase7OptionalSourceCoverageBatchReq,
@@ -8751,8 +8415,6 @@ pub(crate) async fn build_phase7_optional_source_coverage_batches(
         ],
     }))
 }
-
-
 
 pub(crate) async fn build_phase7_share_float_coverage_batches(
     state: Arc<AppState>,
@@ -8916,8 +8578,6 @@ pub(crate) async fn build_phase7_share_float_coverage_batches(
     }))
 }
 
-
-
 pub(crate) async fn build_phase7_share_float_readiness_audit(
     state: &AppState,
     req: Phase7ShareFloatReadinessAuditReq,
@@ -9051,8 +8711,6 @@ pub(crate) async fn build_phase7_share_float_readiness_audit(
         ]
     }))
 }
-
-
 
 pub(crate) async fn build_phase7_industry_membership_coverage_audit(
     state: &AppState,
@@ -9585,8 +9243,6 @@ pub(crate) async fn build_phase7_industry_membership_coverage_audit(
     }))
 }
 
-
-
 async fn build_phase7_financial_coverage_batches(
     state: Arc<AppState>,
     start_date: &str,
@@ -9707,8 +9363,6 @@ async fn build_phase7_financial_coverage_batches(
     }))
 }
 
-
-
 fn build_phase7_bounded_sync_req(
     dataset: &str,
     symbols: Vec<String>,
@@ -9736,8 +9390,6 @@ fn build_phase7_bounded_sync_req(
     }
 }
 
-
-
 async fn run_phase7_autopilot_bounded_sync(
     state: Arc<AppState>,
     dataset: &str,
@@ -9751,8 +9403,6 @@ async fn run_phase7_autopilot_bounded_sync(
         build_phase7_bounded_sync_req(dataset, symbols, start_date, end_date, &task_id, reason);
     execute_sync_task(state, task_id, sync_req).await
 }
-
-
 
 async fn run_phase7_autopilot_optional_round(
     state: Arc<AppState>,
@@ -9806,8 +9456,6 @@ async fn run_phase7_autopilot_optional_round(
     Ok(())
 }
 
-
-
 async fn run_phase7_autopilot_financial_round(
     state: Arc<AppState>,
     start_date: &str,
@@ -9852,8 +9500,6 @@ async fn run_phase7_autopilot_financial_round(
     }
     Ok(())
 }
-
-
 
 async fn run_phase7_coverage_autopilot_background(
     state: Arc<AppState>,
@@ -9972,8 +9618,6 @@ async fn run_phase7_coverage_autopilot_background(
     }
 }
 
-
-
 pub(crate) async fn build_phase7_coverage_expansion_runner(
     state: Arc<AppState>,
     req: Phase7CoverageExpansionRunnerReq,
@@ -10087,8 +9731,7 @@ pub(crate) async fn build_phase7_coverage_expansion_runner(
         let requested_sources_for_task = requested_sources.clone();
         let data_version_prefix_for_task = data_version_prefix.clone();
         // 合成 task_id 用于 registry 取消(phase7 autopilot 不注册 data_sync_task)
-        let autopilot_task_id =
-            format!("phase7-autopilot-{}", data_version_prefix);
+        let autopilot_task_id = format!("phase7-autopilot-{}", data_version_prefix);
         crate::sync_task_registry::spawn_sync_task(
             state.sync_tasks.clone(),
             autopilot_task_id.clone(),
@@ -10148,8 +9791,6 @@ pub(crate) async fn build_phase7_coverage_expansion_runner(
         ],
     }))
 }
-
-
 
 pub(crate) async fn resolve_phase7_permission_smoke_symbols(
     state: &AppState,
@@ -10225,8 +9866,6 @@ pub(crate) async fn resolve_phase7_permission_smoke_symbols(
     }
 }
 
-
-
 async fn resolve_phase7_optional_source_sync_symbols(
     state: &AppState,
     source: &str,
@@ -10291,8 +9930,6 @@ async fn resolve_phase7_optional_source_sync_symbols(
 
     Ok(Vec::new())
 }
-
-
 
 fn phase7_optional_source_uncovered_symbols_sql(source: &str) -> Option<&'static str> {
     match source {
@@ -10419,8 +10056,6 @@ fn phase7_optional_source_uncovered_symbols_sql(source: &str) -> Option<&'static
     }
 }
 
-
-
 async fn resolve_phase7_financial_sync_symbols(
     state: &AppState,
     start: NaiveDate,
@@ -10441,8 +10076,6 @@ async fn resolve_phase7_financial_sync_symbols(
     Ok(symbols)
 }
 
-
-
 fn phase7_financial_uncovered_symbols_sql() -> &'static str {
     r#"
     SELECT stock.symbol
@@ -10460,8 +10093,6 @@ fn phase7_financial_uncovered_symbols_sql() -> &'static str {
     OFFSET $3 LIMIT $4
     "#
 }
-
-
 
 pub(crate) async fn build_phase7_feasibility_audit(state: &AppState) -> Result<Value, String> {
     let listed_stock_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM market_stock")
@@ -11066,7 +10697,6 @@ pub(crate) async fn build_phase7_feasibility_audit(state: &AppState) -> Result<V
 /// 大批量后台同步日线行情，立即返回 task_id。
 /// 通过 GET /api/v1/quant/data/sync/tasks/:task_id 查询进度。
 
-
 pub(crate) fn sync_task_cancel_transition(status: &str) -> Option<&'static str> {
     match status {
         "pending" => Some("cancelled"),
@@ -11081,13 +10711,10 @@ pub(crate) fn sync_task_cancel_transition(status: &str) -> Option<&'static str> 
 /// 请求取消数据同步类后台任务。running 任务进入 cancel_requested，
 /// 由 worker 在批次边界安全停止；pending 任务直接进入 cancelled。
 
-
 #[derive(Debug, Deserialize)]
 pub struct SyncFinancialReq {
     pub symbols: Vec<String>,
 }
-
-
 
 pub async fn sync_financial(
     State(state): State<Arc<AppState>>,
@@ -11102,13 +10729,9 @@ pub async fn sync_financial(
     }
 }
 
-
-
 pub(crate) fn proven_limit_list_earliest_date() -> NaiveDate {
     NaiveDate::from_ymd_opt(2019, 11, 28).expect("valid limit_list_d earliest date")
 }
-
-
 
 pub(crate) fn parse_health_date(value: &str) -> Result<NaiveDate, String> {
     let trimmed = value.trim();
@@ -11117,13 +10740,9 @@ pub(crate) fn parse_health_date(value: &str) -> Result<NaiveDate, String> {
         .map_err(|_| format!("日期格式无效: {}，需要 YYYY-MM-DD 或 YYYYMMDD", value))
 }
 
-
-
 pub(crate) fn yyyymmdd(date: NaiveDate) -> String {
     date.format("%Y%m%d").to_string()
 }
-
-
 
 fn default_mvo_etfs() -> Vec<String> {
     DEFAULT_MVO_ETFS
@@ -11131,8 +10750,6 @@ fn default_mvo_etfs() -> Vec<String> {
         .map(|symbol| (*symbol).to_string())
         .collect()
 }
-
-
 
 pub(crate) fn parse_etf_symbols(value: Option<Value>) -> Vec<String> {
     let parsed = value
@@ -11149,8 +10766,6 @@ pub(crate) fn parse_etf_symbols(value: Option<Value>) -> Vec<String> {
     }
 }
 
-
-
 pub(crate) fn coverage_level(expected: i64, actual: i64) -> &'static str {
     if expected <= 0 || actual >= expected {
         "green"
@@ -11158,8 +10773,6 @@ pub(crate) fn coverage_level(expected: i64, actual: i64) -> &'static str {
         "red"
     }
 }
-
-
 
 pub(crate) fn event_sync_source_quality(
     task_type: &str,
@@ -11206,8 +10819,6 @@ pub(crate) fn event_sync_source_quality(
     }
 }
 
-
-
 pub(crate) fn event_sync_source_level(
     task_type: &str,
     source: Option<&str>,
@@ -11219,8 +10830,6 @@ pub(crate) fn event_sync_source_level(
         EventSyncSourceQuality::Missing => "red",
     }
 }
-
-
 
 pub(crate) fn event_sync_source_label(
     task_type: &str,
@@ -11236,9 +10845,11 @@ pub(crate) fn event_sync_source_label(
     }
 }
 
-
-
-pub(crate) fn lag_level(lag_days: i64, yellow_after_days: i64, red_after_days: i64) -> &'static str {
+pub(crate) fn lag_level(
+    lag_days: i64,
+    yellow_after_days: i64,
+    red_after_days: i64,
+) -> &'static str {
     if lag_days > red_after_days {
         "red"
     } else if lag_days > yellow_after_days {
@@ -11247,8 +10858,6 @@ pub(crate) fn lag_level(lag_days: i64, yellow_after_days: i64, red_after_days: i
         "green"
     }
 }
-
-
 
 pub(crate) fn check_item(
     account: &str,
@@ -11281,16 +10890,12 @@ pub(crate) fn check_item(
     value
 }
 
-
-
 fn data_readiness_required(check: &Value) -> bool {
     check
         .get("required")
         .and_then(|value| value.as_bool())
         .unwrap_or(true)
 }
-
-
 
 pub(crate) fn data_readiness_blocking_checks<'a>(
     checks: &'a [Value],
@@ -11310,8 +10915,6 @@ pub(crate) fn data_readiness_blocking_checks<'a>(
         })
         .collect()
 }
-
-
 
 pub(crate) fn data_readiness_failure_message(
     operation: &str,
@@ -11352,6 +10955,3 @@ pub(crate) fn data_readiness_failure_message(
         }
     )
 }
-
-
-

@@ -188,9 +188,8 @@ fn oriented_standard_score_ascending_flips_cross_sectional_ranking() {
 #[test]
 fn prediction_percentiles_rank_by_ascending_score() {
     // 业务含义:预测分数越高百分位越高(0=最低,1=最高),供 min_percentile 过滤。
-    let percentiles = prediction_percentiles_by_symbol(
-        [("ccc", 30.0), ("aaa", 10.0), ("bbb", 20.0)].into_iter(),
-    );
+    let percentiles =
+        prediction_percentiles_by_symbol([("ccc", 30.0), ("aaa", 10.0), ("bbb", 20.0)].into_iter());
     let (_, aaa_percentile) = *percentiles.get("aaa").expect("aaa present");
     let (_, bbb_percentile) = *percentiles.get("bbb").expect("bbb present");
     let (_, ccc_percentile) = *percentiles.get("ccc").expect("ccc present");
@@ -300,10 +299,7 @@ fn sort_prediction_scores_missing_rank_sorts_after_explicit_ranks() {
     // 边界:rank 缺失视为 i32::MAX,同分时排在所有显式 rank 之后。
     let mut scores = HashMap::from([(
         d(2026, 1, 5),
-        prediction_rows(&[
-            ("NO_RANK", 2.0, None),
-            ("RANKED", 2.0, Some(5)),
-        ]),
+        prediction_rows(&[("NO_RANK", 2.0, None), ("RANKED", 2.0, Some(5))]),
     )]);
     sort_prediction_scores(&mut scores, ScoreDirection::Descending);
     let day_rows = scores.get(&d(2026, 1, 5)).unwrap();
@@ -441,7 +437,8 @@ fn blend_factor_prediction_scores_applies_min_percentile_filter() {
     // 幸存者 factor [2,3] -> mean 2.5 std 0.5; prediction [20,30] -> mean 25 std 5;
     // 等权混合: BBB = 0.5*(-1)+0.5*(-1) = -1; CCC = +1。
     let day = d(2026, 1, 5);
-    let mut factor_scores = HashMap::from([(day, rows(&[("AAA", 1.0), ("BBB", 2.0), ("CCC", 3.0)]))]);
+    let mut factor_scores =
+        HashMap::from([(day, rows(&[("AAA", 1.0), ("BBB", 2.0), ("CCC", 3.0)]))]);
     let prediction_scores = HashMap::from([(
         day,
         prediction_rows(&[
@@ -470,7 +467,8 @@ fn blend_factor_prediction_scores_applies_min_percentile_filter() {
 fn blend_factor_prediction_scores_applies_min_raw_score_filter() {
     // 业务含义:prediction_min_score 按原始预测分(非 z 分)过滤,AAA(10) 低于 15 被剔除。
     let day = d(2026, 1, 5);
-    let mut factor_scores = HashMap::from([(day, rows(&[("AAA", 1.0), ("BBB", 2.0), ("CCC", 3.0)]))]);
+    let mut factor_scores =
+        HashMap::from([(day, rows(&[("AAA", 1.0), ("BBB", 2.0), ("CCC", 3.0)]))]);
     let prediction_scores = HashMap::from([(
         day,
         prediction_rows(&[
@@ -514,7 +512,8 @@ fn blend_factor_prediction_scores_drops_date_when_no_pairs_survive_filters() {
 fn blend_factor_prediction_scores_skips_non_finite_scores() {
     // NaN 因子分或 NaN/Inf 预测分的票不参与混合(预测侧非有限在百分位阶段已被剔除)。
     let day = d(2026, 1, 5);
-    let mut factor_scores = HashMap::from([(day, rows(&[("AAA", f64::NAN), ("BBB", 1.0), ("CCC", 3.0)]))]);
+    let mut factor_scores =
+        HashMap::from([(day, rows(&[("AAA", f64::NAN), ("BBB", 1.0), ("CCC", 3.0)]))]);
     let prediction_scores = HashMap::from([(
         day,
         prediction_rows(&[
@@ -546,14 +545,9 @@ fn event_gate_boost_positive_adds_weighted_z_for_above_min_event_scores() {
     // 加分量 = boost_weight * event 截面 z 分;event 缺席/不达标的票分数不变。
     // event [10,-5] -> mean 2.5, std 7.5 -> z(10)=+1, z(-5)=-1。
     let day = d(2026, 1, 5);
-    let mut factor_scores = HashMap::from([(
-        day,
-        rows(&[("AAA", 1.0), ("BBB", 1.0), ("CCC", 1.0)]),
-    )]);
-    let event_scores = HashMap::from([(
-        day,
-        rows(&[("AAA", 10.0), ("BBB", -5.0)]),
-    )]);
+    let mut factor_scores =
+        HashMap::from([(day, rows(&[("AAA", 1.0), ("BBB", 1.0), ("CCC", 1.0)]))]);
+    let event_scores = HashMap::from([(day, rows(&[("AAA", 10.0), ("BBB", -5.0)]))]);
     apply_event_gate_scores(
         &mut factor_scores,
         &event_scores,
@@ -577,10 +571,8 @@ fn event_gate_boost_positive_stats_exclude_out_of_pool_symbols() {
     //   全市场口径 [10,-5,0.5,0.5,0.5] -> mean 1.3, std≈4.06 -> z≈2.14 -> AAA≈2.07(稀释性放大)。
     // 断言 1.5 即证明池外票未参与统计——event 覆盖面远大于因子池时加成不被扭曲。
     let day = d(2026, 1, 5);
-    let mut factor_scores = HashMap::from([(
-        day,
-        rows(&[("AAA", 1.0), ("BBB", 1.0), ("CCC", 1.0)]),
-    )]);
+    let mut factor_scores =
+        HashMap::from([(day, rows(&[("AAA", 1.0), ("BBB", 1.0), ("CCC", 1.0)]))]);
     let event_scores = HashMap::from([(
         day,
         rows(&[
@@ -630,7 +622,12 @@ fn event_gate_exclude_negative_keeps_symbols_at_or_above_min() {
     let day = d(2026, 1, 5);
     let mut factor_scores = HashMap::from([(
         day,
-        rows(&[("AT_MIN", 1.0), ("BELOW", 2.0), ("NO_EVENT", 3.0), ("ABOVE", 4.0)]),
+        rows(&[
+            ("AT_MIN", 1.0),
+            ("BELOW", 2.0),
+            ("NO_EVENT", 3.0),
+            ("ABOVE", 4.0),
+        ]),
     )]);
     let event_scores = HashMap::from([(
         day,
@@ -674,10 +671,7 @@ fn event_gate_require_positive_keeps_only_strictly_above_min() {
         day,
         rows(&[("AT_MIN", 1.0), ("NO_EVENT", 2.0), ("ABOVE", 3.0)]),
     )]);
-    let event_scores = HashMap::from([(
-        day,
-        rows(&[("AT_MIN", 2.0), ("ABOVE", 3.0)]),
-    )]);
+    let event_scores = HashMap::from([(day, rows(&[("AT_MIN", 2.0), ("ABOVE", 3.0)]))]);
     apply_event_gate_scores(
         &mut factor_scores,
         &event_scores,
@@ -706,14 +700,8 @@ fn event_gate_require_positive_drops_date_when_no_rows_survive() {
 fn event_gate_non_finite_min_score_defaults_to_zero() {
     // 边界:min_score = NaN(非有限)时按 0 处理,而不是整体失效。
     let day = d(2026, 1, 5);
-    let mut factor_scores = HashMap::from([(
-        day,
-        rows(&[("NEG", 1.0), ("POS", 2.0)]),
-    )]);
-    let event_scores = HashMap::from([(
-        day,
-        rows(&[("NEG", -1.0), ("POS", 1.0)]),
-    )]);
+    let mut factor_scores = HashMap::from([(day, rows(&[("NEG", 1.0), ("POS", 2.0)]))]);
+    let event_scores = HashMap::from([(day, rows(&[("NEG", -1.0), ("POS", 1.0)]))]);
     apply_event_gate_scores(
         &mut factor_scores,
         &event_scores,
@@ -763,9 +751,7 @@ fn event_gate_when_skips_inactive_dates_entirely() {
     let active_rows = factor_scores.get(&active_day).expect("active day kept");
     assert_eq!(active_rows.len(), 1);
     assert_eq!(active_rows[0].0, "GOOD");
-    let inactive_rows = factor_scores
-        .get(&inactive_day)
-        .expect("inactive day kept");
+    let inactive_rows = factor_scores.get(&inactive_day).expect("inactive day kept");
     assert_eq!(inactive_rows.len(), 2);
 }
 
@@ -785,18 +771,13 @@ fn event_gate_for_regime_applies_only_in_active_regimes() {
     ]);
     let mut gate = event_gate(EventGateMode::RequirePositive, 0.0, 0.0);
     gate.active_regimes = vec![MarketRegime::Bear];
-    apply_event_gate_scores_for_regime(
-        &mut factor_scores,
-        &event_scores,
-        &gate,
-        |date| {
-            if date == bear_day {
-                MarketRegime::Bear
-            } else {
-                MarketRegime::Bull
-            }
-        },
-    );
+    apply_event_gate_scores_for_regime(&mut factor_scores, &event_scores, &gate, |date| {
+        if date == bear_day {
+            MarketRegime::Bear
+        } else {
+            MarketRegime::Bull
+        }
+    });
     let bear_rows = factor_scores.get(&bear_day).expect("bear day kept");
     assert_eq!(bear_rows.len(), 1);
     assert_eq!(bear_rows[0].0, "GOOD");
@@ -1043,7 +1024,10 @@ fn score_sources_fixture(
 ) -> HashMap<FactorScoreSourceKey, FactorScoresByDate> {
     let overlay_config = score_source_config_for_overlay(base_config, overlay);
     let mut sources = HashMap::new();
-    sources.insert(FactorScoreSourceKey::from_config(base_config), base_day_rows);
+    sources.insert(
+        FactorScoreSourceKey::from_config(base_config),
+        base_day_rows,
+    );
     sources.insert(
         FactorScoreSourceKey::from_config(&overlay_config),
         overlay_day_rows,
@@ -1134,8 +1118,7 @@ fn score_rows_for_active_config_falls_back_to_base_when_overlay_day_missing() {
         &overlay,
         HashMap::new(),
     );
-    let result =
-        score_rows_for_active_config(&sources, day, &config).expect("base rows fallback");
+    let result = score_rows_for_active_config(&sources, day, &config).expect("base rows fallback");
     assert_eq!(result, expected);
 }
 
@@ -1156,8 +1139,7 @@ fn score_rows_for_active_config_falls_back_to_base_when_overlay_day_empty() {
         &overlay,
         HashMap::from([(day, Vec::new())]),
     );
-    let result =
-        score_rows_for_active_config(&sources, day, &config).expect("base rows fallback");
+    let result = score_rows_for_active_config(&sources, day, &config).expect("base rows fallback");
     assert_eq!(result, expected);
 }
 
@@ -1179,8 +1161,7 @@ fn score_rows_for_active_config_blends_overlay_z_scores() {
         &overlay,
         HashMap::from([(day, rows(&[("AAA", 10.0), ("BBB", 20.0)]))]),
     );
-    let result =
-        score_rows_for_active_config(&sources, day, &config).expect("blended rows");
+    let result = score_rows_for_active_config(&sources, day, &config).expect("blended rows");
     let by_symbol: HashMap<&str, f64> = result
         .iter()
         .map(|(symbol, score)| (symbol.as_str(), *score))
@@ -1255,7 +1236,11 @@ fn blend_factor_overlay_scores_treats_non_finite_scores_as_neutral_or_dropped() 
     // OK: base z +1, overlay z +1 -> 1。
     let blended = blend_factor_overlay_scores(
         rows(&[("NAN_BASE", f64::NAN), ("INF_OVERLAY", 1.0), ("OK", 3.0)]),
-        rows(&[("NAN_BASE", 10.0), ("INF_OVERLAY", f64::INFINITY), ("OK", 20.0)]),
+        rows(&[
+            ("NAN_BASE", 10.0),
+            ("INF_OVERLAY", f64::INFINITY),
+            ("OK", 20.0),
+        ]),
         ScoreDirection::Descending,
         ScoreDirection::Descending,
         0.5,

@@ -24,7 +24,7 @@ pub(crate) enum ComboScoreReusePlan {
 }
 
 impl ComboScoreReusePlan {
-pub(crate) fn source_span_days(self) -> i64 {
+    pub(crate) fn source_span_days(self) -> i64 {
         match self {
             Self::RankedPool {
                 source_span_days, ..

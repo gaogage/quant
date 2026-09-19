@@ -88,10 +88,13 @@ pub struct ComboMaterializeConfig {
 
 /// 从 strategy_config 读取:含基本面因子的 combo(如 v24 fund_v2)需 include_fundamentals=true
 /// + factor_whitelist 去冗余白名单,否则用默认黑名单物化会丢失基本面因子。
-pub async fn load_active_combo_materialize_configs(
-    db: &PgPool,
-) -> Vec<ComboMaterializeConfig> {
-    let rows: Vec<(Option<String>, Option<bool>, Option<serde_json::Value>, Option<i16>)> = sqlx::query_as(
+pub async fn load_active_combo_materialize_configs(db: &PgPool) -> Vec<ComboMaterializeConfig> {
+    let rows: Vec<(
+        Option<String>,
+        Option<bool>,
+        Option<serde_json::Value>,
+        Option<i16>,
+    )> = sqlx::query_as(
         "SELECT combo_name, include_fundamentals, factor_whitelist, combo_horizon
          FROM strategy_config
          WHERE status='active' AND combo_name IS NOT NULL AND btrim(combo_name) <> ''",
@@ -111,17 +114,18 @@ pub async fn load_active_combo_materialize_configs(
             // factor_whitelist 取首个非空(同 combo 白名单应一致)。
             let inc = inc_fund.unwrap_or(false);
             let wl: Option<Vec<String>> = whitelist.and_then(|v| {
-                v.as_array()
-                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                v.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
             });
-            let entry = map
-                .entry(c)
-                .or_insert_with(|| ComboMaterializeConfig {
-                    combo_name: String::new(),
-                    include_fundamentals: false,
-                    factor_whitelist: None,
-                    combo_horizon: None,
-                });
+            let entry = map.entry(c).or_insert_with(|| ComboMaterializeConfig {
+                combo_name: String::new(),
+                include_fundamentals: false,
+                factor_whitelist: None,
+                combo_horizon: None,
+            });
             if inc {
                 entry.include_fundamentals = true;
             }
@@ -135,7 +139,6 @@ pub async fn load_active_combo_materialize_configs(
     }
     map.into_values().collect()
 }
-
 
 pub async fn load_strategy_config(db: &PgPool, strategy_id: &str) -> StrategyConfig {
     let row: Option<(serde_json::Value,)> = sqlx::query_as::<_, (serde_json::Value,)>(

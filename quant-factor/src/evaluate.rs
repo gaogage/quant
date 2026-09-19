@@ -258,7 +258,11 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let y = vec![6.0, 5.0, 5.0, 3.0, 2.0, 2.0];
         let corr = pearson_corr(&x, &y).unwrap();
-        assert!(corr < -0.9 && corr > -1.0, "强负相关应在 (-1, -0.9), 实际 {}", corr);
+        assert!(
+            corr < -0.9 && corr > -1.0,
+            "强负相关应在 (-1, -0.9), 实际 {}",
+            corr
+        );
     }
 
     #[test]

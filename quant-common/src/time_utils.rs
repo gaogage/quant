@@ -112,8 +112,7 @@ mod tests {
 
     #[test]
     fn millis_keeps_three_digits() {
-        let dt = dt_utc(2026, 7, 21, 6, 42, 57)
-            + chrono::Duration::milliseconds(559);
+        let dt = dt_utc(2026, 7, 21, 6, 42, 57) + chrono::Duration::milliseconds(559);
         let s = fmt_datetime_millis(Some(dt)).unwrap();
         assert!(s.ends_with(".559"), "应保留三位毫秒，实际: {s}");
     }
@@ -122,10 +121,7 @@ mod tests {
     fn local_offset_is_non_zero() {
         // 本地时区偏移应是非零的（上海 +28800 秒）；若为零说明 TZ 未设置
         let offset = Local::now().offset().fix().local_minus_utc();
-        assert_ne!(
-            offset, 0,
-            "本地时区偏移为 0，请检查 TZ 环境变量是否设置"
-        );
+        assert_ne!(offset, 0, "本地时区偏移为 0，请检查 TZ 环境变量是否设置");
     }
 
     #[test]

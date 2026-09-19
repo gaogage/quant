@@ -10,38 +10,35 @@
 //!
 //! mod.rs 主体保留 tests（后续批次处理）。
 
-mod profiles;
 mod alpha_admission;
 mod candidate_screening;
-mod seed_generators;
+mod profiles;
 mod search_space;
+mod seed_generators;
 
 #[cfg(test)]
 mod tests;
 
-pub use profiles::{
-    LocalResourcePlan, ComboVersion, Phase7AlphaSourceRole, Phase7AlphaSourceAdmission,
-    AlphaBlendSource, AlphaBlendProfile, PortfolioDrawdownControlProfile,
-    PortfolioVolatilityControlProfile, PortfolioSharpeControlProfile,
-    PositionRiskControlProfile, CostCapacityStressProfile, EventGateProfile, ScoreDirection,
-};
 pub use alpha_admission::{
-    phase7_alpha_source_admission, is_phase7_base_trainable_alpha,
-    phase7_alpha_blend_profiles,
+    is_phase7_base_trainable_alpha, phase7_alpha_blend_profiles, phase7_alpha_source_admission,
 };
 pub use candidate_screening::{
-    CandidateTargets, CandidateType, CandidateMetrics, CandidateScreeningRow,
-    screen_optimization_results,
+    screen_optimization_results, CandidateMetrics, CandidateScreeningRow, CandidateTargets,
+    CandidateType,
+};
+pub use profiles::{
+    AlphaBlendProfile, AlphaBlendSource, ComboVersion, CostCapacityStressProfile, EventGateProfile,
+    LocalResourcePlan, Phase7AlphaSourceAdmission, Phase7AlphaSourceRole,
+    PortfolioDrawdownControlProfile, PortfolioSharpeControlProfile,
+    PortfolioVolatilityControlProfile, PositionRiskControlProfile, ScoreDirection,
 };
 pub use search_space::{
-    LayeredSearchConfig, LayeredSearchPlan, LayeredSearchTrial, build_layered_search_plan,
+    build_layered_search_plan, LayeredSearchConfig, LayeredSearchPlan, LayeredSearchTrial,
 };
 
 // search_space.rs 的 helper 被 seed_generators 跨模块调用（use super::{...}）。
 // decimal_f64 / insert_execution_rule_value 本批迁至 search_space（pub(crate)），
 // 此处 pub(crate) use 重导出保持原可见性；decimal_string 来自 candidate_screening
 // （pub(super)），私有 use 引入即可被子模块 super:: 解析。
-pub(crate) use search_space::{decimal_f64, insert_execution_rule_value};
 use candidate_screening::decimal_string;
-
-
+pub(crate) use search_space::{decimal_f64, insert_execution_rule_value};

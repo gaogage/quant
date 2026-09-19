@@ -57,7 +57,6 @@ use quant_backtest::signal_generator::{
     SignalDataCacheSnapshot, SignalDataCacheStats,
 };
 
-
 use super::*;
 
 pub(crate) struct NormalizedPromoteRequest {
@@ -73,13 +72,11 @@ pub(crate) struct NormalizedPromoteRequest {
     pub(crate) status: String,
 }
 
-
 pub(crate) struct Phase7LayeredPlanBundle {
     pub(crate) resource_plan: LocalResourcePlan,
     pub(crate) plan: LayeredSearchPlan,
     pub(crate) search_space: Value,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompletedTrialSnapshot {
@@ -94,7 +91,6 @@ pub(crate) struct CompletedTrialSnapshot {
     pub(crate) parameters: Value,
 }
 
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EliteMetricProfile {
     annual_return: f64,
@@ -108,21 +104,17 @@ pub(crate) struct EliteMetricProfile {
     num_trades: f64,
 }
 
-
 pub(crate) fn cleanup_dry_run_default(value: Option<bool>) -> bool {
     value.unwrap_or(true)
 }
-
 
 pub(crate) fn cleanup_default_timeout_seconds(value: Option<i64>) -> i64 {
     value.unwrap_or(3600).clamp(60, 86_400)
 }
 
-
 pub(crate) fn cleanup_limit(value: Option<i64>) -> i64 {
     value.unwrap_or(100).clamp(1, 1000)
 }
-
 
 pub(crate) fn optimization_cleanup_task_status_transition(status: &str) -> Option<&'static str> {
     match status {
@@ -131,7 +123,6 @@ pub(crate) fn optimization_cleanup_task_status_transition(status: &str) -> Optio
         _ => None,
     }
 }
-
 
 #[cfg(test)]
 pub(crate) fn optimization_cleanup_trial_status_transition(status: &str) -> Option<&'static str> {
@@ -142,14 +133,12 @@ pub(crate) fn optimization_cleanup_trial_status_transition(status: &str) -> Opti
     }
 }
 
-
 pub(crate) fn experiment_cleanup_status_transition(status: &str) -> Option<&'static str> {
     match status {
         "pending" | "running" => Some("failed"),
         _ => None,
     }
 }
-
 
 pub async fn create_optimization(
     State(state): State<Arc<AppState>>,
@@ -239,7 +228,6 @@ pub async fn create_optimization(
     }))
 }
 
-
 pub async fn get_optimization(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -317,7 +305,6 @@ pub async fn get_optimization(
     }))
 }
 
-
 pub async fn run_phase7_professional_discovery(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7ProfessionalDiscoveryRequest>,
@@ -328,7 +315,6 @@ pub async fn run_phase7_professional_discovery(
     }
 }
 
-
 pub(crate) fn missing_strategy_version_error_message(strategy_version_id: &str) -> String {
     format!(
         "strategy_version_id '{}' does not exist in strategy_version; use an existing canonical strategy_version_id or register the strategy version before running optimization",
@@ -336,14 +322,12 @@ pub(crate) fn missing_strategy_version_error_message(strategy_version_id: &str) 
     )
 }
 
-
 pub(crate) fn missing_optimization_data_version_error_message(data_version_id: &str) -> String {
     format!(
         "data_version_id '{}' does not exist in data_version; run data readiness/sync first or use an existing canonical data_version_id",
         data_version_id
     )
 }
-
 
 pub(crate) async fn ensure_phase7_oos_request_references_exist(
     db: &sqlx::PgPool,
@@ -377,7 +361,6 @@ pub(crate) async fn ensure_phase7_oos_request_references_exist(
     Ok(())
 }
 
-
 pub async fn cleanup_stale_optimization_tasks(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CleanupStaleBackgroundTasksReq>,
@@ -403,7 +386,6 @@ pub async fn cleanup_stale_experiment_runs(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub(crate) async fn cleanup_stale_optimization_tasks_inner(
     db: &sqlx::PgPool,
@@ -524,7 +506,6 @@ pub(crate) async fn cleanup_stale_optimization_tasks_inner(
     }))
 }
 
-
 pub(crate) async fn cleanup_stale_experiment_runs_inner(
     db: &sqlx::PgPool,
     req: CleanupStaleBackgroundTasksReq,
@@ -627,7 +608,6 @@ pub(crate) async fn cleanup_stale_experiment_runs_inner(
     }))
 }
 
-
 pub async fn get_experiment_run(
     State(state): State<Arc<AppState>>,
     Path(experiment_run_id): Path<String>,
@@ -691,7 +671,6 @@ pub async fn get_experiment_run(
     }
 }
 
-
 pub async fn promote_optimization_trial(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -702,7 +681,6 @@ pub async fn promote_optimization_trial(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub(crate) async fn execute_phase7_professional_discovery(
     db: &sqlx::PgPool,
@@ -824,7 +802,6 @@ pub(crate) async fn execute_phase7_professional_discovery(
     }))
 }
 
-
 pub async fn generate_elite_validation_report(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -835,7 +812,6 @@ pub async fn generate_elite_validation_report(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub async fn list_optimization_trials(
     State(state): State<Arc<AppState>>,
@@ -902,7 +878,6 @@ pub async fn list_optimization_trials(
     }
 }
 
-
 pub(crate) async fn persist_optimization_experiment_run(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -964,7 +939,6 @@ pub(crate) async fn persist_optimization_experiment_run(
     .await
     .map_err(|error| format!("Failed to insert optimization experiment_run: {}", error))
 }
-
 
 pub(crate) async fn promote_trial(
     db: &sqlx::PgPool,
@@ -1088,7 +1062,6 @@ pub(crate) async fn promote_trial(
     }))
 }
 
-
 pub(crate) async fn build_and_persist_elite_validation_report(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -1165,7 +1138,6 @@ pub(crate) async fn build_and_persist_elite_validation_report(
     }))
 }
 
-
 pub(crate) async fn load_completed_trial_snapshots(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -1216,7 +1188,6 @@ pub(crate) async fn load_completed_trial_snapshots(
     Ok(snapshots)
 }
 
-
 pub(crate) async fn enrich_trial_metrics(
     db: &sqlx::PgPool,
     backtest_task_id: Option<&str>,
@@ -1243,7 +1214,6 @@ pub(crate) async fn enrich_trial_metrics(
     let missing = missing_elite_metrics(&metrics);
     Ok((metrics, Value::Object(sources), json!(missing)))
 }
-
 
 pub(crate) async fn enrich_trial_metrics_from_backtest_result(
     db: &sqlx::PgPool,
@@ -1405,7 +1375,6 @@ pub(crate) async fn enrich_trial_metrics_from_backtest_result(
     Ok(())
 }
 
-
 pub(crate) async fn derive_max_drawdown_duration_days(
     db: &sqlx::PgPool,
     backtest_task_id: &str,
@@ -1445,7 +1414,6 @@ pub(crate) async fn derive_max_drawdown_duration_days(
     Ok(observed.then_some(max_duration))
 }
 
-
 pub(crate) const ELITE_REPORT_METRIC_KEYS: &[&str] = &[
     "annual_return_pct",
     "excess_return_pct",
@@ -1458,7 +1426,6 @@ pub(crate) const ELITE_REPORT_METRIC_KEYS: &[&str] = &[
     "num_trades",
 ];
 
-
 pub(crate) fn existing_metric_sources(metrics: &Value) -> Map<String, Value> {
     let mut sources = Map::new();
     for key in ELITE_REPORT_METRIC_KEYS {
@@ -1468,7 +1435,6 @@ pub(crate) fn existing_metric_sources(metrics: &Value) -> Map<String, Value> {
     }
     sources
 }
-
 
 pub(crate) fn insert_metric_if_missing(
     metrics: &mut Value,
@@ -1490,14 +1456,12 @@ pub(crate) fn insert_metric_if_missing(
     sources.insert(key.to_string(), json!(source));
 }
 
-
 pub(crate) fn ensure_metrics_object(metrics: &mut Value) -> &mut Map<String, Value> {
     if !metrics.is_object() {
         *metrics = json!({});
     }
     metrics.as_object_mut().expect("metrics object")
 }
-
 
 pub(crate) fn metric_has_number(metrics: &Value, key: &str) -> bool {
     metrics
@@ -1507,7 +1471,6 @@ pub(crate) fn metric_has_number(metrics: &Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-
 pub(crate) fn missing_elite_metrics(metrics: &Value) -> Vec<&'static str> {
     ELITE_REPORT_METRIC_KEYS
         .iter()
@@ -1515,7 +1478,6 @@ pub(crate) fn missing_elite_metrics(metrics: &Value) -> Vec<&'static str> {
         .filter(|key| !metric_has_number(metrics, key))
         .collect()
 }
-
 
 pub(crate) async fn persist_elite_validation_report_experiment(
     db: &sqlx::PgPool,
@@ -1533,9 +1495,13 @@ pub(crate) async fn persist_elite_validation_report_experiment(
         "completed",
     )
     .await
-    .map_err(|error| format!("Failed to insert elite validation experiment_run: {}", error))
+    .map_err(|error| {
+        format!(
+            "Failed to insert elite validation experiment_run: {}",
+            error
+        )
+    })
 }
-
 
 pub(crate) fn summarize_elite_validation_rows(rows: &[Value]) -> Value {
     let approved = rows
@@ -1564,7 +1530,6 @@ pub(crate) fn summarize_elite_validation_rows(rows: &[Value]) -> Value {
     })
 }
 
-
 pub(crate) fn summarize_missing_elite_metric_counts(rows: &[Value]) -> Value {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for row in rows {
@@ -1579,7 +1544,6 @@ pub(crate) fn summarize_missing_elite_metric_counts(rows: &[Value]) -> Value {
     }
     json!(counts)
 }
-
 
 pub(crate) fn elite_trial_report_order(
     left: &CompletedTrialSnapshot,
@@ -1611,7 +1575,6 @@ pub(crate) fn elite_trial_report_order(
         .then_with(|| left.trial_index.cmp(&right.trial_index))
 }
 
-
 pub(crate) fn elite_gap_score(metrics: &Value) -> f64 {
     let profile = EliteMetricProfile::from_metrics(metrics);
     positive_shortfall(0.15, profile.annual_return) * 4.0
@@ -1624,7 +1587,6 @@ pub(crate) fn elite_gap_score(metrics: &Value) -> f64 {
         + positive_shortfall(profile.max_drawdown_duration_days, 126.0) / 252.0
         + positive_shortfall(200.0, profile.num_trades) / 200.0
 }
-
 
 pub(crate) fn build_parameter_plateau_analysis(
     candidate: &CompletedTrialSnapshot,
@@ -1677,7 +1639,6 @@ pub(crate) fn build_parameter_plateau_analysis(
     })
 }
 
-
 pub(crate) fn parameter_axis_plateau_summary(
     axis: &str,
     candidate: &CompletedTrialSnapshot,
@@ -1714,15 +1675,16 @@ pub(crate) fn parameter_axis_plateau_summary(
     })
 }
 
-
-pub(crate) fn is_plateau_stable_neighbor(candidate: EliteMetricProfile, peer_metrics: &Value) -> bool {
+pub(crate) fn is_plateau_stable_neighbor(
+    candidate: EliteMetricProfile,
+    peer_metrics: &Value,
+) -> bool {
     let peer = EliteMetricProfile::from_metrics(peer_metrics);
     peer.annual_return >= candidate.annual_return - 0.01
         && peer.sharpe >= candidate.sharpe - 0.10
         && peer.sortino >= candidate.sortino - 0.15
         && peer.max_drawdown <= candidate.max_drawdown + 0.03
 }
-
 
 pub(crate) fn build_portfolio_correlation_contribution_score(
     candidate: &CompletedTrialSnapshot,
@@ -1753,7 +1715,6 @@ pub(crate) fn build_portfolio_correlation_contribution_score(
         "peer_impact": peer_impact,
     })
 }
-
 
 pub(crate) fn active_correlation_controls(parameters: &Value) -> Vec<Value> {
     let mut controls = Vec::new();
@@ -1811,7 +1772,6 @@ pub(crate) fn active_correlation_controls(parameters: &Value) -> Vec<Value> {
     }
     controls
 }
-
 
 pub(crate) fn correlation_control_score(parameters: &Value) -> f64 {
     let mut score: f64 = 0.0;
@@ -1880,7 +1840,6 @@ pub(crate) fn correlation_control_score(parameters: &Value) -> f64 {
     score.clamp(0.0, 1.0)
 }
 
-
 pub(crate) fn summarize_trial_metric_group(trials: &[&CompletedTrialSnapshot]) -> Value {
     if trials.is_empty() {
         return json!({
@@ -1906,7 +1865,6 @@ pub(crate) fn summarize_trial_metric_group(trials: &[&CompletedTrialSnapshot]) -
         "max_drawdown_avg": profiles.iter().map(|item| item.max_drawdown).sum::<f64>() / count,
     })
 }
-
 
 pub(crate) fn correlation_peer_impact(controlled: &Value, uncontrolled: &Value) -> Value {
     let controlled_count = controlled["count"].as_u64().unwrap_or(0);
@@ -1936,7 +1894,6 @@ pub(crate) fn correlation_peer_impact(controlled: &Value, uncontrolled: &Value) 
     })
 }
 
-
 pub(crate) fn differing_parameter_keys(left: &Value, right: &Value) -> Vec<String> {
     let Some(left_map) = left.as_object() else {
         return Vec::new();
@@ -1954,26 +1911,21 @@ pub(crate) fn differing_parameter_keys(left: &Value, right: &Value) -> Vec<Strin
         .collect()
 }
 
-
 pub(crate) fn parameter_value(parameters: &Value, key: &str) -> Value {
     parameters.get(key).cloned().unwrap_or(Value::Null)
 }
-
 
 pub(crate) fn parameter_f64(parameters: &Value, key: &str) -> Option<f64> {
     parameters.get(key).and_then(value_as_f64)
 }
 
-
 pub(crate) fn parameter_i64(parameters: &Value, key: &str) -> Option<i64> {
     parameters.get(key).and_then(Value::as_i64)
 }
 
-
 pub(crate) fn parameter_str<'a>(parameters: &'a Value, key: &str) -> Option<&'a str> {
     parameters.get(key).and_then(Value::as_str)
 }
-
 
 pub(crate) fn compact_trial_metrics(trial: &CompletedTrialSnapshot) -> Value {
     json!({
@@ -1988,11 +1940,9 @@ pub(crate) fn compact_trial_metrics(trial: &CompletedTrialSnapshot) -> Value {
     })
 }
 
-
 pub(crate) fn metric_number(metrics: &Value, name: &str) -> f64 {
     metrics.get(name).and_then(value_as_f64).unwrap_or(0.0)
 }
-
 
 pub(crate) fn ratio(numerator: usize, denominator: usize) -> f64 {
     if denominator == 0 {
@@ -2001,7 +1951,6 @@ pub(crate) fn ratio(numerator: usize, denominator: usize) -> f64 {
         numerator as f64 / denominator as f64
     }
 }
-
 
 impl EliteMetricProfile {
     fn from_metrics(metrics: &Value) -> Self {
@@ -2018,7 +1967,6 @@ impl EliteMetricProfile {
         }
     }
 }
-
 
 pub(crate) fn normalize_promote_request(
     default_trial_id: &str,
@@ -2080,7 +2028,6 @@ pub(crate) fn normalize_promote_request(
     })
 }
 
-
 pub(crate) async fn load_execution_context(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -2105,7 +2052,6 @@ pub(crate) async fn load_execution_context(
     })
 }
 
-
 pub(crate) async fn mark_trial_running(db: &sqlx::PgPool, trial_id: &str) -> Result<(), String> {
     sqlx::query(
         "UPDATE optimization_trial
@@ -2119,7 +2065,6 @@ pub(crate) async fn mark_trial_running(db: &sqlx::PgPool, trial_id: &str) -> Res
     .map_err(|error| format!("Failed to mark trial running: {}", error))?;
     Ok(())
 }
-
 
 pub(crate) async fn mark_trial_completed(
     db: &sqlx::PgPool,
@@ -2145,7 +2090,6 @@ pub(crate) async fn mark_trial_completed(
     Ok(())
 }
 
-
 pub(crate) async fn mark_trial_failed(
     db: &sqlx::PgPool,
     trial_id: &str,
@@ -2165,8 +2109,10 @@ pub(crate) async fn mark_trial_failed(
     Ok(())
 }
 
-
-pub(crate) async fn refresh_task_progress(db: &sqlx::PgPool, task_id: &str) -> Result<Option<String>, String> {
+pub(crate) async fn refresh_task_progress(
+    db: &sqlx::PgPool,
+    task_id: &str,
+) -> Result<Option<String>, String> {
     let counts = sqlx::query_as::<_, (i64, i64, i64)>(
         "SELECT COUNT(*)::bigint,
            COUNT(*) FILTER (WHERE status = 'completed')::bigint,
@@ -2361,7 +2307,10 @@ mod experiment_run_tests {
             .expect("回读 completed 记录");
         assert_eq!(status, "completed");
         assert_eq!(related, "rel-123");
-        assert!(completed.is_some(), "completed 状态 completed_at 必须非 NULL");
+        assert!(
+            completed.is_some(),
+            "completed 状态 completed_at 必须非 NULL"
+        );
 
         // 清理测试数据(避免污染)
         let _ = sqlx::query(
@@ -2371,5 +2320,3 @@ mod experiment_run_tests {
         .await;
     }
 }
-
-

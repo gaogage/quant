@@ -122,7 +122,11 @@ mod tests {
 
     #[test]
     fn nav_snapshot_new_sets_required_fields() {
-        let s = NavSnapshot::new("acc1", NaiveDate::from_ymd_opt(2026, 7, 30).unwrap(), 1_000_000.0);
+        let s = NavSnapshot::new(
+            "acc1",
+            NaiveDate::from_ymd_opt(2026, 7, 30).unwrap(),
+            1_000_000.0,
+        );
         assert_eq!(s.account_id, "acc1");
         assert_eq!(s.nav, 1_000_000.0);
         assert_eq!(s.cash, 0.0);

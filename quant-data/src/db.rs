@@ -19,7 +19,12 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let session_tz = std::env::var("TZ")
         .ok()
         .map(|tz| tz.trim().to_string())
-        .filter(|tz| !tz.is_empty() && tz.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'_' || b == b'-' || b == b'+'));
+        .filter(|tz| {
+            !tz.is_empty()
+                && tz.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || b == b'/' || b == b'_' || b == b'-' || b == b'+'
+                })
+        });
     let pool = PgPoolOptions::new()
         .max_connections(20)
         .min_connections(4)

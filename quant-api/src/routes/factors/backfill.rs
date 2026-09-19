@@ -1,10 +1,6 @@
 //! Phase 7 factor backfill routes — 30+ factor family backfill implementations.
 
-use axum::{
-    extract::State,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -16,6 +12,10 @@ use tracing::info;
 
 use quant_api::discovery::strategy_discovery::phase7_alpha_blend_profiles;
 
+use super::{
+    background_factor_task_id, parse_phase7_backfill_date, trim_or_default, trim_required,
+    upsert_factor_definition_input, usize_to_i32, FactorDefinitionInput,
+};
 use crate::phase7_alpha_admission::{
     validate_analyst_revision_entrypoint_admission, validate_equity_pledge_entrypoint_admission,
     validate_futures_price_chain_entrypoint_admission,
@@ -27,10 +27,6 @@ use crate::phase7_alpha_admission::{
     MARGIN_DETAIL_SOURCE, SHAREHOLDER_STRUCTURE_SOURCE,
 };
 use crate::AppState;
-use super::{
-    background_factor_task_id, parse_phase7_backfill_date, trim_or_default, trim_required,
-    usize_to_i32, FactorDefinitionInput, upsert_factor_definition_input,
-};
 
 #[derive(Debug, Deserialize)]
 pub struct Phase7PriceVolumeBackfillRequest {
@@ -2393,7 +2389,6 @@ impl Phase7AlphaBlendProfilesBackfillRequest {
     }
 }
 
-
 pub(crate) fn phase7_price_volume_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {
@@ -2449,15 +2444,8 @@ fn p42b_large_cap_momentum_reversal_specs() -> Vec<Phase7BackfillFactorSpec> {
 }
 
 /// P4.2b 防御板块列表(申万行业名,据 P4.1c 发现的 ascending 失效/近零 IC 板块)。
-const P42B_DEFENSIVE_INDUSTRIES: &[&str] = &[
-    "保险",
-    "银行",
-    "白酒",
-    "黄金",
-    "机场",
-    "电信运营",
-    "啤酒",
-];
+const P42B_DEFENSIVE_INDUSTRIES: &[&str] =
+    &["保险", "银行", "白酒", "黄金", "机场", "电信运营", "啤酒"];
 
 fn p42b_defensive_low_vol_quality_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![Phase7BackfillFactorSpec {
@@ -2602,7 +2590,8 @@ pub(crate) fn phase7_financial_quality_change_backfill_specs() -> Vec<Phase7Back
     ]
 }
 
-pub(crate) fn phase7_earnings_recovery_persistence_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+pub(crate) fn phase7_earnings_recovery_persistence_backfill_specs() -> Vec<Phase7BackfillFactorSpec>
+{
     vec![
         Phase7BackfillFactorSpec {
             factor_code: "fin_eps_yoy_recovery_persist_std",
@@ -4275,7 +4264,8 @@ pub async fn backfill_p42b_large_cap_momentum_reversal_background(
     let task_plan = plan.clone();
 
     tokio::spawn(async move {
-        let result = run_p42b_large_cap_momentum_reversal_backfill(&state.db, &tid, &task_plan).await;
+        let result =
+            run_p42b_large_cap_momentum_reversal_backfill(&state.db, &tid, &task_plan).await;
         match result {
             Ok(completion) => {
                 let report = completion.report();
@@ -8402,7 +8392,6 @@ pub async fn backfill_phase7_alpha_blend_profiles_background(
     }))
 }
 
-
 async fn run_phase7_price_volume_backfill(
     db: &sqlx::PgPool,
     task_id: &str,
@@ -8811,14 +8800,14 @@ async fn run_phase7_alpha_blend_profiles_backfill(
     ))
 }
 
-
-pub(crate) fn alpha_blend_profile_backfill_total_steps(plans: &[Phase7AlphaBlendBackfillPlan]) -> usize {
+pub(crate) fn alpha_blend_profile_backfill_total_steps(
+    plans: &[Phase7AlphaBlendBackfillPlan],
+) -> usize {
     plans
         .iter()
         .map(|plan| quarterly_backfill_segments(plan.start_date, plan.end_date).len())
         .sum()
 }
-
 
 async fn run_set_based_factor_backfill(
     db: &sqlx::PgPool,
@@ -8882,8 +8871,10 @@ async fn run_set_based_factor_backfill(
     ))
 }
 
-
-pub(crate) fn yearly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+pub(crate) fn yearly_backfill_segments(
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<(NaiveDate, NaiveDate)> {
     if start > end {
         return Vec::new();
     }
@@ -8925,7 +8916,10 @@ fn next_quarter_start(date: NaiveDate) -> NaiveDate {
     }
 }
 
-pub(crate) fn quarterly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+pub(crate) fn quarterly_backfill_segments(
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<(NaiveDate, NaiveDate)> {
     if start > end {
         return Vec::new();
     }
@@ -8950,7 +8944,10 @@ pub(crate) fn margin_detail_backfill_segments(
     quarterly_backfill_segments(start, end)
 }
 
-pub(crate) fn monthly_backfill_segments(start: NaiveDate, end: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+pub(crate) fn monthly_backfill_segments(
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<(NaiveDate, NaiveDate)> {
     if start > end {
         return Vec::new();
     }
@@ -8987,7 +8984,6 @@ fn segmented_backfill_plan(
     segment_plan.end_date = end_date;
     segment_plan
 }
-
 
 async fn run_segmented_set_based_factor_backfill(
     db: &sqlx::PgPool,
@@ -9456,7 +9452,6 @@ async fn run_segmented_margin_detail_backfill(
     ))
 }
 
-
 pub(crate) struct FuturesPriceChainSegmentBackfillRows {
     product_rows_by_code: Vec<(String, usize)>,
     combo_rows: usize,
@@ -9846,7 +9841,6 @@ async fn execute_margin_detail_backfill(
     Ok(combo_rows)
 }
 
-
 async fn ensure_futures_price_chain_factor_readiness(db: &sqlx::PgPool) -> Result<(), String> {
     let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(
         r#"
@@ -9976,7 +9970,6 @@ async fn ensure_futures_price_chain_factor_readiness(db: &sqlx::PgPool) -> Resul
     Ok(())
 }
 
-
 async fn upsert_set_based_factor_definition(
     db: &sqlx::PgPool,
     spec: &SetBasedFactorSpec,
@@ -10009,7 +10002,6 @@ async fn upsert_set_based_factor_definition(
             )
         })
 }
-
 
 async fn execute_set_based_factor_backfill(
     db: &sqlx::PgPool,
@@ -10101,7 +10093,6 @@ async fn execute_set_based_combo_backfill(
     Ok(result.rows_affected() as usize)
 }
 
-
 pub(crate) fn phase7_combo_required_factor_count(
     specs: &[SetBasedFactorSpec],
     plan: &SetBasedFactorBackfillPlan,
@@ -10120,7 +10111,6 @@ pub(crate) fn phase7_combo_required_factor_count(
         _ => specs.len() as i64,
     }
 }
-
 
 async fn execute_phase7_alpha_blend_backfill(
     db: &sqlx::PgPool,
@@ -10174,14 +10164,12 @@ async fn execute_phase7_alpha_blend_backfill(
     Ok(result.rows_affected() as usize)
 }
 
-
 pub(crate) fn phase7_alpha_blend_required_source_count(plan: &Phase7AlphaBlendBackfillPlan) -> i64 {
     match plan.combo_method {
         "weighted_combo_optional_overlay" => 1,
         _ => plan.source_combos.len() as i64,
     }
 }
-
 
 async fn set_local_statement_timeout(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -10357,7 +10345,6 @@ async fn persist_factor_backfill_experiment_run(
     Ok(())
 }
 
-
 pub(crate) fn factor_backfill_combo_weights_json(
     specs: &[SetBasedFactorSpec],
 ) -> Result<serde_json::Value, String> {
@@ -10388,7 +10375,6 @@ pub(crate) fn alpha_blend_weights_json(
         .collect::<HashMap<_, _>>();
     serde_json::to_value(weights).map_err(|error| format!("Failed to encode weights: {}", error))
 }
-
 
 pub(crate) fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> String {
     match spec.kind {
@@ -10978,7 +10964,10 @@ pub(crate) fn phase7_amount_intensity_backfill_sql(period: i32) -> String {
     )
 }
 
-pub(crate) fn phase7_relative_momentum_backfill_sql(period: i32, industry_relative: bool) -> String {
+pub(crate) fn phase7_relative_momentum_backfill_sql(
+    period: i32,
+    industry_relative: bool,
+) -> String {
     let baseline_select = if industry_relative {
         "trade_date, industry, AVG(stock_return) AS baseline_return"
     } else {
@@ -11698,7 +11687,10 @@ pub(crate) fn phase7_moneyflow_backfill_sql(
     )
 }
 
-pub(crate) fn phase7_moneyflow_congestion_backfill_sql(period: i32, flow_expression: &'static str) -> String {
+pub(crate) fn phase7_moneyflow_congestion_backfill_sql(
+    period: i32,
+    flow_expression: &'static str,
+) -> String {
     let preceding = period - 1;
 
     format!(
@@ -14993,7 +14985,6 @@ pub(crate) fn phase7_combo_backfill_sql() -> &'static str {
         created_at = NOW()"
 }
 
-
 pub(crate) fn phase7_alpha_blend_backfill_sql(combo_method: &str) -> &'static str {
     match combo_method {
         "weighted_combo_optional_overlay" => phase7_optional_overlay_blend_backfill_sql(),
@@ -15099,8 +15090,6 @@ pub(crate) fn phase7_optional_overlay_blend_backfill_sql() -> &'static str {
         created_at = NOW()"
 }
 
-
-
 #[cfg(test)]
 mod stale_recompute_tests {
     use super::*;
@@ -15120,62 +15109,174 @@ mod stale_recompute_tests {
         .expect("db");
         let start = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 9, 4).unwrap();
-        let mk = |task: &'static str, src: &'static str, bundle: &'static str, cat: &'static str,
-                  phase: &'static str, deps: &'static [&'static str], method: &'static str| {
+        let mk = |task: &'static str,
+                  src: &'static str,
+                  bundle: &'static str,
+                  cat: &'static str,
+                  phase: &'static str,
+                  deps: &'static [&'static str],
+                  method: &'static str| {
             SetBasedFactorBackfillPlan {
-                start_date: start, end_date: end,
-                version: "1.0.0".into(), combo_name: format!("{}_v1", bundle),
-                statement_timeout_ms: 0, task_type: task, source: src,
-                heartbeat_timeout_seconds: 3600, bundle_name: bundle, category: cat,
-                phase, dependencies: deps, combo_method: method,
+                start_date: start,
+                end_date: end,
+                version: "1.0.0".into(),
+                combo_name: format!("{}_v1", bundle),
+                statement_timeout_ms: 0,
+                task_type: task,
+                source: src,
+                heartbeat_timeout_seconds: 3600,
+                bundle_name: bundle,
+                category: cat,
+                phase,
+                dependencies: deps,
+                combo_method: method,
                 experiment_type: "stale_recompute_20260905",
                 source_combos: vec![],
             }
         };
         // 估值 4 因子（val_pe/pb/ps/dividend_yield）
-        let r = run_phase7_valuation_backfill(&db, "stale-rc-valuation-20260905",
-            &mk("phase7_valuation_backfill", "factor", "phase7_valuation_v1", "valuation",
-                "7-B/7-J", &["market_stock_daily_basic"], "equal_weight_valuation")).await;
+        let r = run_phase7_valuation_backfill(
+            &db,
+            "stale-rc-valuation-20260905",
+            &mk(
+                "phase7_valuation_backfill",
+                "factor",
+                "phase7_valuation_v1",
+                "valuation",
+                "7-B/7-J",
+                &["market_stock_daily_basic"],
+                "equal_weight_valuation",
+            ),
+        )
+        .await;
         println!("[stale-rc] valuation: {:?}", r.map(|c| c.task_status()));
         // 行业残差财务族（fin_*_indrel）
-        let r = run_phase7_industry_residual_quality_backfill(&db, "stale-rc-indrel-20260905",
-            &mk("phase7_industry_residual_quality_backfill", "factor", "phase7_industry_residual_quality_v1", "industry_residual_quality",
-                "7-B", &["market_financial_indicator"], "equal_weight")).await;
+        let r = run_phase7_industry_residual_quality_backfill(
+            &db,
+            "stale-rc-indrel-20260905",
+            &mk(
+                "phase7_industry_residual_quality_backfill",
+                "factor",
+                "phase7_industry_residual_quality_v1",
+                "industry_residual_quality",
+                "7-B",
+                &["market_financial_indicator"],
+                "equal_weight",
+            ),
+        )
+        .await;
         println!("[stale-rc] indrel: {:?}", r.map(|c| c.task_status()));
         // 增长恢复族（fin_*_recovery_persist）
-        let r = run_phase7_growth_recovery_backfill(&db, "stale-rc-growth-20260905",
-            &mk("phase7_growth_recovery_backfill", "factor", "phase7_growth_recovery_v1", "growth_recovery",
-                "7-B", &["market_financial_indicator"], "equal_weight")).await;
+        let r = run_phase7_growth_recovery_backfill(
+            &db,
+            "stale-rc-growth-20260905",
+            &mk(
+                "phase7_growth_recovery_backfill",
+                "factor",
+                "phase7_growth_recovery_v1",
+                "growth_recovery",
+                "7-B",
+                &["market_financial_indicator"],
+                "equal_weight",
+            ),
+        )
+        .await;
         println!("[stale-rc] growth: {:?}", r.map(|c| c.task_status()));
         // 解禁压力族（unlock_pressure）
-        let r = run_phase7_unlock_supply_pressure_backfill(&db, "stale-rc-unlock-20260905",
-            &mk("phase7_unlock_supply_pressure_backfill", "factor", "phase7_unlock_supply_pressure_v1", "unlock_supply_pressure",
-                "7-B", &["market_stock_share_float"], "equal_weight")).await;
+        let r = run_phase7_unlock_supply_pressure_backfill(
+            &db,
+            "stale-rc-unlock-20260905",
+            &mk(
+                "phase7_unlock_supply_pressure_backfill",
+                "factor",
+                "phase7_unlock_supply_pressure_v1",
+                "unlock_supply_pressure",
+                "7-B",
+                &["market_stock_share_float"],
+                "equal_weight",
+            ),
+        )
+        .await;
         println!("[stale-rc] unlock: {:?}", r.map(|c| c.task_status()));
         // 股本变动族（float/total_share_growth）
-        let r = run_phase7_supply_float_shock_backfill(&db, "stale-rc-float-20260905",
-            &mk("phase7_supply_float_shock_backfill", "factor", "phase7_supply_float_shock_v1", "supply_float_shock",
-                "7-B", &["market_stock_share_float"], "equal_weight")).await;
+        let r = run_phase7_supply_float_shock_backfill(
+            &db,
+            "stale-rc-float-20260905",
+            &mk(
+                "phase7_supply_float_shock_backfill",
+                "factor",
+                "phase7_supply_float_shock_v1",
+                "supply_float_shock",
+                "7-B",
+                &["market_stock_share_float"],
+                "equal_weight",
+            ),
+        )
+        .await;
         println!("[stale-rc] float: {:?}", r.map(|c| c.task_status()));
         // 业绩预告修正族（forecast_*_120d_std，2026-09-05 补加）
-        let r = run_phase7_forecast_revision_surprise_backfill(&db, "stale-rc-fc-20260905",
-            &mk("phase7_forecast_revision_surprise_backfill", "factor", "phase7_forecast_revision_surprise_v1", "forecast_revision_surprise",
-                "7-B", &["market_stock_forecast", "market_trade_calendar"], "equal_weight")).await;
+        let r = run_phase7_forecast_revision_surprise_backfill(
+            &db,
+            "stale-rc-fc-20260905",
+            &mk(
+                "phase7_forecast_revision_surprise_backfill",
+                "factor",
+                "phase7_forecast_revision_surprise_v1",
+                "forecast_revision_surprise",
+                "7-B",
+                &["market_stock_forecast", "market_trade_calendar"],
+                "equal_weight",
+            ),
+        )
+        .await;
         println!("[stale-rc] fc: {:?}", r.map(|c| c.task_status()));
         // 流动性质量族（liq_*_trend/impact）
-        let r = run_phase7_liquidity_quality_backfill(&db, "stale-rc-liq-20260905",
-            &mk("phase7_liquidity_quality_backfill", "factor", "phase7_liquidity_quality_v1", "liquidity_quality",
-                "7-B", &["market_stock_daily_bar"], "equal_weight")).await;
+        let r = run_phase7_liquidity_quality_backfill(
+            &db,
+            "stale-rc-liq-20260905",
+            &mk(
+                "phase7_liquidity_quality_backfill",
+                "factor",
+                "phase7_liquidity_quality_v1",
+                "liquidity_quality",
+                "7-B",
+                &["market_stock_daily_bar"],
+                "equal_weight",
+            ),
+        )
+        .await;
         println!("[stale-rc] liq: {:?}", r.map(|c| c.task_status()));
         // 恢复持续性族（fin_*_recovery_persist）
-        let r = run_phase7_earnings_recovery_persistence_backfill(&db, "stale-rc-erp-20260905",
-            &mk("phase7_earnings_recovery_persistence_backfill", "factor", "phase7_earnings_recovery_persistence_v1", "earnings_recovery_persistence",
-                "7-B", &["market_financial_indicator"], "equal_weight")).await;
+        let r = run_phase7_earnings_recovery_persistence_backfill(
+            &db,
+            "stale-rc-erp-20260905",
+            &mk(
+                "phase7_earnings_recovery_persistence_backfill",
+                "factor",
+                "phase7_earnings_recovery_persistence_v1",
+                "earnings_recovery_persistence",
+                "7-B",
+                &["market_financial_indicator"],
+                "equal_weight",
+            ),
+        )
+        .await;
         println!("[stale-rc] erp: {:?}", r.map(|c| c.task_status()));
         // 量价派生（mom_5d_std/vol_20d_std 等在 price_volume specs 里）
-        let r = run_phase7_price_volume_backfill(&db, "stale-rc-pv-20260905",
-            &mk("phase7_price_volume_backfill", "factor", "phase7_price_volume_expanded_v1", "price_volume",
-                "7-B", &["market_stock_daily_bar"], "equal_weight")).await;
+        let r = run_phase7_price_volume_backfill(
+            &db,
+            "stale-rc-pv-20260905",
+            &mk(
+                "phase7_price_volume_backfill",
+                "factor",
+                "phase7_price_volume_expanded_v1",
+                "price_volume",
+                "7-B",
+                &["market_stock_daily_bar"],
+                "equal_weight",
+            ),
+        )
+        .await;
         println!("[stale-rc] price_volume: {:?}", r.map(|c| c.task_status()));
     }
 }

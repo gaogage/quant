@@ -80,7 +80,9 @@ impl RawBar {
         .fetch_one(db)
         .await?;
         if !exists {
-            return Err(VerifiedBarError::NotRegistered(self.data_version_id.clone()));
+            return Err(VerifiedBarError::NotRegistered(
+                self.data_version_id.clone(),
+            ));
         }
         Ok(VerifiedBar {
             symbol: self.symbol,

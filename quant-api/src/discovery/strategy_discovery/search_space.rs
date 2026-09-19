@@ -5,14 +5,13 @@
 //!      + LayeredSignalCandidate + LayeredSearchTrial/Plan + build_layered_search_plan
 //!      + cost/execution profile helpers + LayeredTrialIndices。
 
-use super::profiles::{
-    LocalResourcePlan, ComboVersion, ScoreDirection,
-    PortfolioDrawdownControlProfile, PortfolioVolatilityControlProfile,
-    PortfolioSharpeControlProfile, PositionRiskControlProfile,
-    CostCapacityStressProfile, EventGateProfile,
-};
 use super::alpha_admission::{phase7_alpha_blend_profiles, phase7_base_trainable_combo_versions};
 use super::candidate_screening::decimal_string;
+use super::profiles::{
+    ComboVersion, CostCapacityStressProfile, EventGateProfile, LocalResourcePlan,
+    PortfolioDrawdownControlProfile, PortfolioSharpeControlProfile,
+    PortfolioVolatilityControlProfile, PositionRiskControlProfile, ScoreDirection,
+};
 use super::seed_generators::*;
 
 use rust_decimal::prelude::ToPrimitive;
@@ -1326,40 +1325,22 @@ fn professional_v14_corr70_annual_edge_seed_trials() -> Vec<Value> {
 }
 
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(dead_code)]
-
 #[allow(clippy::too_many_arguments)]
-
 #[allow(clippy::too_many_arguments)]
-
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LayeredSearchConfig {
     pub market_regime_policies: Vec<String>,
@@ -9093,4 +9074,3 @@ fn selected_cartesian_indices(total: usize, max_trials: usize) -> Vec<usize> {
         .map(|idx| (idx * last + (max_trials - 1) / 2) / (max_trials - 1))
         .collect()
 }
-

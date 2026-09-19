@@ -11,8 +11,8 @@ use chrono::NaiveDate;
 use sqlx::PgPool;
 use tracing::{info, warn};
 
+use crate::routes::scheduler::{check_task_dependency_order, V24_FACTOR_CODES};
 use crate::routes::shared::send_quality_alert;
-use crate::routes::scheduler::{V24_FACTOR_CODES, check_task_dependency_order};
 
 /// 事件驱动因子 → 上游稀疏公告源表映射(P2-2b 健康指标用)。
 /// 此类因子的覆盖率随披露季节脉冲波动, 不适用覆盖率骤降检测, 改查源表新鲜度。
@@ -244,14 +244,12 @@ pub async fn run_data_quality_check(db: &PgPool) {
                 if matched.is_empty() {
                     continue;
                 }
-                let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(&format!(
-                    "SELECT MAX({}) FROM {}",
-                    date_col, table
-                ))
-                .fetch_optional(db)
-                .await
-                .ok()
-                .flatten();
+                let max_row: Option<(chrono::NaiveDate,)> =
+                    sqlx::query_as(&format!("SELECT MAX({}) FROM {}", date_col, table))
+                        .fetch_optional(db)
+                        .await
+                        .ok()
+                        .flatten();
                 match max_row {
                     Some((max_d,)) => {
                         let lag = (today - max_d).num_days();
@@ -266,7 +264,11 @@ pub async fn run_data_quality_check(db: &PgPool) {
                             ));
                         }
                     }
-                    None => event_stale.push(format!("{}族[{}: 无数据]", prefix.trim_end_matches('_'), table)),
+                    None => event_stale.push(format!(
+                        "{}族[{}: 无数据]",
+                        prefix.trim_end_matches('_'),
+                        table
+                    )),
                 }
             }
             if !event_stale.is_empty() {

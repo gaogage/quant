@@ -848,26 +848,30 @@ where
         if return_risk_stats_matrices_cover_required_lookbacks(
             return_risk_stats_matrices,
             &portfolio_config,
-        ) { {
-            build_portfolio_weights_with_return_risk_stats_matrices(
-                score_day,
-                &candidates,
-                return_risk_stats_matrices,
-                average_amounts,
-                industry_by_symbol,
-                &portfolio_config,
-            )
-        } } else { {
-            build_portfolio_weights_with_return_risk_matrices(
-                score_day,
-                &candidates,
-                return_history,
-                average_amounts,
-                industry_by_symbol,
-                &portfolio_config,
-                Some(return_risk_matrices),
-            )
-        } }
+        ) {
+            {
+                build_portfolio_weights_with_return_risk_stats_matrices(
+                    score_day,
+                    &candidates,
+                    return_risk_stats_matrices,
+                    average_amounts,
+                    industry_by_symbol,
+                    &portfolio_config,
+                )
+            }
+        } else {
+            {
+                build_portfolio_weights_with_return_risk_matrices(
+                    score_day,
+                    &candidates,
+                    return_history,
+                    average_amounts,
+                    industry_by_symbol,
+                    &portfolio_config,
+                    Some(return_risk_matrices),
+                )
+            }
+        }
     } else {
         build_portfolio_weights_with_return_risk_matrices(
             score_day,
@@ -1516,7 +1520,10 @@ pub(crate) fn return_history_query_start(start_date: NaiveDate, lookback_days: u
     start_date - Duration::days((lookback_days as i64).saturating_mul(3))
 }
 
-pub(crate) fn average_amount_history_query_start(start_date: NaiveDate, lookback_days: usize) -> NaiveDate {
+pub(crate) fn average_amount_history_query_start(
+    start_date: NaiveDate,
+    lookback_days: usize,
+) -> NaiveDate {
     start_date - Duration::days((lookback_days as i64).saturating_mul(3).max(1))
 }
 
@@ -2788,26 +2795,14 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
         PortfolioConstructionMethod::RiskBudget => risk_matrix
             .as_ref()
             .map(|matrix| {
-                build_risk_budget_raw_weights(
-                    score_day,
-                    &selected,
-                    matrix,
-                    average_amounts,
-                    config,
-                )
+                build_risk_budget_raw_weights(score_day, &selected, matrix, average_amounts, config)
             })
             .unwrap_or_else(|| {
                 let view = super::matrix_view::ReturnHistoryMatrixView::new(
                     return_history,
                     config.risk_budget_lookback_days,
                 );
-                build_risk_budget_raw_weights(
-                    score_day,
-                    &selected,
-                    &view,
-                    average_amounts,
-                    config,
-                )
+                build_risk_budget_raw_weights(score_day, &selected, &view, average_amounts, config)
             }),
         PortfolioConstructionMethod::StressFillAwareRiskBudget => risk_matrix
             .as_ref()
@@ -2851,37 +2846,19 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
                     return_history,
                     config.risk_budget_lookback_days,
                 );
-                build_min_variance_raw_weights(
-                    score_day,
-                    &selected,
-                    &view,
-                    average_amounts,
-                    config,
-                )
+                build_min_variance_raw_weights(score_day, &selected, &view, average_amounts, config)
             }),
         PortfolioConstructionMethod::RiskParity => risk_matrix
             .as_ref()
             .map(|matrix| {
-                build_risk_parity_raw_weights(
-                    score_day,
-                    &selected,
-                    matrix,
-                    average_amounts,
-                    config,
-                )
+                build_risk_parity_raw_weights(score_day, &selected, matrix, average_amounts, config)
             })
             .unwrap_or_else(|| {
                 let view = super::matrix_view::ReturnHistoryMatrixView::new(
                     return_history,
                     config.risk_budget_lookback_days,
                 );
-                build_risk_parity_raw_weights(
-                    score_day,
-                    &selected,
-                    &view,
-                    average_amounts,
-                    config,
-                )
+                build_risk_parity_raw_weights(score_day, &selected, &view, average_amounts, config)
             }),
         PortfolioConstructionMethod::MaxDiversification => risk_matrix
             .as_ref()
@@ -2912,25 +2889,13 @@ pub(crate) fn build_portfolio_weights_with_return_risk_matrices(
     let mut weights = normalize_and_cap_weights(&selected, &raw_weights, average_amounts, config);
     apply_capacity_risk_budget(&mut weights, average_amounts, config);
     if let Some(matrix) = risk_matrix.as_ref() {
-        apply_style_risk_budget(
-            &mut weights,
-            matrix,
-            average_amounts,
-            score_day,
-            config,
-        );
+        apply_style_risk_budget(&mut weights, matrix, average_amounts, score_day, config);
     } else {
         let view = super::matrix_view::ReturnHistoryMatrixView::new(
             return_history,
             config.risk_budget_lookback_days,
         );
-        apply_style_risk_budget(
-            &mut weights,
-            &view,
-            average_amounts,
-            score_day,
-            config,
-        );
+        apply_style_risk_budget(&mut weights, &view, average_amounts, score_day, config);
     }
     apply_industry_cap(&mut weights, industry_by_symbol, config);
     if let Some(matrix) = risk_matrix.as_ref() {
@@ -3085,13 +3050,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
             let Some(matrix) = risk_matrix.as_deref() else {
                 return HashMap::new();
             };
-            build_risk_budget_raw_weights(
-                score_day,
-                &selected,
-                matrix,
-                average_amounts,
-                config,
-            )
+            build_risk_budget_raw_weights(score_day, &selected, matrix, average_amounts, config)
         }
         PortfolioConstructionMethod::StressFillAwareRiskBudget => {
             let Some(matrix) = risk_matrix.as_deref() else {
@@ -3110,25 +3069,13 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
             let Some(matrix) = risk_matrix.as_deref() else {
                 return HashMap::new();
             };
-            build_min_variance_raw_weights(
-                score_day,
-                &selected,
-                matrix,
-                average_amounts,
-                config,
-            )
+            build_min_variance_raw_weights(score_day, &selected, matrix, average_amounts, config)
         }
         PortfolioConstructionMethod::RiskParity => {
             let Some(matrix) = risk_matrix.as_deref() else {
                 return HashMap::new();
             };
-            build_risk_parity_raw_weights(
-                score_day,
-                &selected,
-                matrix,
-                average_amounts,
-                config,
-            )
+            build_risk_parity_raw_weights(score_day, &selected, matrix, average_amounts, config)
         }
         PortfolioConstructionMethod::MaxDiversification => {
             let Some(matrix) = risk_matrix.as_deref() else {
@@ -3147,13 +3094,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrices(
     let mut weights = normalize_and_cap_weights(&selected, &raw_weights, average_amounts, config);
     apply_capacity_risk_budget(&mut weights, average_amounts, config);
     if let Some(matrix) = risk_matrix.as_deref() {
-        apply_style_risk_budget(
-            &mut weights,
-            matrix,
-            average_amounts,
-            score_day,
-            config,
-        );
+        apply_style_risk_budget(&mut weights, matrix, average_amounts, score_day, config);
     }
     apply_industry_cap(&mut weights, industry_by_symbol, config);
     if let Some(matrix) = risk_matrix.as_deref() {
@@ -3269,8 +3210,7 @@ fn rank_candidates_for_capacity_from_matrix(
     }
 
     let amount_ranks = liquidity_rank_scores(candidates, average_amounts);
-    let relative_strength_ranks =
-        relative_strength_rank_scores(candidates, matrix, score_day);
+    let relative_strength_ranks = relative_strength_rank_scores(candidates, matrix, score_day);
     let volatility_ranks =
         volatility_rank_scores(candidates, return_history, score_day, lookback_days);
     let denominator = candidates.len().saturating_sub(1).max(1) as f64;
@@ -3336,8 +3276,7 @@ fn rank_candidates_for_capacity_from_stats_matrix(
     }
 
     let amount_ranks = liquidity_rank_scores(candidates, average_amounts);
-    let relative_strength_ranks =
-        relative_strength_rank_scores(candidates, matrix, score_day);
+    let relative_strength_ranks = relative_strength_rank_scores(candidates, matrix, score_day);
     let denominator = candidates.len().saturating_sub(1).max(1) as f64;
     let alpha_weight = params.alpha_rank_weight.max(0.0);
     let liquidity_weight = params.liquidity_rank_weight.max(0.0);
@@ -3895,14 +3834,15 @@ pub(crate) fn stress_fill_confidence_lookup_for_direction(
     let stats = score_stats(candidates.iter().map(|(_, score)| *score));
     let finite = candidates
         .iter()
-        .filter(|&(_, score)| score.is_finite()).map(|(symbol, score)| {
-                let z_score = standard_score(*score, stats);
-                let z_score = match score_direction {
-                    ScoreDirection::Descending => z_score,
-                    ScoreDirection::Ascending => -z_score,
-                };
-                (symbol.clone(), z_score)
-            })
+        .filter(|&(_, score)| score.is_finite())
+        .map(|(symbol, score)| {
+            let z_score = standard_score(*score, stats);
+            let z_score = match score_direction {
+                ScoreDirection::Descending => z_score,
+                ScoreDirection::Ascending => -z_score,
+            };
+            (symbol.clone(), z_score)
+        })
         .collect::<Vec<_>>();
     if finite.is_empty() {
         return HashMap::new();
@@ -3994,9 +3934,7 @@ fn stress_fill_confidence_multiplier(
 // R9: 三联体合并为单一泛型函数。原 build_stress_fill_aware_risk_budget_raw_weights /
 // _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
 // base 版的 risk_budget_lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
-pub(crate) fn build_stress_fill_aware_risk_budget_raw_weights<
-    M: super::matrix_view::MatrixView,
->(
+pub(crate) fn build_stress_fill_aware_risk_budget_raw_weights<M: super::matrix_view::MatrixView>(
     score_day: NaiveDate,
     symbols: &[String],
     ranked_candidates: &[(String, f64)],
@@ -4092,7 +4030,10 @@ pub(crate) fn build_risk_parity_raw_weights<M: super::matrix_view::MatrixView>(
 
     let mut raw_weights = Vec::with_capacity(symbols.len());
     for symbol in symbols {
-        let volatility = matrix.sample_volatility(score_day, symbol).unwrap_or(0.20).max(0.01);
+        let volatility = matrix
+            .sample_volatility(score_day, symbol)
+            .unwrap_or(0.20)
+            .max(0.01);
         let capacity_score = capacity_score(symbol, average_amounts, max_amount);
         let capacity_multiplier = capacity_score.powf(config.capacity_penalty_strength.max(0.0));
         // 经典风险平价：权重 ∝ 1/σ（风险贡献均等）
@@ -4126,7 +4067,10 @@ pub(crate) fn build_max_diversification_raw_weights<M: super::matrix_view::Matri
 
     let mut raw_weights = Vec::with_capacity(symbols.len());
     for symbol in symbols {
-        let volatility = matrix.sample_volatility(score_day, symbol).unwrap_or(0.20).max(0.01);
+        let volatility = matrix
+            .sample_volatility(score_day, symbol)
+            .unwrap_or(0.20)
+            .max(0.01);
         // 平均绝对相关（相对组合内其他资产）：高相关降低分散化价值
         let avg_abs_corr = matrix
             .average_abs_correlation_to_reference(score_day, symbol, symbols)
@@ -5253,7 +5197,11 @@ impl ScoreDateReturnRiskStatsMatrix {
         self.pairwise_correlations.len()
     }
 
-    pub(crate) fn stats(&self, score_day: NaiveDate, symbol: &str) -> Option<&ReturnRiskSingleSymbolStats> {
+    pub(crate) fn stats(
+        &self,
+        score_day: NaiveDate,
+        symbol: &str,
+    ) -> Option<&ReturnRiskSingleSymbolStats> {
         self.stats_by_score_symbol
             .get(&(score_day, symbol.to_string()))
     }
@@ -5284,7 +5232,12 @@ impl ScoreDateReturnRiskStatsMatrix {
             .and_then(|stats| stats.fractional_kelly_weight(fraction))
     }
 
-    pub(crate) fn pearson_correlation(&self, score_day: NaiveDate, left: &str, right: &str) -> Option<f64> {
+    pub(crate) fn pearson_correlation(
+        &self,
+        score_day: NaiveDate,
+        left: &str,
+        right: &str,
+    ) -> Option<f64> {
         if left == right {
             return self.stats(score_day, left).and_then(|stats| {
                 (stats.return_count >= 3 && stats.sample_volatility.is_some()).then_some(1.0)

@@ -22,9 +22,9 @@ use crate::routes::shared::{
 };
 use sha1::{Digest, Sha1};
 use sqlx::PgPool;
-use tracing::{error, warn};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tracing::{error, warn};
 
 /// 信号最小权重(占 NAV): 低于此值的 A股目标不进信号。
 /// 执行端一手价格上界按 ~5000 元覆盖(0.1% × 500 万 NAV), 消除不足一手的
@@ -44,8 +44,8 @@ pub struct PtradeChannel {
 
 /// 本地留存目录(按账户分子目录防双通道同名覆盖; env 可覆盖根目录)。
 fn local_signal_dir(account_id: &str) -> PathBuf {
-    let root = std::env::var("PTRADE_SIGNAL_DIR")
-        .unwrap_or_else(|_| "/tmp/quant_signals".to_string());
+    let root =
+        std::env::var("PTRADE_SIGNAL_DIR").unwrap_or_else(|_| "/tmp/quant_signals".to_string());
     PathBuf::from(root).join(account_id)
 }
 
@@ -102,7 +102,10 @@ pub async fn run_ptrade_signal_export(db: &PgPool, params: &serde_json::Value) {
                 error!("[PTrade信号] 账户 {} 信号生成失败: {}", account_id, e);
                 send_dingtalk_alert(
                     db,
-                    &format!("⛔ [PTrade信号] 账户 {} 信号生成失败,当日实盘无信号(降级为持有不动):\n{}", account_id, e),
+                    &format!(
+                        "⛔ [PTrade信号] 账户 {} 信号生成失败,当日实盘无信号(降级为持有不动):\n{}",
+                        account_id, e
+                    ),
                 )
                 .await;
             }
@@ -249,7 +252,11 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
                     "{} 溢价{:+.1}%→{}",
                     to_ptrade_symbol(s),
                     p.premium_pct.unwrap_or(0.0) * 100.0,
-                    if p.blocks_side("buy") { "禁买可卖" } else { "禁卖可买" }
+                    if p.blocks_side("buy") {
+                        "禁买可卖"
+                    } else {
+                        "禁卖可买"
+                    }
                 )
             })
             .collect::<Vec<_>>()
@@ -366,7 +373,11 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
                         "{}({:+.1}%→{})",
                         to_ptrade_symbol(s),
                         p.premium_pct.unwrap_or(0.0) * 100.0,
-                        if p.blocks_side("buy") { "禁买" } else { "禁卖" }
+                        if p.blocks_side("buy") {
+                            "禁买"
+                        } else {
+                            "禁卖"
+                        }
                     )
                 })
                 .collect::<Vec<_>>()
@@ -405,7 +416,10 @@ pub(crate) fn canonical_sha1(payload: &serde_json::Value) -> String {
     out.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-async fn next_trading_day(db: &PgPool, after: chrono::NaiveDate) -> Result<chrono::NaiveDate, String> {
+async fn next_trading_day(
+    db: &PgPool,
+    after: chrono::NaiveDate,
+) -> Result<chrono::NaiveDate, String> {
     let row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
         "SELECT trade_date FROM market_trade_calendar
          WHERE is_open = true AND trade_date > $1 ORDER BY trade_date LIMIT 1",
@@ -435,9 +449,14 @@ async fn scp_push(local: &std::path::Path, scp_target: &str) -> Result<(), Strin
     let arg = local.to_string_lossy().to_string();
     for attempt in 0..2 {
         let st = tokio::process::Command::new("scp")
-            .arg("-o").arg("BatchMode=yes").arg("-o").arg("ConnectTimeout=15")
-            .arg("-o").arg("StrictHostKeyChecking=accept-new")
-            .arg(&arg).arg(scp_target)
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("ConnectTimeout=15")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=accept-new")
+            .arg(&arg)
+            .arg(scp_target)
             .output()
             .await
             .map_err(|e| format!("scp spawn: {}", e))?;
@@ -461,7 +480,9 @@ async fn build_run_factor_body(
     sc: &StrategyConfig,
     date: chrono::NaiveDate,
 ) -> serde_json::Value {
-    let start = (date - chrono::Duration::days(180)).format("%Y%m%d").to_string();
+    let start = (date - chrono::Duration::days(180))
+        .format("%Y%m%d")
+        .to_string();
     let end = date.format("%Y%m%d").to_string();
     let wfa = crate::routes::scheduler::get_current_wfa_params(db, date)
         .await
@@ -493,7 +514,10 @@ async fn build_run_factor_body(
         ("event_gate_mode", "event_gate_mode"),
         ("event_gate_score_direction", "event_gate_score_direction"),
         ("candidate_risk_filter", "candidate_risk_filter"),
-        ("portfolio_volatility_control", "portfolio_volatility_control"),
+        (
+            "portfolio_volatility_control",
+            "portfolio_volatility_control",
+        ),
         ("portfolio_drawdown_control", "portfolio_drawdown_control"),
         ("risk_contribution_control", "risk_contribution_control"),
     ] {
@@ -520,7 +544,10 @@ async fn run_factor_task(body: &serde_json::Value) -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
     let resp = client
-        .post(format!("http://localhost:{}/api/v1/quant/backtests/run-factor", port))
+        .post(format!(
+            "http://localhost:{}/api/v1/quant/backtests/run-factor",
+            port
+        ))
         .json(body)
         .send()
         .await
@@ -549,7 +576,10 @@ mod tests {
     /// 从信号源头消除, 权重和只含幸存标的(checksum 随之自洽)。
     #[test]
     fn min_signal_weight_threshold_semantics() {
-        assert!(MIN_SIGNAL_WEIGHT == 0.001, "阈值 0.1% 定版, 改动需评审碎单边界");
+        assert!(
+            MIN_SIGNAL_WEIGHT == 0.001,
+            "阈值 0.1% 定版, 改动需评审碎单边界"
+        );
         // 0918 实例复刻: 0.0002 权重(目标 ~1001 元/500 万 NAV)必被过滤
         assert!(0.0002_f64 < MIN_SIGNAL_WEIGHT);
         // 正常最小持仓权重(等权 1/50 = 2%)远在阈值之上不受影响
@@ -626,8 +656,7 @@ mod tests {
         cfg.rate_limit_per_minute = 60;
         let client = quant_data::tushare::client::TushareClient::new(cfg).expect("client");
 
-        let etfs =
-            crate::routes::strategy_query::load_active_etf_symbols_union(&db).await;
+        let etfs = crate::routes::strategy_query::load_active_etf_symbols_union(&db).await;
         println!("[fund_nav_backfill] 回补标的: {:?}", etfs);
         let n = quant_data::sync::sync_fund_nav(&db, &client, &etfs)
             .await
@@ -660,10 +689,15 @@ mod tests {
         let etfs = vec!["501018.SH".to_string()];
         let m = load_etf_premium_map(&db, date, &etfs, 0.10).await;
         println!("[premium_gate_probe] map = {:?}", m);
-        assert!(m.contains_key("501018.SH"), "map 缺 501018(查询失败或数据缺)");
+        assert!(
+            m.contains_key("501018.SH"),
+            "map 缺 501018(查询失败或数据缺)"
+        );
         let p = &m["501018.SH"];
-        println!("[premium_gate_probe] premium={:?} block_buy={} block_sell={}",
-                 p.premium_pct, p.block_buy, p.block_sell);
+        println!(
+            "[premium_gate_probe] premium={:?} block_buy={} block_sell={}",
+            p.premium_pct, p.block_buy, p.block_sell
+        );
         assert!(p.block_buy, "63% 溢价未触发 block_buy");
     }
 
@@ -696,11 +730,18 @@ mod tests {
         .fetch_all(&db)
         .await
         .expect("跳变标的查询");
-        println!("[dividend_backfill] 重拉 {} 只标的的 dividend(全历史, 限速约50分钟)", symbols.len());
-        let dv = format!("div-stkdiv-backfill-{}", chrono::Local::now().format("%Y%m%d%H%M"));
-        let n = quant_data::sync::sync_dividend(&db, &client, &symbols, "20190601", "20260917", &dv)
-            .await
-            .expect("sync_dividend");
+        println!(
+            "[dividend_backfill] 重拉 {} 只标的的 dividend(全历史, 限速约50分钟)",
+            symbols.len()
+        );
+        let dv = format!(
+            "div-stkdiv-backfill-{}",
+            chrono::Local::now().format("%Y%m%d%H%M")
+        );
+        let n =
+            quant_data::sync::sync_dividend(&db, &client, &symbols, "20190601", "20260917", &dv)
+                .await
+                .expect("sync_dividend");
         println!("[dividend_backfill] 完成 {} 行", n);
         // 验证: 送转字段非空
         let filled: i64 = sqlx::query_scalar(

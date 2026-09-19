@@ -42,12 +42,16 @@ pub struct CreateAccountInput {
 /// 注：用原生 `impl Future`（Rust 1.75+），暂非 dyn-compatible（参照 R11）。
 pub trait PaperAccountRepository {
     /// 查账号归属用户 ID（鉴权专用，重复组 B：5 处 SQL 完全相同）。
-    fn find_user_id(&self, id: &str)
-        -> impl std::future::Future<Output = Result<Option<String>, PaperRepositoryError>> + Send;
+    fn find_user_id(
+        &self,
+        id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<String>, PaperRepositoryError>> + Send;
 
     /// 查初始资金（重复组 A：4 处 SQL 完全相同，`initial_capital::double precision`）。
-    fn find_initial_capital(&self, id: &str)
-        -> impl std::future::Future<Output = Result<Option<f64>, PaperRepositoryError>> + Send;
+    fn find_initial_capital(
+        &self,
+        id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<f64>, PaperRepositoryError>> + Send;
 
     /// 更新 NAV 摘要（重复组 C：paper.rs:858/1220 两处 SQL 完全相同）。
     ///
@@ -74,8 +78,11 @@ pub trait PaperAccountRepository {
     /// 统一为并集 SQL，未传字段用表默认值（base_currency 默认 CNY，leverage 默认 false/1.0/fixed，
     /// signal_source 默认 factor，user_id/webhook 允许 NULL）。
     /// 返回新生成的 account_id（`pa-{uuid}` 前缀）。
-    fn create(&self, id: &str, input: &CreateAccountInput)
-        -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
+    fn create(
+        &self,
+        id: &str,
+        input: &CreateAccountInput,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send;
 }
 
 /// PostgreSQL 实现的 paper 账号仓储。
@@ -93,14 +100,17 @@ impl<'a> PaperAccountRepository for PgPaperAccountRepo<'a> {
     /// `SELECT user_id FROM paper_account WHERE paper_account_id = $1`
     ///
     /// 5 处原样收敛：accounts.rs:326/882/939/978/1081（SQL 完全相同）。
-    fn find_user_id(&self, id: &str) -> impl std::future::Future<Output = Result<Option<String>, PaperRepositoryError>> + Send {
+    fn find_user_id(
+        &self,
+        id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<String>, PaperRepositoryError>> + Send
+    {
         async move {
-            let row: Option<(Option<String>,)> = sqlx::query_as(
-                "SELECT user_id FROM paper_account WHERE paper_account_id = $1",
-            )
-            .bind(id)
-            .fetch_optional(self.pool)
-            .await?;
+            let row: Option<(Option<String>,)> =
+                sqlx::query_as("SELECT user_id FROM paper_account WHERE paper_account_id = $1")
+                    .bind(id)
+                    .fetch_optional(self.pool)
+                    .await?;
             Ok(row.and_then(|(uid,)| uid))
         }
     }
@@ -110,7 +120,10 @@ impl<'a> PaperAccountRepository for PgPaperAccountRepo<'a> {
     /// 4 处原样收敛：paper.rs:439/653/942 + accounts.rs:1151（SQL 完全相同）。
     /// 另 mvo_engine.rs:129（多查 strategy_version_id）+ report.rs:466（多查 max_drawdown_pct）
     /// 字段集不同，留 find_by_id 处理。
-    fn find_initial_capital(&self, id: &str) -> impl std::future::Future<Output = Result<Option<f64>, PaperRepositoryError>> + Send {
+    fn find_initial_capital(
+        &self,
+        id: &str,
+    ) -> impl std::future::Future<Output = Result<Option<f64>, PaperRepositoryError>> + Send {
         async move {
             let row: Option<(f64,)> = sqlx::query_as(
                 "SELECT initial_capital::double precision FROM paper_account WHERE paper_account_id = $1",
@@ -146,7 +159,11 @@ impl<'a> PaperAccountRepository for PgPaperAccountRepo<'a> {
         }
     }
 
-    fn create(&self, id: &str, input: &CreateAccountInput) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send {
+    fn create(
+        &self,
+        id: &str,
+        input: &CreateAccountInput,
+    ) -> impl std::future::Future<Output = Result<(), PaperRepositoryError>> + Send {
         async move {
             // 字段并集：统一 paper.rs（base_currency/webhook）+ accounts.rs（leverage/signal_source/user_id）。
             // cash = initial_capital（两处原语义一致）。status 固定 'active'。

@@ -88,8 +88,7 @@ pub async fn preload_trade_block_map(
     .fetch_all(db)
     .await
     .unwrap_or_default();
-    let mut map: std::collections::HashMap<String, TradeBlock> =
-        std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<String, TradeBlock> = std::collections::HashMap::new();
     for (sym, reason, lt) in rows {
         // 停牌在 UNION ALL 前置,先 insert;涨跌停后置,用 or_insert 不覆盖(停牌优先)
         map.entry(sym).or_insert(TradeBlock {

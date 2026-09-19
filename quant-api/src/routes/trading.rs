@@ -497,7 +497,10 @@ mod tests {
     fn fee_schedule_stamp_tax_sell_only() {
         let f = super::ExecutionFeeSchedule::default();
         // 印花税卖出单边 万2.5; 买入为 0
-        assert_eq!(f.stamp_tax("sell", Decimal::from(1_000_000)), Decimal::from(250));
+        assert_eq!(
+            f.stamp_tax("sell", Decimal::from(1_000_000)),
+            Decimal::from(250)
+        );
         assert_eq!(f.stamp_tax("buy", Decimal::from(1_000_000)), Decimal::ZERO);
     }
 

@@ -18,9 +18,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// 类型门禁：防止与 `TradeDate` 等 String 域标识符混用。
 /// 当前不校验格式（Step 5 引入 `Symbol::try_new` 做格式校验）。
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Symbol(pub String);
 
@@ -68,9 +66,7 @@ impl std::fmt::Display for Symbol {
 ///
 /// 类型门禁：与 `NaiveDate` 区分——`TradeDate` 强调"交易日"语义，
 /// 回测/调仓只在交易日推进。当前不校验是否真为交易日（Step 5 引入）。
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct TradeDate(pub chrono::NaiveDate);
 
 impl TradeDate {
@@ -105,9 +101,7 @@ impl AsRef<chrono::NaiveDate> for TradeDate {
 ///
 /// 类型门禁：当前全项目 `data_version_id` 散落为 `String`，易与 `strategy_version_id`
 /// 混用。本 newtype 后续 Step 4 集中化时切换调用方。
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct DataVersionId(pub String);
 

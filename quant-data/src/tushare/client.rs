@@ -45,7 +45,9 @@ impl Default for TushareConfig {
             base_url: std::env::var("TUSHARE_API_URL")
                 .unwrap_or_else(|_| "http://api.tushare.pro".to_string()),
             token: std::env::var("TUSHARE_TOKEN").unwrap_or_default(),
-            fallback_token: std::env::var("TUSHARE_TOKEN_ALT").ok().filter(|t| !t.is_empty()),
+            fallback_token: std::env::var("TUSHARE_TOKEN_ALT")
+                .ok()
+                .filter(|t| !t.is_empty()),
             fallback_base_url: std::env::var("TUSHARE_API_URL_ALT")
                 .ok()
                 .filter(|u| !u.is_empty()),
@@ -69,14 +71,7 @@ const INDEX_CLASSIFY_FIELDS: &[&str] = &[
 const INDEX_MEMBER_FIELDS: &[&str] = &[
     // 2026-09-08 修正: Tushare 申万成分接口实为 index_member_all(非 index_member),
     // 输出为三级分级字段。下游 row_from_map 已做新旧 key 双兼容。
-    "l1_code",
-    "l2_code",
-    "l3_code",
-    "ts_code",
-    "name",
-    "in_date",
-    "out_date",
-    "is_new",
+    "l1_code", "l2_code", "l3_code", "ts_code", "name", "in_date", "out_date", "is_new",
 ];
 const FINA_MAINBZ_FIELDS: &[&str] = &[
     "ts_code",
@@ -396,13 +391,22 @@ impl TushareClient {
         params: Vec<(&str, &str)>,
         fields: &[&str],
     ) -> QuantResult<TushareResponse<Vec<serde_json::Value>>> {
-        let primary = self.call_api_with_source::<Vec<serde_json::Value>>(
-            api_name, &params, fields, &self.config.base_url, &self.config.token, "tushare").await;
+        let primary = self
+            .call_api_with_source::<Vec<serde_json::Value>>(
+                api_name,
+                &params,
+                fields,
+                &self.config.base_url,
+                &self.config.token,
+                "tushare",
+            )
+            .await;
         match primary {
             Ok(resp) => Ok(resp),
             Err(primary_err) => {
                 let fallback = self.config.fallback_token.clone();
-                let fb_url = self.config
+                let fb_url = self
+                    .config
                     .fallback_base_url
                     .clone()
                     .unwrap_or_else(|| self.config.base_url.clone());
@@ -417,7 +421,14 @@ impl TushareClient {
                         );
                         // 限流键按凭证拆分: 两套账号额度独立, 不共用一个桶
                         self.call_api_with_source::<Vec<serde_json::Value>>(
-                            api_name, &params, fields, &fb_url, &fb, "tushare-alt").await
+                            api_name,
+                            &params,
+                            fields,
+                            &fb_url,
+                            &fb,
+                            "tushare-alt",
+                        )
+                        .await
                     }
                     _ => Err(primary_err),
                 }
@@ -450,12 +461,7 @@ impl TushareClient {
 
         debug!(api = %api_name, "Tushare API 调用");
 
-        let resp = self
-            .http
-            .post(base_url)
-            .json(&request)
-            .send()
-            .await?;
+        let resp = self.http.post(base_url).json(&request).send().await?;
 
         if !resp.status().is_success() {
             return Err(QuantError::Api {

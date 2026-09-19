@@ -36,7 +36,10 @@ async fn v24_account_has_marked_positions() {
     .await
     .unwrap_or(0);
 
-    assert!(priced > 0, "v24 账号应有持仓估值,无估值说明 mark_to_market 路径断裂");
+    assert!(
+        priced > 0,
+        "v24 账号应有持仓估值,无估值说明 mark_to_market 路径断裂"
+    );
 }
 
 /// v24 active 账号近期应有 NAV 快照(rebalance 后写入)。
@@ -59,7 +62,10 @@ async fn v24_account_has_recent_nav_snapshot() {
     .await
     .unwrap_or(0);
 
-    assert!(snap_cnt > 0, "v24 账号近 3 天应有 NAV 快照,无快照说明调仓收尾路径断裂");
+    assert!(
+        snap_cnt > 0,
+        "v24 账号近 3 天应有 NAV 快照,无快照说明调仓收尾路径断裂"
+    );
 }
 
 /// v24 杠杆账号的 load_account SELECT 不应触发 ColumnNotFound panic（7/30 account.rs:216 回归守卫）。

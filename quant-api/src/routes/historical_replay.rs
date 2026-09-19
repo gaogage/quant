@@ -52,7 +52,10 @@ fn parse_date(s: &str) -> Result<NaiveDate, String> {
     Err(format!("日期格式错误: {} (需要 YYYYMMDD 或 YYYY-MM-DD)", s))
 }
 
-async fn run_historical_replay(db: &sqlx::PgPool, req: HistoricalReplayRequest) -> Result<Value, String> {
+async fn run_historical_replay(
+    db: &sqlx::PgPool,
+    req: HistoricalReplayRequest,
+) -> Result<Value, String> {
     let account_id = req.paper_account_id.trim().to_string();
     let start = parse_date(&req.start_date)?;
     let end = parse_date(&req.end_date)?;
@@ -71,7 +74,9 @@ async fn run_historical_replay(db: &sqlx::PgPool, req: HistoricalReplayRequest) 
 
     // 2. 加载策略配置（A股选股方式 + ETF + 杠杆参数都在策略里）
     // 账号挂的 strategy_version_id 决定策略；杠杆参数读账号 leverage_* 字段。
-    let sid = strategy_id.as_deref().ok_or("账号未挂策略（strategy_version_id 空）")?;
+    let sid = strategy_id
+        .as_deref()
+        .ok_or("账号未挂策略（strategy_version_id 空）")?;
     let rs = crate::routes::strategy::load_resolved_strategy(db, sid)
         .await
         .map_err(|e| format!("load strategy: {}", e))?;
@@ -155,13 +160,12 @@ async fn run_historical_replay(db: &sqlx::PgPool, req: HistoricalReplayRequest) 
     };
 
     // 5. 末期交易笔数（run_daily_simulation 内部已落交易与持仓，这里仅统计）
-    let total_trades: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM paper_order WHERE paper_account_id = $1",
-    )
-    .bind(&account_id)
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    let total_trades: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM paper_order WHERE paper_account_id = $1")
+            .bind(&account_id)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
 
     // 6. 逐年收益
     let yearly = compute_yearly_from_navs(&navs);
@@ -236,7 +240,10 @@ async fn run_historical_replay(db: &sqlx::PgPool, req: HistoricalReplayRequest) 
 /// 把 [start, end] 区间按 oos_window_days 个交易日切成不重叠的连续 OOS 段。
 /// 返回每段 (段序号, 段内首交易日, 段内末交易日)。
 /// 段边界按交易日（非日历日）对齐：第 1..=N 天为段1，N+1..=2N 为段2，以此类推。
-fn split_oos_windows(trade_days: &[NaiveDate], oos_window_days: usize) -> Vec<(usize, NaiveDate, NaiveDate)> {
+fn split_oos_windows(
+    trade_days: &[NaiveDate],
+    oos_window_days: usize,
+) -> Vec<(usize, NaiveDate, NaiveDate)> {
     if oos_window_days == 0 || trade_days.is_empty() {
         return Vec::new();
     }
@@ -306,7 +313,11 @@ async fn run_wfa_stitched(
     // 2. 切窗
     let windows = split_oos_windows(&trade_days, oos_window_days);
     if windows.is_empty() {
-        return Err(format!("切窗为空(交易日 {} 段长 {})", trade_days.len(), oos_window_days));
+        return Err(format!(
+            "切窗为空(交易日 {} 段长 {})",
+            trade_days.len(),
+            oos_window_days
+        ));
     }
 
     // 3. 每窗 run_daily_simulation(reset=true) 取 DailyNav
@@ -361,7 +372,11 @@ async fn run_wfa_stitched(
 
     // 5. 达标判定（蓝图 §2.2：stitched OOS Calmar > 1.2）
     let passed = stitched.calmar > 1.2;
-    let candidate_tier = if passed { "professional_observation" } else { "defensive_candidate" };
+    let candidate_tier = if passed {
+        "professional_observation"
+    } else {
+        "defensive_candidate"
+    };
 
     // 6. 归因：拖累最重的窗口（最低 Calmar）
     let mut sorted_summaries = window_summaries.clone();
@@ -588,12 +603,36 @@ mod tests {
     #[test]
     fn test_stitch_window_returns_concatenates() {
         let w1 = vec![
-            DailyNav { date: d("2024-01-01"), nav: 1.0, net_return: 0.01, leverage: 1.0, regime: 0.0 },
-            DailyNav { date: d("2024-01-02"), nav: 1.01, net_return: 0.02, leverage: 1.0, regime: 0.0 },
+            DailyNav {
+                date: d("2024-01-01"),
+                nav: 1.0,
+                net_return: 0.01,
+                leverage: 1.0,
+                regime: 0.0,
+            },
+            DailyNav {
+                date: d("2024-01-02"),
+                nav: 1.01,
+                net_return: 0.02,
+                leverage: 1.0,
+                regime: 0.0,
+            },
         ];
         let w2 = vec![
-            DailyNav { date: d("2024-01-03"), nav: 1.0, net_return: 0.03, leverage: 1.0, regime: 0.0 },
-            DailyNav { date: d("2024-01-04"), nav: 1.03, net_return: -0.01, leverage: 1.0, regime: 0.0 },
+            DailyNav {
+                date: d("2024-01-03"),
+                nav: 1.0,
+                net_return: 0.03,
+                leverage: 1.0,
+                regime: 0.0,
+            },
+            DailyNav {
+                date: d("2024-01-04"),
+                nav: 1.03,
+                net_return: -0.01,
+                leverage: 1.0,
+                regime: 0.0,
+            },
         ];
         let rets = stitch_window_returns(&[w1, w2]);
         // 每窗跳过首日建仓跳变:第1窗保留 0.02,第2窗保留 -0.01

@@ -568,7 +568,10 @@ pub async fn nav_history(
     // cumulative_return 是自初始资金的绝对累计收益（如 54.98%），
     // relative_return 是相对选中时间段首日的累计收益（首日=0%），与基准曲线对齐，
     // 供 accounts 页面「收益率曲线 vs 沪深300」图用（两条曲线起点都归零）。
-    let first_nav = nav_rows.first().map(|(_, nav, _, _, _)| *nav).filter(|v| *v > 0.0);
+    let first_nav = nav_rows
+        .first()
+        .map(|(_, nav, _, _, _)| *nav)
+        .filter(|v| *v > 0.0);
     let nav_data: Vec<serde_json::Value> = nav_rows
         .into_iter()
         .map(|(d, nav, dr, cr, mdd)| {
@@ -793,7 +796,16 @@ pub async fn rebalance_history(
     .unwrap_or_default();
 
     // 2. 交易明细（全部 filled 订单，含成交价）
-    let trades: Vec<(chrono::NaiveDate, String, String, String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, String)> = sqlx::query_as(
+    let trades: Vec<(
+        chrono::NaiveDate,
+        String,
+        String,
+        String,
+        Option<rust_decimal::Decimal>,
+        Option<rust_decimal::Decimal>,
+        Option<rust_decimal::Decimal>,
+        String,
+    )> = sqlx::query_as(
         "SELECT DATE(o.created_at) as trade_date,
                 o.order_id, o.symbol, o.side,
                 o.quantity, o.target_price,
@@ -814,15 +826,18 @@ pub async fn rebalance_history(
         std::collections::HashMap::new();
     for (trade_date, oid, symbol, side, qty, target_price, fill_price, status) in trades {
         let key = trade_date.format("%Y-%m-%d").to_string();
-        trades_by_date.entry(key).or_default().push(serde_json::json!({
-            "order_id": oid,
-            "symbol": symbol,
-            "side": side,
-            "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
-            "target_price": target_price.map(|v| v.to_string()),
-            "fill_price": fill_price.map(|v| v.to_string()),
-            "status": status,
-        }));
+        trades_by_date
+            .entry(key)
+            .or_default()
+            .push(serde_json::json!({
+                "order_id": oid,
+                "symbol": symbol,
+                "side": side,
+                "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
+                "target_price": target_price.map(|v| v.to_string()),
+                "fill_price": fill_price.map(|v| v.to_string()),
+                "status": status,
+            }));
     }
 
     let history: Vec<serde_json::Value> = rows
@@ -864,7 +879,11 @@ pub async fn create_account(
     let input = crate::routes::shared::CreateAccountInput {
         name: req.name.clone(),
         base_currency: "CNY".to_string(),
-        account_type: req.account_type.as_deref().unwrap_or("simulated").to_string(),
+        account_type: req
+            .account_type
+            .as_deref()
+            .unwrap_or("simulated")
+            .to_string(),
         initial_capital: req.initial_capital.unwrap_or(1_000_000.0),
         leverage_enabled: req.leverage_enabled.unwrap_or(false),
         leverage_mode: req.leverage_mode.as_deref().unwrap_or("fixed").to_string(),
@@ -874,7 +893,10 @@ pub async fn create_account(
         dingtalk_webhook_url: None,
     };
 
-    match PgPaperAccountRepo::new(&state.db).create(&aid, &input).await {
+    match PgPaperAccountRepo::new(&state.db)
+        .create(&aid, &input)
+        .await
+    {
         Ok(_) => Json(serde_json::json!({"code": 0, "data": {"account_id": aid}})),
         Err(e) => Json(serde_json::json!({"code": 1, "message": format!("创建失败: {}", e)})),
     }
@@ -892,7 +914,9 @@ pub async fn update_account(
     // 校验所有权（admin 可改任意账号）
     let is_admin = user.role == "admin";
     if !is_admin {
-        let owner = PgPaperAccountRepo::new(&state.db).find_user_id(&account_id).await;
+        let owner = PgPaperAccountRepo::new(&state.db)
+            .find_user_id(&account_id)
+            .await;
         match owner {
             Ok(Some(oid)) if oid == user.user_id => {}
             Ok(None) => {} // 无主账号允许修改
@@ -944,7 +968,9 @@ pub async fn delete_account(
 ) -> impl IntoResponse {
     let is_admin = user.role == "admin";
     if !is_admin {
-        let owner = PgPaperAccountRepo::new(&state.db).find_user_id(&account_id).await;
+        let owner = PgPaperAccountRepo::new(&state.db)
+            .find_user_id(&account_id)
+            .await;
         match owner {
             Ok(Some(oid)) if oid == user.user_id => {}
             Ok(None) => {}
@@ -978,7 +1004,9 @@ pub async fn reset_account(
 ) -> impl IntoResponse {
     let is_admin = user.role == "admin";
     if !is_admin {
-        let owner = PgPaperAccountRepo::new(&state.db).find_user_id(&account_id).await;
+        let owner = PgPaperAccountRepo::new(&state.db)
+            .find_user_id(&account_id)
+            .await;
         match owner {
             Ok(Some(oid)) if oid == user.user_id => {}
             Ok(None) => {}
@@ -1076,7 +1104,9 @@ pub async fn push_account_dingtalk(
     // 权限校验
     let is_admin = user.role == "admin";
     if !is_admin {
-        let owner = PgPaperAccountRepo::new(&state.db).find_user_id(&account_id).await;
+        let owner = PgPaperAccountRepo::new(&state.db)
+            .find_user_id(&account_id)
+            .await;
         match owner {
             Ok(Some(oid)) if oid == user.user_id => {}
             Ok(None) => {}
@@ -1141,7 +1171,11 @@ pub async fn push_account_dingtalk(
     let mdd = perf.and_then(|(m,)| m).unwrap_or(0.0); // DB 存的是小数（0.1238 = 12.38%），dingtalk.rs 会 ×100 显示为百分比
     let cum_ret = if nav > 0.0 {
         // 从 paper_account 获取 initial_capital 计算
-        let cap = PgPaperAccountRepo::new(&state.db).find_initial_capital(&account_id).await.ok().flatten();
+        let cap = PgPaperAccountRepo::new(&state.db)
+            .find_initial_capital(&account_id)
+            .await
+            .ok()
+            .flatten();
         let init = cap.unwrap_or(nav);
         if init > 0.0 {
             nav / init - 1.0

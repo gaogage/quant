@@ -43,8 +43,7 @@ fn get_i64(m: &Map<String, Value>, key: &str) -> Option<i64> {
     m.get(key).and_then(|v| v.as_i64())
 }
 fn to_decimal(v: Option<f64>) -> Decimal {
-    v.and_then(Decimal::from_f64_retain)
-        .unwrap_or_default()
+    v.and_then(Decimal::from_f64_retain).unwrap_or_default()
 }
 fn to_opt_decimal(v: Option<f64>) -> Option<Decimal> {
     v.and_then(Decimal::from_f64_retain)
@@ -1389,7 +1388,10 @@ pub async fn sync_fund_nav(
                 Err(e) => {
                     let err_str = e.to_string();
                     if attempt == 0 && (err_str.contains("40203") || err_str.contains("4000")) {
-                        warn!("fund_nav rate-limit, waiting 5s for {}: {}", symbol, err_str);
+                        warn!(
+                            "fund_nav rate-limit, waiting 5s for {}: {}",
+                            symbol, err_str
+                        );
                         tokio::time::sleep(StdDuration::from_secs(5)).await;
                         continue;
                     }
@@ -1471,7 +1473,15 @@ pub async fn sync_fund_div(
     .await?;
     let mut total = 0usize;
     for symbol in symbols {
-        let mut rows: Vec<(String, Option<NaiveDate>, Option<NaiveDate>, String, Option<NaiveDate>, Option<NaiveDate>, Option<f64>)> = Vec::new();
+        let mut rows: Vec<(
+            String,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            String,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            Option<f64>,
+        )> = Vec::new();
         let mut last_err: Option<String> = None;
         for attempt in 0..2 {
             match client.fund_div(Some(symbol), None).await {
@@ -1504,7 +1514,10 @@ pub async fn sync_fund_div(
                 Err(e) => {
                     let err_str = e.to_string();
                     if attempt == 0 && (err_str.contains("40203") || err_str.contains("4000")) {
-                        warn!("fund_div rate-limit, waiting 5s for {}: {}", symbol, err_str);
+                        warn!(
+                            "fund_div rate-limit, waiting 5s for {}: {}",
+                            symbol, err_str
+                        );
                         tokio::time::sleep(StdDuration::from_secs(5)).await;
                         continue;
                     }
@@ -1552,13 +1565,25 @@ pub async fn sync_fund_div(
     }
     repository::update_sync_task(pool, &task_id, "completed", total as i32, total as i32, 0)
         .await?;
-    info!("[fund_div] {} 标的同步完成, {} 条实施分红", symbols.len(), total);
+    info!(
+        "[fund_div] {} 标的同步完成, {} 条实施分红",
+        symbols.len(),
+        total
+    );
     Ok(total)
 }
 
 async fn upsert_fund_div_rows(
     pool: &PgPool,
-    rows: &[(String, Option<NaiveDate>, Option<NaiveDate>, String, Option<NaiveDate>, Option<NaiveDate>, Option<f64>)],
+    rows: &[(
+        String,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        String,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        Option<f64>,
+    )],
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     for (symbol, ann, ex, proc, record, pay, cash) in rows {
@@ -1586,7 +1611,6 @@ async fn upsert_fund_div_rows(
     tx.commit().await?;
     Ok(())
 }
-
 
 // ─── sync_moneyflow ─────────────────────────────────────────────
 
@@ -3853,7 +3877,9 @@ pub async fn sync_shareholder_structure(
                 )
                 .await?;
 
-                if completed_units.is_multiple_of(progress_interval) || completed_units == total_units {
+                if completed_units.is_multiple_of(progress_interval)
+                    || completed_units == total_units
+                {
                     let progress = ((completed_units * 100) / total_units.max(1)).min(99) as i32;
                     repository::heartbeat_sync_task(
                         pool,
@@ -4089,9 +4115,10 @@ pub async fn sync_adj_factor(
                             .collect();
                         if !factors.is_empty() {
                             total_rows += factors.len();
-                            if let Err(e) =
-                                repository::upsert_adj_factors_batch(pool, &factors, dv_id, "tushare")
-                                    .await
+                            if let Err(e) = repository::upsert_adj_factors_batch(
+                                pool, &factors, dv_id, "tushare",
+                            )
+                            .await
                             {
                                 warn!("{} 复权因子批量 upsert 失败: {}", td, e);
                             }
@@ -4113,7 +4140,10 @@ pub async fn sync_adj_factor(
                 info!("复权因子批量进度: {}/{} 天", di, total_days);
             }
         }
-        info!("[sync] adj_factor 批量同步完成: {} 天, {} 条", total_days, total_rows);
+        info!(
+            "[sync] adj_factor 批量同步完成: {} 天, {} 条",
+            total_days, total_rows
+        );
         repository::update_sync_task(
             pool,
             &task_id,
@@ -4164,12 +4194,20 @@ pub async fn sync_adj_factor(
                     let fail_n = fail.load(Ordering::Relaxed) as i32;
                     let progress = (ok_n * 100 / total.max(1) as i32).min(99);
                     let _ = repository::heartbeat_sync_task(
-                        &pool, &task_id, total as i32, ok_n, fail_n, progress,
+                        &pool,
+                        &task_id,
+                        total as i32,
+                        ok_n,
+                        fail_n,
+                        progress,
                     )
                     .await;
                     info!("复权因子进度: {}/{}", i, total);
                 }
-                match client.adj_factor(Some(sym), None, Some(&start), Some(&end), None, None).await {
+                match client
+                    .adj_factor(Some(sym), None, Some(&start), Some(&end), None, None)
+                    .await
+                {
                     Ok(resp) => {
                         if let Some(data) = resp.data {
                             let maps = data.to_maps();
@@ -4886,17 +4924,43 @@ pub async fn sync_forecast_by_day(
     use repository as repo;
     let d = NaiveDate::parse_from_str(date, "%Y%m%d")?;
     repo::create_sync_task_with_context(
-        pool, dv_id, "forecast", "tushare", None, Some(d), Some(d), "running", None,
-    ).await?;
-    repo::create_data_version(pool, dv_id, "earnings forecast sync (by-day)", "tushare",
-        &["market_stock_forecast"], d, d).await?;
+        pool,
+        dv_id,
+        "forecast",
+        "tushare",
+        None,
+        Some(d),
+        Some(d),
+        "running",
+        None,
+    )
+    .await?;
+    repo::create_data_version(
+        pool,
+        dv_id,
+        "earnings forecast sync (by-day)",
+        "tushare",
+        &["market_stock_forecast"],
+        d,
+        d,
+    )
+    .await?;
     let page_limit = 2000usize;
     let mut total_rows = 0usize;
     let mut offset = 0usize;
     loop {
         let resp = client
-            .forecast(None, Some(date), None, None, None, None,
-                      Some(page_limit), Some(offset)).await?;
+            .forecast(
+                None,
+                Some(date),
+                None,
+                None,
+                None,
+                None,
+                Some(page_limit),
+                Some(offset),
+            )
+            .await?;
         let maps = resp.data.map(|data| data.to_maps()).unwrap_or_default();
         let n = maps.len();
         let rows: Vec<MarketStockForecast> =
@@ -4910,8 +4974,15 @@ pub async fn sync_forecast_by_day(
         }
         offset += page_limit;
     }
-    repo::update_sync_task(pool, dv_id, "completed", total_rows as i32,
-                           total_rows as i32, 0).await?;
+    repo::update_sync_task(
+        pool,
+        dv_id,
+        "completed",
+        total_rows as i32,
+        total_rows as i32,
+        0,
+    )
+    .await?;
     Ok(total_rows)
 }
 
@@ -6457,7 +6528,9 @@ pub async fn sync_futures_price_chain(
                 )
                 .await?;
 
-                if completed_units.is_multiple_of(progress_interval) || completed_units == total_units {
+                if completed_units.is_multiple_of(progress_interval)
+                    || completed_units == total_units
+                {
                     let progress = if total_units > 0 {
                         ((completed_units * 100) / total_units).min(99) as i32
                     } else {
@@ -7032,7 +7105,11 @@ fn industry_membership_row_from_map(
     // index_member_all 输出 ts_code/name/l1-l3 字段(旧接口 con_code/con_name/index_code 双兼容)
     let symbol = {
         let v = get_str(item, "con_code");
-        if v.is_empty() { get_str(item, "ts_code") } else { v }
+        if v.is_empty() {
+            get_str(item, "ts_code")
+        } else {
+            v
+        }
     };
     let in_date = to_date(&get_str(item, "in_date"))?;
     let out_date = to_date(&get_str(item, "out_date"));
@@ -7704,7 +7781,11 @@ pub async fn sync_limit_list(
         total += 1;
     }
 
-    info!(total, date = trade_date, "涨跌停数据同步完成(limit_type 待 derive)");
+    info!(
+        total,
+        date = trade_date,
+        "涨跌停数据同步完成(limit_type 待 derive)"
+    );
 
     // 补全 limit_type 方向(U涨停/D跌停):用当日 close vs pre_close×limit_rate 推导。
     // Tushare limit_list_d 不返回方向,derive_limit_list_from_daily_bars 用日线 close vs pre_close
@@ -7712,8 +7793,14 @@ pub async fn sync_limit_list(
     // derive 用 [start,end] 范围,这里单日 [trade_date, trade_date]。
     // derive 用 close≥pre_close×(1+rate) 判 U(触及涨停价即标,含触及未封板,回测保守禁买更安全)。
     match derive_limit_list_from_daily_bars(pool, trade_date, trade_date).await {
-        Ok(n) => info!(derived = n, date = trade_date, "涨跌停 limit_type 方向补全完成"),
-        Err(e) => warn!(date = trade_date, err = %e, "derive limit_type 失败(已写入 symbol,limit_type 仍 NULL)"),
+        Ok(n) => info!(
+            derived = n,
+            date = trade_date,
+            "涨跌停 limit_type 方向补全完成"
+        ),
+        Err(e) => {
+            warn!(date = trade_date, err = %e, "derive limit_type 失败(已写入 symbol,limit_type 仍 NULL)")
+        }
     }
 
     record_event_sync_completion(pool, "limit_daily", "tushare:limit_list_d", d, total).await?;
@@ -8972,12 +9059,11 @@ mod tests {
         let n = sync_fund_basic(&pool, &client).await.expect("sync");
         assert!(n > 0, "应同步到 ETF");
         // 验证 518880 list_date 非 NULL
-        let ld: Option<chrono::NaiveDate> = sqlx::query_scalar(
-            "SELECT list_date FROM market_stock WHERE symbol = '518880.SH'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("query");
+        let ld: Option<chrono::NaiveDate> =
+            sqlx::query_scalar("SELECT list_date FROM market_stock WHERE symbol = '518880.SH'")
+                .fetch_one(&pool)
+                .await
+                .expect("query");
         assert!(ld.is_some(), "518880.SH list_date 应被回填");
     }
 }
@@ -9013,9 +9099,16 @@ async fn sync_candidate_etf_pool() {
     .map(|s| s.to_string())
     .collect();
 
-    let n = sync_fund_daily(&db, &tushare, &symbols, "20140101", "20260903", "dv-etf-pool-expand-20260903")
-        .await
-        .expect("sync fund daily");
+    let n = sync_fund_daily(
+        &db,
+        &tushare,
+        &symbols,
+        "20140101",
+        "20260903",
+        "dv-etf-pool-expand-20260903",
+    )
+    .await
+    .expect("sync fund daily");
     println!("同步完成，rows = {}", n);
     assert!(n > 0, "应同步到数据");
 }
@@ -9040,12 +9133,11 @@ async fn backfill_stale_sources() {
     let tushare = crate::tushare::client::TushareClient::new(cfg).expect("client");
 
     // 全市场活跃股票
-    let symbols: Vec<String> = sqlx::query_scalar(
-        "SELECT symbol FROM market_stock WHERE list_status='L' ORDER BY symbol",
-    )
-    .fetch_all(&db)
-    .await
-    .expect("symbols");
+    let symbols: Vec<String> =
+        sqlx::query_scalar("SELECT symbol FROM market_stock WHERE list_status='L' ORDER BY symbol")
+            .fetch_all(&db)
+            .await
+            .expect("symbols");
     println!("[backfill] symbols = {}", symbols.len());
 
     // 1) 财务指标（因子族根）：sync_financial_data 全量拉（内部增量）
@@ -9055,13 +9147,29 @@ async fn backfill_stale_sources() {
     println!("[backfill] financial: stmt={} ind={}", stmt, ind);
 
     // 2) 分红（5-14 断）
-    let n = sync_dividend(&db, &tushare, &symbols, "20260501", "20260905", "dv-dividend-backfill-20260905")
-        .await.expect("dividend");
+    let n = sync_dividend(
+        &db,
+        &tushare,
+        &symbols,
+        "20260501",
+        "20260905",
+        "dv-dividend-backfill-20260905",
+    )
+    .await
+    .expect("dividend");
     println!("[backfill] dividend rows={}", n);
 
     // 3) 限售解禁（6-16 断）
-    let n = sync_share_float(&db, &tushare, &symbols, "20260601", "20260905", "dv-float-backfill-20260905")
-        .await.expect("float");
+    let n = sync_share_float(
+        &db,
+        &tushare,
+        &symbols,
+        "20260601",
+        "20260905",
+        "dv-float-backfill-20260905",
+    )
+    .await
+    .expect("float");
     println!("[backfill] share_float rows={}", n);
 }
 
@@ -9084,15 +9192,14 @@ async fn share_float_monthly_backfill() {
     let tushare = crate::tushare::client::TushareClient::new(cfg).expect("client");
 
     let empty: Vec<String> = vec![];
-    let windows = [
-        ("20260616", "20260622"),
-        ("20260623", "20260630"),
-    ];
+    let windows = [("20260616", "20260622"), ("20260623", "20260630")];
     for (s, e) in windows {
-        let n = sync_share_float(&db, &tushare, &empty, s, e,
-            &format!("dv-float-mb-{}", s))
+        let n = sync_share_float(&db, &tushare, &empty, s, e, &format!("dv-float-mb-{}", s))
             .await
-            .unwrap_or_else(|err| { println!("[float-mb] {}..{} err: {}", s, e, err); 0 });
+            .unwrap_or_else(|err| {
+                println!("[float-mb] {}..{} err: {}", s, e, err);
+                0
+            });
         println!("[float-mb] {}..{} rows={}", s, e, n);
     }
 }
@@ -9122,23 +9229,40 @@ async fn share_float_by_anndate() {
         let ann = d.format("%Y%m%d").to_string();
         let mut offset = 0usize;
         loop {
-            let resp = client.share_float(None, Some(&ann), None, None, Some(2000), Some(offset))
-                .await.expect("api");
+            let resp = client
+                .share_float(None, Some(&ann), None, None, Some(2000), Some(offset))
+                .await
+                .expect("api");
             let maps = resp.data.map(|x| x.to_maps()).unwrap_or_default();
             let n = maps.len();
-            if n == 0 { break; }
-            let rows: Vec<_> = maps.iter().filter_map(share_float_row_from_map)
-                .filter(|r| r.float_date >= d0 && r.float_date <= d1).collect();
+            if n == 0 {
+                break;
+            }
+            let rows: Vec<_> = maps
+                .iter()
+                .filter_map(share_float_row_from_map)
+                .filter(|r| r.float_date >= d0 && r.float_date <= d1)
+                .collect();
             if !rows.is_empty() {
                 let dv = format!("dv-float-ad-{}", ann);
                 // FK 前置注册（quant-adj-factor-backfill-fk-silent-fail 已知坑）
                 let _ = crate::repository::create_data_version(
-                    &db, &dv, "share_float ann_date backfill", "tushare",
-                    &["market_stock_share_float"], d0, d1).await;
+                    &db,
+                    &dv,
+                    "share_float ann_date backfill",
+                    "tushare",
+                    &["market_stock_share_float"],
+                    d0,
+                    d1,
+                )
+                .await;
                 total += crate::repository::upsert_share_float_batch(&db, &rows, &dv, "tushare")
-                    .await.expect("upsert");
+                    .await
+                    .expect("upsert");
             }
-            if n < 2000 { break; }
+            if n < 2000 {
+                break;
+            }
             offset += 2000;
         }
         println!("[float-ad] ann={} 累计入库={}", ann, total);

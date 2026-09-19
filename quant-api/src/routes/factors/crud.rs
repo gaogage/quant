@@ -16,8 +16,8 @@ use tracing::info;
 use quant_factor::factors::price_volume::*;
 use quant_factor::neutralize::NeutralizeConfig;
 
-use crate::AppState;
 use super::*;
+use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterFactorDefinitionRequest {
@@ -410,7 +410,6 @@ pub(crate) struct FinancialFactorSpec {
     pub(crate) category: &'static str,
 }
 
-
 pub(crate) fn parse_financial_factor(name: &str) -> Option<FinancialFactorSpec> {
     match name {
         "roe" | "roe_ttm" => Some(FinancialFactorSpec {
@@ -464,7 +463,6 @@ pub(crate) fn parse_financial_factor(name: &str) -> Option<FinancialFactorSpec> 
         _ => None,
     }
 }
-
 
 pub async fn sync_factor_values(
     State(state): State<Arc<AppState>>,
@@ -588,7 +586,6 @@ pub async fn sync_factor_values(
         }
     }))
 }
-
 
 pub async fn sync_financial_factor_values(
     State(state): State<Arc<AppState>>,
@@ -734,7 +731,6 @@ pub async fn sync_financial_factor_values(
 }
 
 // ─── Batch sync all symbols (inline, no callback overhead) ───────
-
 
 pub async fn batch_sync_factors(
     State(state): State<Arc<AppState>>,
@@ -1093,7 +1089,6 @@ pub struct EvaluateAllRequest {
 fn default_horizon() -> i16 {
     1
 }
-
 
 pub async fn evaluate_all_factors(
     State(state): State<Arc<AppState>>,
@@ -1683,7 +1678,6 @@ pub struct NeutralizeRequest {
     pub do_size: bool,
 }
 
-
 pub async fn neutralize_factors(
     State(state): State<Arc<AppState>>,
     Json(req): Json<NeutralizeRequest>,
@@ -1833,7 +1827,6 @@ pub async fn neutralize_factors(
     }))
 }
 
-
 #[cfg(test)]
 mod stale_pv_recompute_tests {
     use quant_factor::batch::{batch_compute_factors, BatchConfig};
@@ -1865,15 +1858,27 @@ mod stale_pv_recompute_tests {
         // 单线程 test runtime 不支持 block_in_place——预载 bar 到全局缓存，
         // saver 只收集，循环结束后统一落库。
         use std::sync::Mutex;
-        let cache: Arc<Mutex<HashMap<(String, chrono::NaiveDate, chrono::NaiveDate), HashMap<String, Vec<quant_factor::types::DailyBar>>>>> = Arc::new(Mutex::new(HashMap::new()));
-        let collected: Arc<Mutex<Vec<(String, Vec<(String, chrono::NaiveDate, f64, bool)>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let cache: Arc<
+            Mutex<
+                HashMap<
+                    (String, chrono::NaiveDate, chrono::NaiveDate),
+                    HashMap<String, Vec<quant_factor::types::DailyBar>>,
+                >,
+            >,
+        > = Arc::new(Mutex::new(HashMap::new()));
+        let collected: Arc<Mutex<Vec<(String, Vec<(String, chrono::NaiveDate, f64, bool)>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let saver: Arc<
             dyn Fn(&str, &str, &[(String, chrono::NaiveDate, f64, bool)]) -> Result<usize, String>
-                + Send + Sync,
+                + Send
+                + Sync,
         > = {
             let collected = collected.clone();
             Arc::new(move |name, _ver, vals| {
-                collected.lock().unwrap().push((name.to_string(), vals.to_vec()));
+                collected
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), vals.to_vec()));
                 Ok(vals.len())
             })
         };
@@ -1882,7 +1887,9 @@ mod stale_pv_recompute_tests {
         {
             let s = chrono::NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
             let e = chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap();
-            let all = load_bars_static(&db, &symbols, &s, &e).await.expect("preload");
+            let all = load_bars_static(&db, &symbols, &s, &e)
+                .await
+                .expect("preload");
             let mut c = cache.lock().unwrap();
             // 只存一份全集（loader2 忽略 chunk key 直接返回全集）。
             // 勿按 symbol 逐份 clone：5200 份全量拷贝会 OOM 被 SIGKILL（2026-09-16 实测）。
@@ -1890,11 +1897,26 @@ mod stale_pv_recompute_tests {
         }
         // loader 改为忽略 key 直接返回全集——重写 loader 闭包为无缓存版
         let all_bars: Arc<HashMap<String, Vec<quant_factor::types::DailyBar>>> = Arc::new(
-            cache.lock().unwrap().get(&(String::new(), chrono::NaiveDate::from_ymd_opt(2026,7,10).unwrap(), chrono::NaiveDate::from_ymd_opt(2026,9,15).unwrap())).cloned().unwrap_or_default()
+            cache
+                .lock()
+                .unwrap()
+                .get(&(
+                    String::new(),
+                    chrono::NaiveDate::from_ymd_opt(2026, 7, 10).unwrap(),
+                    chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap(),
+                ))
+                .cloned()
+                .unwrap_or_default(),
         );
         let loader2: Arc<
-            dyn Fn(&[String], chrono::NaiveDate, chrono::NaiveDate) -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String>
-                + Send + Sync,
+            dyn Fn(
+                    &[String],
+                    chrono::NaiveDate,
+                    chrono::NaiveDate,
+                )
+                    -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String>
+                + Send
+                + Sync,
         > = {
             let all = all_bars.clone();
             Arc::new(move |_syms, _s, _e| Ok((*all).clone()))
@@ -1915,7 +1937,9 @@ mod stale_pv_recompute_tests {
         }
         // 统一落库
         for (code, vals) in collected.lock().unwrap().iter() {
-            let n = save_factor_values(&db, code, "1.0.0", vals).await.expect("save");
+            let n = save_factor_values(&db, code, "1.0.0", vals)
+                .await
+                .expect("save");
             println!("[pv-rc] {} 落库 {} 行", code, n);
         }
     }
@@ -1940,12 +1964,20 @@ mod stale_pv_recompute_tests {
             .map_err(|e| e.to_string())?;
         let mut m: HashMap<String, Vec<quant_factor::types::DailyBar>> = HashMap::new();
         for (sym, d, o, h, l, c, v, pc) in rows {
-            m.entry(sym.clone()).or_default().push(quant_factor::types::DailyBar {
-                symbol: sym, trade_date: d,
-                open: o, high: h, low: l, close: c, volume: v,
-                pre_close: pc,
-                change_pct: None, amount: Decimal::ZERO,
-            });
+            m.entry(sym.clone())
+                .or_default()
+                .push(quant_factor::types::DailyBar {
+                    symbol: sym,
+                    trade_date: d,
+                    open: o,
+                    high: h,
+                    low: l,
+                    close: c,
+                    volume: v,
+                    pre_close: pc,
+                    change_pct: None,
+                    amount: Decimal::ZERO,
+                });
         }
         Ok(m)
     }
@@ -1959,7 +1991,9 @@ mod stale_pv_recompute_tests {
         use rust_decimal::Decimal;
         let mut n = 0usize;
         for (sym, d, v, valid) in vals {
-            if !valid { continue; }
+            if !valid {
+                continue;
+            }
             let r = sqlx::query(
                 "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
                  VALUES ($1, '1.0.0', $2, $3, $4, $4, $3)
@@ -2011,24 +2045,41 @@ mod stale_pv_recompute_tests {
         let mut total_saved = 0usize;
         for (bi, chunk_syms) in symbols.chunks(batch_n).enumerate() {
             let chunk_syms: Vec<String> = chunk_syms.to_vec();
-            let bars = load_bars_static(&db, &chunk_syms, &preload_start, &end).await.expect("load bars");
+            let bars = load_bars_static(&db, &chunk_syms, &preload_start, &end)
+                .await
+                .expect("load bars");
             let loader: Arc<
-                dyn Fn(&[String], chrono::NaiveDate, chrono::NaiveDate) -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String>
-                    + Send + Sync,
+                dyn Fn(
+                        &[String],
+                        chrono::NaiveDate,
+                        chrono::NaiveDate,
+                    )
+                        -> Result<HashMap<String, Vec<quant_factor::types::DailyBar>>, String>
+                    + Send
+                    + Sync,
             > = {
                 let bars = bars.clone();
                 Arc::new(move |_syms, _s, _e| Ok(bars.clone()))
             };
-            let collected: Arc<Mutex<Vec<(String, Vec<(String, chrono::NaiveDate, f64, bool)>)>>> = Arc::new(Mutex::new(Vec::new()));
+            let collected: Arc<Mutex<Vec<(String, Vec<(String, chrono::NaiveDate, f64, bool)>)>>> =
+                Arc::new(Mutex::new(Vec::new()));
             let saver: Arc<
-                dyn Fn(&str, &str, &[(String, chrono::NaiveDate, f64, bool)]) -> Result<usize, String>
-                    + Send + Sync,
+                dyn Fn(
+                        &str,
+                        &str,
+                        &[(String, chrono::NaiveDate, f64, bool)],
+                    ) -> Result<usize, String>
+                    + Send
+                    + Sync,
             > = {
                 let collected = collected.clone();
                 Arc::new(move |name, _ver, vals| {
                     // batch 的 standardize 已把 output.name 变为 {factor}_std（带后缀），
                     // 直接用传入名——再 format 加后缀会产生 _std_std 双后缀（首跑教训）
-                    collected.lock().unwrap().push((name.to_string(), vals.to_vec()));
+                    collected
+                        .lock()
+                        .unwrap()
+                        .push((name.to_string(), vals.to_vec()));
                     Ok(vals.len())
                 })
             };
@@ -2050,10 +2101,18 @@ mod stale_pv_recompute_tests {
             for (code, vals) in collected.lock().unwrap().iter() {
                 let recent: Vec<&(String, chrono::NaiveDate, f64, bool)> =
                     vals.iter().filter(|(_, d, _, _)| *d >= cutoff).collect();
-                batch_saved += save_factor_values_ref(&db, code, &recent).await.expect("save");
+                batch_saved += save_factor_values_ref(&db, code, &recent)
+                    .await
+                    .expect("save");
             }
             total_saved += batch_saved;
-            println!("[pv-bf] batch {}/{}: saved {} rows (total {})", bi + 1, (symbols.len() + batch_n - 1) / batch_n, batch_saved, total_saved);
+            println!(
+                "[pv-bf] batch {}/{}: saved {} rows (total {})",
+                bi + 1,
+                (symbols.len() + batch_n - 1) / batch_n,
+                batch_saved,
+                total_saved
+            );
         }
         println!("[pv-bf] done, total saved {}", total_saved);
     }
@@ -2066,7 +2125,9 @@ mod stale_pv_recompute_tests {
         use rust_decimal::Decimal;
         let mut n = 0usize;
         for (sym, d, v, valid) in vals {
-            if !valid { continue; }
+            if !valid {
+                continue;
+            }
             let r = sqlx::query(
                 "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
                  VALUES ($1, '1.0.0', $2, $3, $4, $4, $3)

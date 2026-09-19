@@ -39,7 +39,6 @@ pub struct AkshareAnalystRevisionSmokeReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct AkshareAnalystRevisionHistoryReplayAuditReq {
     #[serde(default)]
     pub dates: Vec<String>,
@@ -55,7 +54,6 @@ pub struct AkshareAnalystRevisionHistoryReplayAuditReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct AkshareAnalystRevisionSyncPlanReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -67,7 +65,6 @@ pub struct AkshareAnalystRevisionSyncPlanReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct AkshareAnalystRevisionReadinessAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -76,7 +73,6 @@ pub struct AkshareAnalystRevisionReadinessAuditReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct AkshareAnalystRevisionSyncReq {
     #[serde(default)]
@@ -115,7 +111,6 @@ impl AkshareAnalystRevisionSyncReq {
 
 #[derive(Debug, Clone, Deserialize)]
 
-
 pub struct AkshareAnalystRevisionCoverageAuditReq {
     #[serde(default)]
     pub start_date: Option<String>,
@@ -124,7 +119,6 @@ pub struct AkshareAnalystRevisionCoverageAuditReq {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-
 
 pub struct BroadAnalystRevisionAuditReq {
     #[serde(default)]
@@ -137,17 +131,14 @@ pub struct BroadAnalystRevisionAuditReq {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 
-
 pub(crate) struct BroadAnalystRevisionAuditDecision {
-    pub(crate) passed:bool,
-    pub(crate) status:&'static str,
-    pub(crate) readiness:&'static str,
-    pub(crate) admission_decision:&'static str,
-    pub(crate) p310_status:&'static str,
-    pub(crate) blocked_reason:&'static str,
+    pub(crate) passed: bool,
+    pub(crate) status: &'static str,
+    pub(crate) readiness: &'static str,
+    pub(crate) admission_decision: &'static str,
+    pub(crate) p310_status: &'static str,
+    pub(crate) blocked_reason: &'static str,
 }
-
-
 
 fn akshare_analyst_revision_smoke_limit(limit: Option<usize>) -> usize {
     limit
@@ -155,14 +146,10 @@ fn akshare_analyst_revision_smoke_limit(limit: Option<usize>) -> usize {
         .clamp(1, AKSHARE_ANALYST_REVISION_MAX_ROWS)
 }
 
-
-
 fn akshare_analyst_revision_default_dates() -> Vec<String> {
     let latest_complete_date = chrono::Utc::now().date_naive() - Duration::days(1);
     vec![latest_complete_date.format("%Y%m%d").to_string()]
 }
-
-
 
 fn akshare_analyst_revision_smoke_dates(dates: &[String]) -> Result<Vec<String>, String> {
     let raw_dates = if dates.is_empty() {
@@ -189,8 +176,6 @@ fn akshare_analyst_revision_smoke_dates(dates: &[String]) -> Result<Vec<String>,
     Ok(parsed)
 }
 
-
-
 fn akshare_analyst_revision_history_dates(dates: &[String]) -> Result<Vec<String>, String> {
     let mut seen = BTreeSet::new();
     let mut parsed = Vec::new();
@@ -213,8 +198,6 @@ fn akshare_analyst_revision_history_dates(dates: &[String]) -> Result<Vec<String
     Ok(parsed)
 }
 
-
-
 fn akshare_analyst_revision_symbol(value: &str) -> String {
     value
         .trim()
@@ -224,26 +207,23 @@ fn akshare_analyst_revision_symbol(value: &str) -> String {
         .to_string()
 }
 
-
-
 #[derive(Debug, Clone)]
 pub(crate) struct AkshareAnalystRevisionSyncPlanBatch {
-    pub(crate) label:String,
-    pub(crate) start_date:NaiveDate,
-    pub(crate) end_date:NaiveDate,
-    pub(crate) calendar_day_count:i64,
+    pub(crate) label: String,
+    pub(crate) start_date: NaiveDate,
+    pub(crate) end_date: NaiveDate,
+    pub(crate) calendar_day_count: i64,
 }
 
 #[derive(Debug, Clone)]
 
-
 pub(crate) struct AkshareAnalystRevisionRawRow {
-    pub(crate) vendor:String,
-    pub(crate) vendor_source:String,
-    pub(crate) vendor_endpoint:String,
-    pub(crate) request_key:String,
-    pub(crate) symbol:String,
-    pub(crate) symbol_name:Option<String>,
+    pub(crate) vendor: String,
+    pub(crate) vendor_source: String,
+    pub(crate) vendor_endpoint: String,
+    pub(crate) request_key: String,
+    pub(crate) symbol: String,
+    pub(crate) symbol_name: Option<String>,
     pub(crate) publication_date: NaiveDate,
     pub(crate) source_published_at: DateTime<Utc>,
     pub(crate) available_at: NaiveDate,
@@ -259,8 +239,6 @@ pub(crate) struct AkshareAnalystRevisionRawRow {
     pub(crate) raw_payload_hash: String,
 }
 
-
-
 pub(crate) fn akshare_analyst_revision_batch_end(date: NaiveDate, batch_mode: &str) -> NaiveDate {
     match batch_mode {
         "year" => NaiveDate::from_ymd_opt(date.year(), 12, 31).unwrap(),
@@ -272,8 +250,6 @@ pub(crate) fn akshare_analyst_revision_batch_end(date: NaiveDate, batch_mode: &s
     }
 }
 
-
-
 pub(crate) fn akshare_analyst_revision_batch_label(date: NaiveDate, batch_mode: &str) -> String {
     match batch_mode {
         "year" => format!("{}", date.year()),
@@ -281,8 +257,6 @@ pub(crate) fn akshare_analyst_revision_batch_label(date: NaiveDate, batch_mode: 
         _ => format!("{}Q{}", date.year(), ((date.month() - 1) / 3) + 1),
     }
 }
-
-
 
 pub(crate) fn akshare_value_key_part(item: &serde_json::Map<String, Value>, key: &str) -> String {
     match item.get(key) {
@@ -294,16 +268,18 @@ pub(crate) fn akshare_value_key_part(item: &serde_json::Map<String, Value>, key:
     }
 }
 
-
-
-pub(crate) fn akshare_optional_string(item: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+pub(crate) fn akshare_optional_string(
+    item: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<String> {
     let value = akshare_value_key_part(item, key);
     (!value.is_empty()).then_some(value)
 }
 
-
-
-pub(crate) fn akshare_optional_decimal(item: &serde_json::Map<String, Value>, key: &str) -> Option<Decimal> {
+pub(crate) fn akshare_optional_decimal(
+    item: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<Decimal> {
     item.get(key)
         .and_then(|value| {
             value.as_f64().or_else(|| {
@@ -315,8 +291,6 @@ pub(crate) fn akshare_optional_decimal(item: &serde_json::Map<String, Value>, ke
         .and_then(Decimal::from_f64_retain)
 }
 
-
-
 pub(crate) fn parse_akshare_publication_date(value: &str) -> Option<NaiveDate> {
     let trimmed = value.trim();
     NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
@@ -324,9 +298,10 @@ pub(crate) fn parse_akshare_publication_date(value: &str) -> Option<NaiveDate> {
         .ok()
 }
 
-
-
-pub(crate) fn akshare_next_open_date(publication_date: NaiveDate, open_dates: &[NaiveDate]) -> NaiveDate {
+pub(crate) fn akshare_next_open_date(
+    publication_date: NaiveDate,
+    open_dates: &[NaiveDate],
+) -> NaiveDate {
     open_dates
         .iter()
         .copied()
@@ -334,16 +309,12 @@ pub(crate) fn akshare_next_open_date(publication_date: NaiveDate, open_dates: &[
         .unwrap_or_else(|| publication_date + Duration::days(1))
 }
 
-
-
 pub(crate) fn akshare_source_published_at(available_at: NaiveDate) -> DateTime<Utc> {
     available_at
         .and_hms_opt(0, 30, 0)
         .expect("valid conservative source publication timestamp")
         .and_utc()
 }
-
-
 
 fn akshare_analyst_revision_calendar_days(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
     let mut days = Vec::new();
@@ -354,8 +325,6 @@ fn akshare_analyst_revision_calendar_days(start: NaiveDate, end: NaiveDate) -> V
     }
     days
 }
-
-
 
 async fn load_akshare_analyst_revision_available_open_dates(
     db: &sqlx::PgPool,
@@ -377,8 +346,6 @@ async fn load_akshare_analyst_revision_available_open_dates(
     .fetch_all(db)
     .await
 }
-
-
 
 async fn upsert_akshare_analyst_revision_raw_rows(
     db: &sqlx::PgPool,
@@ -449,15 +416,11 @@ async fn upsert_akshare_analyst_revision_raw_rows(
     Ok(saved)
 }
 
-
-
 fn broad_analyst_revision_breakdown_limit(limit: Option<usize>) -> i64 {
     limit
         .unwrap_or(BROAD_ANALYST_REVISION_BREAKDOWN_LIMIT)
         .clamp(1, BROAD_ANALYST_REVISION_BREAKDOWN_LIMIT) as i64
 }
-
-
 
 fn akshare_analyst_revision_probe_status(probes: &[Value]) -> &'static str {
     if probes.iter().any(|probe| {
@@ -475,8 +438,6 @@ fn akshare_analyst_revision_probe_status(probes: &[Value]) -> &'static str {
         "error"
     }
 }
-
-
 
 fn akshare_analyst_revision_known_endpoint_gate(source: &str) -> Option<Value> {
     match source {
@@ -501,8 +462,6 @@ fn akshare_analyst_revision_known_endpoint_gate(source: &str) -> Option<Value> {
         _ => None,
     }
 }
-
-
 
 async fn run_akshare_analyst_revision_probe(
     python: &str,
@@ -689,8 +648,6 @@ except Exception as error:
     payload
 }
 
-
-
 pub(crate) fn akshare_analyst_revision_is_empty_dataframe_length_mismatch(payload: &Value) -> bool {
     let status_is_error = payload
         .get("status")
@@ -712,8 +669,6 @@ pub(crate) fn akshare_analyst_revision_is_empty_dataframe_length_mismatch(payloa
         && error.contains("Expected axis has 0 elements")
         && error.contains("new values have 11 elements")
 }
-
-
 
 async fn run_akshare_analyst_revision_full_date_fetch(python: &str, request_key: &str) -> Value {
     let source = "stock_rank_forecast_cninfo";
@@ -842,8 +797,6 @@ except Exception as error:
     payload
 }
 
-
-
 async fn run_akshare_analyst_revision_full_date_fetch_with_retry(
     python: &str,
     request_key: &str,
@@ -879,8 +832,6 @@ async fn run_akshare_analyst_revision_full_date_fetch_with_retry(
     (latest, max_attempts)
 }
 
-
-
 pub async fn broad_analyst_revision_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<BroadAnalystRevisionAuditReq>,
@@ -893,7 +844,6 @@ pub async fn broad_analyst_revision_audit(
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/schema-contract
 
-
 pub async fn akshare_analyst_revision_schema_contract() -> impl IntoResponse {
     Json(json!({
         "code": 0,
@@ -902,7 +852,6 @@ pub async fn akshare_analyst_revision_schema_contract() -> impl IntoResponse {
 }
 
 /// POST /api/v1/quant/data/akshare/analyst-revision/permission-smoke
-
 
 pub async fn akshare_analyst_revision_permission_smoke(
     State(state): State<Arc<AppState>>,
@@ -916,7 +865,6 @@ pub async fn akshare_analyst_revision_permission_smoke(
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/available-at-audit
 
-
 pub async fn akshare_analyst_revision_available_at_audit() -> impl IntoResponse {
     Json(json!({
         "code": 0,
@@ -925,7 +873,6 @@ pub async fn akshare_analyst_revision_available_at_audit() -> impl IntoResponse 
 }
 
 /// POST /api/v1/quant/data/akshare/analyst-revision/history-replay-audit
-
 
 pub async fn akshare_analyst_revision_history_replay_audit(
     State(state): State<Arc<AppState>>,
@@ -939,7 +886,6 @@ pub async fn akshare_analyst_revision_history_replay_audit(
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/sync-plan
 
-
 pub async fn akshare_analyst_revision_sync_plan(
     Query(req): Query<AkshareAnalystRevisionSyncPlanReq>,
 ) -> impl IntoResponse {
@@ -950,7 +896,6 @@ pub async fn akshare_analyst_revision_sync_plan(
 }
 
 /// POST /api/v1/quant/data/akshare/analyst-revision/sync
-
 
 pub async fn akshare_analyst_revision_sync(
     State(state): State<Arc<AppState>>,
@@ -964,7 +909,6 @@ pub async fn akshare_analyst_revision_sync(
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/readiness-audit
 
-
 pub async fn akshare_analyst_revision_readiness_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<AkshareAnalystRevisionReadinessAuditReq>,
@@ -977,7 +921,6 @@ pub async fn akshare_analyst_revision_readiness_audit(
 
 /// GET /api/v1/quant/data/akshare/analyst-revision/coverage-audit
 
-
 pub async fn akshare_analyst_revision_coverage_audit(
     State(state): State<Arc<AppState>>,
     Query(req): Query<AkshareAnalystRevisionCoverageAuditReq>,
@@ -989,7 +932,6 @@ pub async fn akshare_analyst_revision_coverage_audit(
 }
 
 /// POST /api/v1/quant/data/phase7-optional-source-coverage-sync
-
 
 async fn build_akshare_analyst_revision_permission_smoke(
     state: &AppState,
@@ -1101,8 +1043,6 @@ async fn build_akshare_analyst_revision_permission_smoke(
     }))
 }
 
-
-
 async fn build_akshare_analyst_revision_sync_plan(
     req: AkshareAnalystRevisionSyncPlanReq,
 ) -> Result<Value, String> {
@@ -1131,8 +1071,6 @@ async fn build_akshare_analyst_revision_sync_plan(
         batches,
     ))
 }
-
-
 
 async fn run_akshare_analyst_revision_bounded_sync(
     state: &AppState,
@@ -1492,8 +1430,6 @@ async fn run_akshare_analyst_revision_bounded_sync(
     }))
 }
 
-
-
 async fn build_akshare_analyst_revision_readiness_audit(
     state: &AppState,
     req: AkshareAnalystRevisionReadinessAuditReq,
@@ -1616,8 +1552,6 @@ async fn build_akshare_analyst_revision_readiness_audit(
     }))
 }
 
-
-
 async fn resolve_akshare_analyst_revision_history_dates(
     state: &AppState,
     req: &AkshareAnalystRevisionHistoryReplayAuditReq,
@@ -1689,8 +1623,6 @@ async fn resolve_akshare_analyst_revision_history_dates(
         .map(|(_, date)| date.format("%Y%m%d").to_string())
         .collect())
 }
-
-
 
 async fn build_akshare_analyst_revision_history_replay_audit(
     state: &AppState,
@@ -1838,8 +1770,6 @@ async fn build_akshare_analyst_revision_history_replay_audit(
     }))
 }
 
-
-
 async fn build_akshare_analyst_revision_correlation_audit(
     db: &sqlx::PgPool,
     start: NaiveDate,
@@ -1961,8 +1891,6 @@ async fn build_akshare_analyst_revision_correlation_audit(
         "pit_alignment": "raw events are joined on conservative available_at, not publication_date"
     }))
 }
-
-
 
 async fn build_akshare_analyst_revision_coverage_audit(
     state: &AppState,
@@ -2508,8 +2436,6 @@ async fn build_akshare_analyst_revision_coverage_audit(
     }))
 }
 
-
-
 async fn build_broad_analyst_revision_audit(
     state: &AppState,
     req: BroadAnalystRevisionAuditReq,
@@ -2893,6 +2819,3 @@ async fn build_broad_analyst_revision_audit(
         ]
     }))
 }
-
-
-

@@ -57,7 +57,6 @@ use quant_backtest::signal_generator::{
     SignalDataCacheSnapshot, SignalDataCacheStats,
 };
 
-
 use super::*;
 
 pub(crate) struct RobustnessEvaluation {
@@ -65,14 +64,12 @@ pub(crate) struct RobustnessEvaluation {
     pub(crate) gates: Value,
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct RobustnessDailyPoint {
     pub(crate) trade_date: NaiveDate,
     pub(crate) portfolio_value: f64,
     pub(crate) benchmark_value: Option<f64>,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct RobustnessMetricSummary {
@@ -86,7 +83,6 @@ pub(crate) struct RobustnessMetricSummary {
     pub(crate) excess_return: Option<f64>,
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct RobustnessTimeSeriesAnalysis {
     pub(crate) market_scenarios: Value,
@@ -94,20 +90,17 @@ pub(crate) struct RobustnessTimeSeriesAnalysis {
     pub(crate) bootstrap: Value,
 }
 
-
 pub(crate) struct OptimizationPerformanceGatePolicy {
     pub(crate) min_completed_trials: i64,
     pub(crate) max_failed_trials: i64,
     pub(crate) max_elapsed_ms: Option<i64>,
 }
 
-
 pub(crate) struct RobustnessOverlayPersistenceFields {
     pub(crate) gate_result_id: String,
     pub(crate) status: String,
     pub(crate) gate_results: Value,
 }
-
 
 pub(crate) fn resolve_robustness_gate_policy(gate_policy: Option<&Value>) -> Value {
     match gate_policy {
@@ -132,8 +125,9 @@ pub(crate) fn resolve_robustness_gate_policy(gate_policy: Option<&Value>) -> Val
     }
 }
 
-
-pub(crate) fn resolve_oos_train_selection_gate_policy(req: &Phase7OosWalkForwardDiscoveryRequest) -> Value {
+pub(crate) fn resolve_oos_train_selection_gate_policy(
+    req: &Phase7OosWalkForwardDiscoveryRequest,
+) -> Value {
     let base =
         default_oos_train_selection_gate_policy_for_search_profile(req.search_profile.as_deref());
     if let Some(policy) = req.train_selection_gate_policy.as_ref() {
@@ -145,8 +139,10 @@ pub(crate) fn resolve_oos_train_selection_gate_policy(req: &Phase7OosWalkForward
     base
 }
 
-
-pub(crate) fn resolve_oos_train_selection_policy(gate_policy: Option<&Value>, base: Value) -> Value {
+pub(crate) fn resolve_oos_train_selection_policy(
+    gate_policy: Option<&Value>,
+    base: Value,
+) -> Value {
     match gate_policy {
         Some(policy) => {
             let preset = policy
@@ -171,7 +167,6 @@ pub(crate) fn resolve_oos_train_selection_policy(gate_policy: Option<&Value>, ba
         None => base,
     }
 }
-
 
 pub(crate) fn resolve_oos_final_promotion_gate_policy(
     req: &Phase7OosWalkForwardDiscoveryRequest,
@@ -206,20 +201,17 @@ pub(crate) fn resolve_oos_final_promotion_gate_policy(
     policy
 }
 
-
 pub(crate) fn insert_policy_number(policy: &mut Value, key: &str, value: f64) {
     if let Some(object) = policy.as_object_mut() {
         object.insert(key.to_string(), json!(value));
     }
 }
 
-
 pub(crate) fn insert_policy_integer(policy: &mut Value, key: &str, value: i64) {
     if let Some(object) = policy.as_object_mut() {
         object.insert(key.to_string(), json!(value));
     }
 }
-
 
 pub(crate) fn merge_gate_policy(mut base: Value, overrides: &Value) -> Value {
     if let (Some(base_map), Some(override_map)) = (base.as_object_mut(), overrides.as_object()) {
@@ -230,13 +222,11 @@ pub(crate) fn merge_gate_policy(mut base: Value, overrides: &Value) -> Value {
     base
 }
 
-
 pub(crate) fn metric_f64_value(metrics: Option<&Value>, key: &str) -> Option<f64> {
     metrics
         .and_then(|metrics| metrics.get(key))
         .and_then(value_as_f64)
 }
-
 
 pub(crate) fn robustness_result_is_approved(result: &Value) -> bool {
     result
@@ -245,7 +235,6 @@ pub(crate) fn robustness_result_is_approved(result: &Value) -> bool {
         .map(|status| status == "approved_candidate")
         .unwrap_or(false)
 }
-
 
 pub async fn evaluate_optimization_robustness(
     State(state): State<Arc<AppState>>,
@@ -257,7 +246,6 @@ pub async fn evaluate_optimization_robustness(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub async fn evaluate_optimization_trial_robustness(
     State(state): State<Arc<AppState>>,
@@ -277,7 +265,6 @@ pub async fn evaluate_optimization_trial_robustness(
         Err(message) => Json(json!({"code": 1, "message": message})),
     }
 }
-
 
 pub(crate) fn normalize_performance_gate(
     gate: Option<&OptimizationPerformanceGateRequest>,
@@ -304,7 +291,6 @@ pub(crate) fn normalize_performance_gate(
         max_elapsed_ms,
     })
 }
-
 
 pub(crate) fn evaluate_optimization_performance_gates(
     executed: i64,
@@ -344,7 +330,6 @@ pub(crate) fn evaluate_optimization_performance_gates(
     Value::Array(gates)
 }
 
-
 pub(crate) fn performance_gate_status(gates: &Value) -> &'static str {
     let passed = gates
         .as_array()
@@ -360,7 +345,6 @@ pub(crate) fn performance_gate_status(gates: &Value) -> &'static str {
         "review_required"
     }
 }
-
 
 pub(crate) async fn evaluate_and_persist_robustness(
     db: &sqlx::PgPool,
@@ -391,7 +375,6 @@ pub(crate) async fn evaluate_and_persist_robustness(
     )
     .await
 }
-
 
 pub(crate) async fn evaluate_and_persist_robustness_for_trial(
     db: &sqlx::PgPool,
@@ -481,7 +464,6 @@ pub(crate) async fn evaluate_and_persist_robustness_for_trial(
     }))
 }
 
-
 pub(crate) async fn load_robustness_timeseries_analysis(
     db: &sqlx::PgPool,
     backtest_task_id: &str,
@@ -550,10 +532,13 @@ pub(crate) async fn load_robustness_timeseries_analysis(
     .map(Some)
 }
 
-
 impl RobustnessDailyPoint {
     #[cfg(test)]
-    pub(crate) fn new(trade_date: &str, portfolio_value: f64, benchmark_value: Option<f64>) -> Self {
+    pub(crate) fn new(
+        trade_date: &str,
+        portfolio_value: f64,
+        benchmark_value: Option<f64>,
+    ) -> Self {
         Self {
             trade_date: NaiveDate::parse_from_str(trade_date, "%Y-%m-%d").expect("valid date"),
             portfolio_value,
@@ -561,7 +546,6 @@ impl RobustnessDailyPoint {
         }
     }
 }
-
 
 impl RobustnessTimeSeriesAnalysis {
     pub(crate) fn from_points(
@@ -578,7 +562,6 @@ impl RobustnessTimeSeriesAnalysis {
         })
     }
 }
-
 
 pub(crate) fn build_market_scenario_analysis(points: &[RobustnessDailyPoint]) -> Value {
     if points.len() < 2 {
@@ -602,7 +585,6 @@ pub(crate) fn build_market_scenario_analysis(points: &[RobustnessDailyPoint]) ->
         }]
     })
 }
-
 
 pub(crate) fn build_walk_forward_analysis(
     points: &[RobustnessDailyPoint],
@@ -688,7 +670,6 @@ pub(crate) fn build_walk_forward_analysis(
     })
 }
 
-
 pub(crate) fn build_bootstrap_analysis(
     points: &[RobustnessDailyPoint],
     trials: usize,
@@ -737,7 +718,6 @@ pub(crate) fn build_bootstrap_analysis(
     }))
 }
 
-
 pub(crate) fn classify_market_scenario(
     summary: &RobustnessMetricSummary,
     annualized_volatility: f64,
@@ -755,7 +735,6 @@ pub(crate) fn classify_market_scenario(
         "mixed"
     }
 }
-
 
 pub(crate) fn summarize_points(points: &[RobustnessDailyPoint]) -> RobustnessMetricSummary {
     let portfolio_returns = daily_returns(points, |point| Some(point.portfolio_value));
@@ -794,7 +773,6 @@ pub(crate) fn summarize_points(points: &[RobustnessDailyPoint]) -> RobustnessMet
     }
 }
 
-
 pub(crate) fn summarize_return_sample(returns: &[f64]) -> RobustnessMetricSummary {
     let total_return = returns.iter().fold(1.0, |acc, value| acc * (1.0 + value)) - 1.0;
     let volatility = annualized_volatility(returns);
@@ -816,7 +794,6 @@ pub(crate) fn summarize_return_sample(returns: &[f64]) -> RobustnessMetricSummar
     }
 }
 
-
 pub(crate) fn metric_summary_json(summary: &RobustnessMetricSummary) -> Value {
     json!({
         "total_return": summary.total_return,
@@ -829,7 +806,6 @@ pub(crate) fn metric_summary_json(summary: &RobustnessMetricSummary) -> Value {
         "excess_return": summary.excess_return
     })
 }
-
 
 pub(crate) fn daily_returns<F>(points: &[RobustnessDailyPoint], value_fn: F) -> Vec<f64>
 where
@@ -849,7 +825,6 @@ where
         .collect()
 }
 
-
 pub(crate) fn ratio_return(start: Option<f64>, end: Option<f64>) -> f64 {
     match (start, end) {
         (Some(start), Some(end)) if start.is_finite() && end.is_finite() && start > 0.0 => {
@@ -859,14 +834,12 @@ pub(crate) fn ratio_return(start: Option<f64>, end: Option<f64>) -> f64 {
     }
 }
 
-
 pub(crate) fn annualized_return(total_return: f64, periods: usize) -> f64 {
     if periods == 0 || total_return <= -1.0 {
         return 0.0;
     }
     (1.0 + total_return).powf(252.0 / periods as f64) - 1.0
 }
-
 
 pub(crate) fn annualized_volatility(returns: &[f64]) -> f64 {
     if returns.len() < 2 {
@@ -883,7 +856,6 @@ pub(crate) fn annualized_volatility(returns: &[f64]) -> f64 {
         / (returns.len() - 1) as f64;
     variance.sqrt() * 252.0_f64.sqrt()
 }
-
 
 pub(crate) fn sortino_ratio(annual_return: f64, returns: &[f64]) -> f64 {
     if returns.len() < 2 {
@@ -905,7 +877,6 @@ pub(crate) fn sortino_ratio(annual_return: f64, returns: &[f64]) -> f64 {
     }
 }
 
-
 pub(crate) fn calmar_ratio(annual_return: f64, max_drawdown: f64) -> f64 {
     if max_drawdown > 0.0 {
         annual_return / max_drawdown
@@ -915,7 +886,6 @@ pub(crate) fn calmar_ratio(annual_return: f64, max_drawdown: f64) -> f64 {
         0.0
     }
 }
-
 
 pub(crate) fn max_drawdown(nav: &mut [f64]) -> f64 {
     let mut peak = None::<f64>;
@@ -937,7 +907,6 @@ pub(crate) fn max_drawdown(nav: &mut [f64]) -> f64 {
     max_dd
 }
 
-
 pub(crate) fn drawdown_from_returns(returns: &[f64]) -> f64 {
     let mut value = 1.0;
     let mut nav = Vec::with_capacity(returns.len() + 1);
@@ -949,7 +918,6 @@ pub(crate) fn drawdown_from_returns(returns: &[f64]) -> f64 {
     max_drawdown(&mut nav)
 }
 
-
 pub(crate) fn distribution_summary(values: &mut [f64]) -> Value {
     values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     json!({
@@ -960,7 +928,6 @@ pub(crate) fn distribution_summary(values: &mut [f64]) -> Value {
     })
 }
 
-
 pub(crate) fn percentile(values: &[f64], percentile: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -968,7 +935,6 @@ pub(crate) fn percentile(values: &[f64], percentile: f64) -> f64 {
     let idx = ((values.len() - 1) as f64 * percentile).round() as usize;
     values[idx.min(values.len() - 1)]
 }
-
 
 #[cfg(test)]
 pub(crate) fn evaluate_robustness_gates(
@@ -987,7 +953,6 @@ pub(crate) fn evaluate_robustness_gates(
         None,
     )
 }
-
 
 pub(crate) fn evaluate_robustness_gates_with_analysis(
     best_score: Decimal,
@@ -1282,7 +1247,6 @@ pub(crate) fn evaluate_robustness_gates_with_analysis(
     }
 }
 
-
 pub(crate) fn build_robustness_failure_attribution(gates: &Value) -> Value {
     let gate_items = gates.as_array().map(Vec::as_slice).unwrap_or(&[]);
     let failed_gates = gate_items
@@ -1306,7 +1270,6 @@ pub(crate) fn build_robustness_failure_attribution(gates: &Value) -> Value {
     })
 }
 
-
 pub(crate) fn compact_gate_failure(gate: &Value) -> Value {
     json!({
         "gate": gate["gate"].clone(),
@@ -1314,7 +1277,6 @@ pub(crate) fn compact_gate_failure(gate: &Value) -> Value {
         "actual": gate.get("actual").cloned().unwrap_or(Value::Null),
     })
 }
-
 
 pub(crate) fn build_primary_failure_modes(failed_gates: &[Value]) -> Vec<Value> {
     let mut modes = BTreeSet::new();
@@ -1382,7 +1344,6 @@ pub(crate) fn build_primary_failure_modes(failed_gates: &[Value]) -> Vec<Value> 
         .collect()
 }
 
-
 pub(crate) fn extract_walk_forward_windows(gate_items: &[Value]) -> Vec<Value> {
     gate_items
         .iter()
@@ -1391,7 +1352,6 @@ pub(crate) fn extract_walk_forward_windows(gate_items: &[Value]) -> Vec<Value> {
         .cloned()
         .unwrap_or_default()
 }
-
 
 pub(crate) fn rank_weak_walk_forward_windows(windows: &[Value], limit: usize) -> Vec<Value> {
     let mut ranked = windows.to_vec();
@@ -1416,7 +1376,6 @@ pub(crate) fn rank_weak_walk_forward_windows(windows: &[Value], limit: usize) ->
         .collect()
 }
 
-
 pub(crate) fn weak_window_score(window: &Value) -> f64 {
     let annual_return = metric_f64(window, "annual_return").unwrap_or(0.0);
     let excess_return = metric_f64(window, "excess_return").unwrap_or(0.0);
@@ -1430,7 +1389,6 @@ pub(crate) fn weak_window_score(window: &Value) -> f64 {
         + positive_shortfall(1.5, sortino) * 0.5
         + drawdown
 }
-
 
 pub(crate) fn rank_weak_market_scenarios(windows: &[Value], limit: usize) -> Vec<Value> {
     let mut by_scenario: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
@@ -1452,7 +1410,6 @@ pub(crate) fn rank_weak_market_scenarios(windows: &[Value], limit: usize) -> Vec
     scenarios.truncate(limit);
     scenarios
 }
-
 
 pub(crate) fn scenario_weakness_summary(scenario: &str, windows: &[&Value]) -> Value {
     let count = windows.len().max(1);
@@ -1487,7 +1444,6 @@ pub(crate) fn scenario_weakness_summary(scenario: &str, windows: &[&Value]) -> V
     })
 }
 
-
 pub(crate) fn average_metric(windows: &[&Value], metric: &str) -> f64 {
     let values = windows
         .iter()
@@ -1499,7 +1455,6 @@ pub(crate) fn average_metric(windows: &[&Value], metric: &str) -> f64 {
         values.iter().sum::<f64>() / values.len() as f64
     }
 }
-
 
 pub(crate) fn extract_bootstrap_tail(gate_items: &[Value]) -> Value {
     gate_items
@@ -1518,11 +1473,9 @@ pub(crate) fn extract_bootstrap_tail(gate_items: &[Value]) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
-
 pub(crate) fn metric_f64(window: &Value, metric: &str) -> Option<f64> {
     value_as_f64(window.get("metrics")?.get(metric)?)
 }
-
 
 pub(crate) fn value_as_f64(value: &Value) -> Option<f64> {
     match value {
@@ -1532,11 +1485,9 @@ pub(crate) fn value_as_f64(value: &Value) -> Option<f64> {
     }
 }
 
-
 pub(crate) fn positive_shortfall(limit: f64, actual: f64) -> f64 {
     (limit - actual).max(0.0)
 }
-
 
 pub(crate) fn decimal_from_json(value: Option<&Value>) -> Option<Decimal> {
     match value {
@@ -1546,7 +1497,6 @@ pub(crate) fn decimal_from_json(value: Option<&Value>) -> Option<Decimal> {
     }
 }
 
-
 pub(crate) fn constraint_decimal(constraints: Option<&Value>, name: &str) -> Option<Decimal> {
     constraints
         .and_then(|value| value.get(name))
@@ -1554,13 +1504,11 @@ pub(crate) fn constraint_decimal(constraints: Option<&Value>, name: &str) -> Opt
         .and_then(Decimal::from_f64_retain)
 }
 
-
 pub(crate) fn constraint_i64(constraints: Option<&Value>, name: &str) -> Option<i64> {
     constraints
         .and_then(|value| value.get(name))
         .and_then(Value::as_i64)
 }
-
 
 pub(crate) fn constraint_f64(constraints: Option<&Value>, name: &str) -> Option<f64> {
     constraints
@@ -1568,18 +1516,14 @@ pub(crate) fn constraint_f64(constraints: Option<&Value>, name: &str) -> Option<
         .and_then(Value::as_f64)
 }
 
-
 pub(crate) fn constraint_bool(constraints: Option<&Value>, name: &str) -> Option<bool> {
     constraints
         .and_then(|value| value.get(name))
         .and_then(Value::as_bool)
 }
 
-
 pub(crate) fn constraint_str<'a>(constraints: Option<&'a Value>, name: &str) -> Option<&'a str> {
     constraints
         .and_then(|value| value.get(name))
         .and_then(Value::as_str)
 }
-
-

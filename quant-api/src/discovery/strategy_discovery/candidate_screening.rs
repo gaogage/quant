@@ -2,8 +2,8 @@
 //!
 //! 由 phase7.rs 拆出（DDD 重构 R8 批次1），纯 move，零行为变更。
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -247,4 +247,3 @@ pub(super) fn decimal_field(value: &Value, field: &str) -> Decimal {
 pub(super) fn decimal_string(value: Decimal) -> String {
     value.normalize().to_string()
 }
-

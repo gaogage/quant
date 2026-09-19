@@ -17,7 +17,8 @@ const FETCH_SCRIPT: &str = include_str!("../../../scripts/ptrade_report_fetch.py
 pub async fn run_ptrade_report_fetch(db: &PgPool) {
     if let Err(e) = ensure_report_table(db).await {
         error!("[PTrade回报] 建表失败: {}", e);
-        crate::routes::shared::send_dingtalk_alert(db, &format!("⛔ [PTrade回报] 建表失败: {}", e)).await;
+        crate::routes::shared::send_dingtalk_alert(db, &format!("⛔ [PTrade回报] 建表失败: {}", e))
+            .await;
         return;
     }
     let fetch = fetch_mail_reports().await;
@@ -152,25 +153,27 @@ async fn sync_mirror_account(
     .fetch_one(db)
     .await
     .map_err(|e| format!("mirror count: {}", e))?;
-    sqlx::query("UPDATE paper_account SET current_nav=$2, cash=$3, updated_at=now(),
+    sqlx::query(
+        "UPDATE paper_account SET current_nav=$2, cash=$3, updated_at=now(),
                  initial_capital = CASE WHEN $4 AND $5 THEN $2 ELSE initial_capital END,
                  total_trades = total_trades + $6
-                 WHERE paper_account_id=$1")
-        .bind(&account_id)
-        .bind(nav.map(dec))
-        .bind(cash.map(dec))
-        // 首次回写校准: 账户空仓且回报也无有效持仓(以 PTrade 真实值为基准)
-        .bind(empty_before.0 == 0 && n_valid_pos == 0)
-        .bind(nav.is_some())
-        .bind(
-            v.get("orders")
-                .and_then(|x| x.as_array())
-                .map(|a| a.len() as i32)
-                .unwrap_or(0),
-        )
-        .execute(db)
-        .await
-        .map_err(|e| format!("mirror nav: {}", e))?;
+                 WHERE paper_account_id=$1",
+    )
+    .bind(&account_id)
+    .bind(nav.map(dec))
+    .bind(cash.map(dec))
+    // 首次回写校准: 账户空仓且回报也无有效持仓(以 PTrade 真实值为基准)
+    .bind(empty_before.0 == 0 && n_valid_pos == 0)
+    .bind(nav.is_some())
+    .bind(
+        v.get("orders")
+            .and_then(|x| x.as_array())
+            .map(|a| a.len() as i32)
+            .unwrap_or(0),
+    )
+    .execute(db)
+    .await
+    .map_err(|e| format!("mirror nav: {}", e))?;
 
     // ── 持仓重建(幂等: DELETE+INSERT; symbol 规范化 .SS→.SH) ──
     let mut n_pos = 0i32;
@@ -183,7 +186,10 @@ async fn sync_mirror_account(
         for p in positions {
             let sym = p.get("symbol").and_then(|x| x.as_str()).unwrap_or("");
             let qty = p.get("amount").and_then(|x| x.as_f64()).unwrap_or(0.0);
-            let px = p.get("last_sale_price").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let px = p
+                .get("last_sale_price")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.0);
             if sym.is_empty() || qty <= 0.0 {
                 continue;
             }
@@ -255,13 +261,17 @@ async fn sync_mirror_account(
                 "INSERT INTO paper_fill (fill_id, order_id, paper_account_id, symbol, fill_time,
                    side, quantity, price, amount, commission, tax, slippage)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,0,0)
-                 ON CONFLICT (fill_id, fill_time) DO NOTHING",  // 分区表唯一键须含 fill_time
+                 ON CONFLICT (fill_id, fill_time) DO NOTHING", // 分区表唯一键须含 fill_time
             )
-            .bind(format!("pf-{}-{}", v.get("signal_id").and_then(|x| x.as_str()).unwrap_or(""), entrust))
+            .bind(format!(
+                "pf-{}-{}",
+                v.get("signal_id").and_then(|x| x.as_str()).unwrap_or(""),
+                entrust
+            ))
             .bind(format!("po-{}", entrust))
             .bind(&account_id)
             .bind(norm_sym(sym))
-            .bind(chrono::Utc::now())  // 回报处理时刻(成交时点回报未提供, 用入库时间)
+            .bind(chrono::Utc::now()) // 回报处理时刻(成交时点回报未提供, 用入库时间)
             .bind(if filled > 0.0 { "buy" } else { "sell" })
             .bind(qty)
             .bind(dec(px))
@@ -328,7 +338,11 @@ fn positions_value(v: &serde_json::Value) -> f64 {
         .and_then(|x| x.as_array())
         .map(|a| {
             a.iter()
-                .map(|p| p.get("market_value").and_then(|x| x.as_f64()).unwrap_or(0.0))
+                .map(|p| {
+                    p.get("market_value")
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(0.0)
+                })
                 .sum()
         })
         .unwrap_or(0.0)
@@ -421,4 +435,3 @@ async fn ensure_report_table(db: &PgPool) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     Ok(())
 }
-

@@ -664,7 +664,11 @@ fn blend_factor_overlay_scores(
         .collect()
 }
 
-pub(crate) fn oriented_standard_score(value: f64, stats: (f64, f64), direction: ScoreDirection) -> f64 {
+pub(crate) fn oriented_standard_score(
+    value: f64,
+    stats: (f64, f64),
+    direction: ScoreDirection,
+) -> f64 {
     let score = standard_score(value, stats);
     match direction {
         ScoreDirection::Descending => score,
@@ -770,7 +774,10 @@ pub async fn generate_prediction_signals(
     build_prediction_signals_from_rows(pool, config, start_date, end_date, prediction_rows).await
 }
 
-pub(crate) fn prediction_load_start_date(start_date: NaiveDate, entry_delay_days: usize) -> NaiveDate {
+pub(crate) fn prediction_load_start_date(
+    start_date: NaiveDate,
+    entry_delay_days: usize,
+) -> NaiveDate {
     let calendar_buffer_days = 30 + (entry_delay_days as i64 * 3);
     start_date - chrono::Duration::days(calendar_buffer_days)
 }
@@ -1073,9 +1080,10 @@ pub(crate) fn apply_event_gate_scores_when<F>(
                 // z 加成统计仅按因子池内票(2026-09-18 定版): event 分数表覆盖面
                 // 远大于因子池时, 全市场口径的均值/标准差会把池内票的 z 压向 0、
                 // 稀释加成。池内无 event 分数的票不参与统计(其本身不加成)。
-                let event_stats = score_stats(rows.iter().filter_map(|(symbol, _)| {
-                    event_by_symbol.get(symbol.as_str()).copied()
-                }));
+                let event_stats = score_stats(
+                    rows.iter()
+                        .filter_map(|(symbol, _)| event_by_symbol.get(symbol.as_str()).copied()),
+                );
                 for (symbol, factor_score) in rows.iter_mut() {
                     let Some(event_score) = event_by_symbol.get(symbol.as_str()).copied() else {
                         continue;

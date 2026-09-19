@@ -1,10 +1,6 @@
 //! PIT rolling ICIR combo materialization routes.
 
-use axum::{
-    extract::State,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, response::IntoResponse, Json};
 use chrono::NaiveDate;
 use serde::Deserialize;
 use serde_json::json;
@@ -12,9 +8,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::AppState;
 use super::*;
 use super::{background_factor_task_id, parse_phase7_backfill_date, usize_to_i32};
+use crate::AppState;
 
 /// PIT combo 物化用例参数(2026-09-18 参数对象化, 原 10 位置参数 bool/Option
 /// 语义不可读, 调用点易错位)。字段全部 Copy, 可按值传递。
@@ -341,7 +337,6 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
     Ok(total)
 }
 
-
 /// P4.2b overlay combo 物化:等权平均两个交互特征(normalized_value)。
 /// combo = p42b_large_cap_alpha_overlay_v1,成分:large_cap_mom_rev_daily_std +
 /// defensive_lowvol_quality_daily_std。两因子均正向 IC(descending 有效)。
@@ -447,7 +442,11 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
         .await
         .map_err(|e| format!("materialize_p42b_overlay_combo: {}", e))?;
     let total = res.rows_affected();
-    info!(combo = combo_name, rows = total, "P4.2b overlay combo 物化完成(PIT ICIR 加权)");
+    info!(
+        combo = combo_name,
+        rows = total,
+        "P4.2b overlay combo 物化完成(PIT ICIR 加权)"
+    );
     Ok(total)
 }
 
@@ -566,7 +565,6 @@ async fn load_rolling_pit_quarter_as_of_dates(
     Ok(dates)
 }
 
-
 async fn load_candidate_technical_factors(
     db: &sqlx::PgPool,
     version: &str,
@@ -623,7 +621,6 @@ async fn load_candidate_technical_factors(
     .map_err(|error| format!("load candidate technical factors: {}", error))
 }
 
-
 async fn previous_open_trade_date(
     db: &sqlx::PgPool,
     as_of: NaiveDate,
@@ -640,7 +637,6 @@ async fn previous_open_trade_date(
     .flatten()
     .ok_or_else(|| format!("no open trade date before {}", as_of))
 }
-
 
 async fn evaluate_factor_ic_window(
     db: &sqlx::PgPool,
@@ -794,7 +790,6 @@ async fn evaluate_factor_ic_window(
 
     Ok(count)
 }
-
 
 async fn run_rolling_pit_evaluation_backfill(
     db: &sqlx::PgPool,
@@ -1110,7 +1105,6 @@ pub struct MaterializeP42bOverlayComboRequest {
     pub end_date: Option<String>,
 }
 
-
 #[cfg(test)]
 mod f1_combo_tests {
     use super::*;
@@ -1131,15 +1125,22 @@ mod f1_combo_tests {
             let raw: serde_json::Value = sqlx::query_scalar(
                 "SELECT factor_whitelist FROM strategy_config WHERE strategy_id='v24' AND combo_name='full_pit_icir_indneutral_val_v1'",
             ).fetch_one(&db).await.expect("read whitelist");
-            raw.as_array().unwrap().iter()
-                .filter_map(|x| x.as_str().map(String::from)).collect()
+            raw.as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
         };
         println!("[rebuild] whitelist = {} 因子", whitelist.len());
         let whitelist_21 = whitelist.clone(); // 命名沿用，实为同一清单
 
         // 先清旧物化（上版 F1 因 version 不匹配未真正进组合，22f 数据作废重物化）
-        sqlx::query("DELETE FROM multi_factor_value WHERE combo_name='full_pit_icir_indneutral_val_v1'")
-            .execute(&db).await.expect("clean old");
+        sqlx::query(
+            "DELETE FROM multi_factor_value WHERE combo_name='full_pit_icir_indneutral_val_v1'",
+        )
+        .execute(&db)
+        .await
+        .expect("clean old");
         // 季度循环物化：每个窗口用该时点最新的滚动 ICIR 评估（对齐 scheduler
         // 保鲜语义），避免一次性全历史物化把权重钉死在 2014 年初快照。
         let mut total = 0u64;
@@ -1161,7 +1162,9 @@ mod f1_combo_tests {
                     factor_whitelist: Some(whitelist_21.as_slice()),
                     ind_neutral: true,
                 },
-            ).await.expect("materialize quarter");
+            )
+            .await
+            .expect("materialize quarter");
             total += rows;
             q_start = q_end;
         }

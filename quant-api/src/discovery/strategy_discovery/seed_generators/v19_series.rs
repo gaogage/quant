@@ -598,7 +598,8 @@ pub(crate) fn professional_v19_train_window_ml_simple_excess_rebuild_seed_trials
         .collect()
 }
 
-pub(crate) fn professional_v19_train_window_ml_simple_excess_low_impact_rebuild_seed_trials() -> Vec<Value> {
+pub(crate) fn professional_v19_train_window_ml_simple_excess_low_impact_rebuild_seed_trials(
+) -> Vec<Value> {
     let Some(growth_seed) = professional_v19_multi_alpha_sleeve_admission_seed_trials()
         .into_iter()
         .find(|seed| seed["alpha_sleeve_family"] == "growth_recovery")
@@ -922,7 +923,8 @@ pub(crate) fn professional_v19_train_window_ml_h120_low_impact_rebuild_seed_tria
     seeds
 }
 
-pub(crate) fn professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild_seed_trials() -> Vec<Value> {
+pub(crate) fn professional_v19_train_window_ml_rae_h120_residual_capacity_rebuild_seed_trials(
+) -> Vec<Value> {
     let base_seeds = professional_v19_multi_alpha_sleeve_admission_seed_trials();
     let mut seeds = Vec::new();
 

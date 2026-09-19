@@ -187,7 +187,6 @@ fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
     (denominator > 0).then(|| numerator as f64 / denominator as f64)
 }
 
-
 #[derive(Debug, Default)]
 pub struct SignalDataCache {
     pub(crate) combo_scores: HashMap<SignalDataCacheKey, Arc<FactorScoresByDate>>,
@@ -195,10 +194,12 @@ pub struct SignalDataCache {
     pub(crate) return_history: HashMap<SignalDataCacheKey, Arc<SymbolReturnHistory>>,
     pub(crate) average_amounts: HashMap<SignalDataCacheKey, Arc<AverageAmounts>>,
     pub(crate) average_amount_history: HashMap<SignalDataCacheKey, Arc<AverageAmountHistory>>,
-    pub(crate) pit_average_amount_matrices: HashMap<PitAverageAmountMatrixCacheKey, Arc<AverageAmountsByDate>>,
+    pub(crate) pit_average_amount_matrices:
+        HashMap<PitAverageAmountMatrixCacheKey, Arc<AverageAmountsByDate>>,
     pub(crate) return_risk_feature_matrices:
         HashMap<ReturnRiskFeatureMatrixCacheKey, Arc<ScoreDateReturnRiskMatrix>>,
-    pub(crate) market_feature_snapshots: HashMap<MarketFeatureSnapshotKey, Arc<MarketFeatureSnapshot>>,
+    pub(crate) market_feature_snapshots:
+        HashMap<MarketFeatureSnapshotKey, Arc<MarketFeatureSnapshot>>,
     pub(crate) prediction_scores: HashMap<SignalDataCacheKey, Arc<PredictionScoresByDate>>,
     pub(crate) industry_classifications: HashMap<SignalDataCacheKey, Arc<IndustryMap>>,
     pub(crate) benchmark_returns: HashMap<SignalDataCacheKey, Arc<BenchmarkReturns>>,
@@ -212,10 +213,12 @@ pub struct SignalDataCacheSnapshot {
     pub(crate) return_history: HashMap<SignalDataCacheKey, Arc<SymbolReturnHistory>>,
     pub(crate) average_amounts: HashMap<SignalDataCacheKey, Arc<AverageAmounts>>,
     pub(crate) average_amount_history: HashMap<SignalDataCacheKey, Arc<AverageAmountHistory>>,
-    pub(crate) pit_average_amount_matrices: HashMap<PitAverageAmountMatrixCacheKey, Arc<AverageAmountsByDate>>,
+    pub(crate) pit_average_amount_matrices:
+        HashMap<PitAverageAmountMatrixCacheKey, Arc<AverageAmountsByDate>>,
     pub(crate) return_risk_feature_matrices:
         HashMap<ReturnRiskFeatureMatrixCacheKey, Arc<ScoreDateReturnRiskMatrix>>,
-    pub(crate) market_feature_snapshots: HashMap<MarketFeatureSnapshotKey, Arc<MarketFeatureSnapshot>>,
+    pub(crate) market_feature_snapshots:
+        HashMap<MarketFeatureSnapshotKey, Arc<MarketFeatureSnapshot>>,
     pub(crate) prediction_scores: HashMap<SignalDataCacheKey, Arc<PredictionScoresByDate>>,
     pub(crate) industry_classifications: HashMap<SignalDataCacheKey, Arc<IndustryMap>>,
     pub(crate) benchmark_returns: HashMap<SignalDataCacheKey, Arc<BenchmarkReturns>>,
@@ -325,7 +328,10 @@ impl SignalDataCache {
         matrix
     }
 
-    pub(crate) fn record_persistent_market_feature_hit(&mut self, kind: PersistentMarketFeatureKind) {
+    pub(crate) fn record_persistent_market_feature_hit(
+        &mut self,
+        kind: PersistentMarketFeatureKind,
+    ) {
         match kind {
             PersistentMarketFeatureKind::ReturnHistory => {
                 self.stats.persistent_return_history_hits += 1;
@@ -345,7 +351,10 @@ impl SignalDataCache {
         }
     }
 
-    pub(crate) fn record_persistent_market_feature_miss(&mut self, kind: PersistentMarketFeatureKind) {
+    pub(crate) fn record_persistent_market_feature_miss(
+        &mut self,
+        kind: PersistentMarketFeatureKind,
+    ) {
         match kind {
             PersistentMarketFeatureKind::ReturnHistory => {
                 self.stats.persistent_return_history_misses += 1;
@@ -366,7 +375,10 @@ impl SignalDataCache {
         }
     }
 
-    pub(crate) fn record_persistent_market_feature_write(&mut self, kind: PersistentMarketFeatureKind) {
+    pub(crate) fn record_persistent_market_feature_write(
+        &mut self,
+        kind: PersistentMarketFeatureKind,
+    ) {
         match kind {
             PersistentMarketFeatureKind::ReturnHistory => {
                 self.stats.persistent_return_history_writes += 1;
@@ -513,7 +525,10 @@ impl SignalDataCache {
         value
     }
 
-    pub(crate) fn cached_trading_days(&mut self, key: &SignalDataCacheKey) -> Option<Arc<Vec<NaiveDate>>> {
+    pub(crate) fn cached_trading_days(
+        &mut self,
+        key: &SignalDataCacheKey,
+    ) -> Option<Arc<Vec<NaiveDate>>> {
         match self.trading_days.get(key) {
             Some(value) => {
                 self.stats.trading_day_hits += 1;
@@ -1091,7 +1106,11 @@ impl SignalDataCache {
     }
 
     #[cfg(test)]
-    pub(crate) fn store_combo_scores_for_test(&mut self, key: SignalDataCacheKey, value: FactorScoresByDate) {
+    pub(crate) fn store_combo_scores_for_test(
+        &mut self,
+        key: SignalDataCacheKey,
+        value: FactorScoresByDate,
+    ) {
         self.combo_scores.insert(key, Arc::new(value));
     }
 

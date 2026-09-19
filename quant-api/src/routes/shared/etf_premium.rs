@@ -106,12 +106,12 @@ pub async fn load_etf_premium_map(
                WHERE n.unit_nav IS NOT NULL
                  AND n.unit_nav > 0
                  AND n.nav_date >= $1 - $3::int"#,
-        )
-        .bind(date)
-        .bind(etf_symbols)
-        .bind(ETF_NAV_FRESH_DAYS as i32)
-        .fetch_all(db)
-        .await;
+    )
+    .bind(date)
+    .bind(etf_symbols)
+    .bind(ETF_NAV_FRESH_DAYS as i32)
+    .fetch_all(db)
+    .await;
 
     let rows = match rows {
         Ok(r) => r,
@@ -183,7 +183,11 @@ pub fn apply_premium_exit_overlay(
                         sym,
                         prem * 100.0,
                         gate * 100.0,
-                        if holding.contains(sym) { "持有清仓" } else { "滞回不买回" }
+                        if holding.contains(sym) {
+                            "持有清仓"
+                        } else {
+                            "滞回不买回"
+                        }
                     );
                     (sym.clone(), 0.0)
                 }

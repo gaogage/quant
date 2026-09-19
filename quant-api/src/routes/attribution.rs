@@ -1,11 +1,11 @@
 //! 持仓层面回撤归因:按行业/市值/风格分解收益贡献。
 //! 蓝图 §86 组合归因闭环:补行业/风格暴露归因。
 
-use std::collections::HashMap;
+use axum::{extract::State, response::IntoResponse, Json};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
-use axum::{extract::State, response::IntoResponse, Json};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -40,9 +40,15 @@ pub async fn fetch_positions_with_industry(
     .map_err(|e| format!("fetch positions: {}", e))?;
     Ok(rows
         .into_iter()
-        .map(|(symbol, quantity, market_value, weight, industry)| PositionWithIndustry {
-            symbol, quantity, market_value, weight, industry,
-        })
+        .map(
+            |(symbol, quantity, market_value, weight, industry)| PositionWithIndustry {
+                symbol,
+                quantity,
+                market_value,
+                weight,
+                industry,
+            },
+        )
         .collect())
 }
 
@@ -68,7 +74,13 @@ pub async fn fetch_market_cap(
 
 /// 市值分桶:大盘(>500亿) / 中盘(>100亿) / 小盘(<=100亿)。
 pub fn bucket_market_cap(mv_yi: f64) -> &'static str {
-    if mv_yi > 500.0 { "large" } else if mv_yi > 100.0 { "mid" } else { "small" }
+    if mv_yi > 500.0 {
+        "large"
+    } else if mv_yi > 100.0 {
+        "mid"
+    } else {
+        "small"
+    }
 }
 
 /// 取 symbol 在 [start, end] 的区间收益(end 收盘 / start 收盘 - 1)。
@@ -95,7 +107,11 @@ async fn fetch_stock_period_return(
     }
     let first = prices.first().unwrap().1;
     let last = prices.last().unwrap().1;
-    if first > 0.0 { Ok(last / first - 1.0) } else { Ok(0.0) }
+    if first > 0.0 {
+        Ok(last / first - 1.0)
+    } else {
+        Ok(0.0)
+    }
 }
 
 /// 单持仓的收益贡献归因。
@@ -122,7 +138,11 @@ pub async fn compute_return_contribution(
     for p in positions {
         let stock_return = fetch_stock_period_return(db, &p.symbol, start, end).await?;
         let mv = market_caps.get(&p.symbol).copied().unwrap_or(0.0);
-        let cap_bucket = if mv > 0.0 { bucket_market_cap(mv).to_string() } else { "unknown".into() };
+        let cap_bucket = if mv > 0.0 {
+            bucket_market_cap(mv).to_string()
+        } else {
+            "unknown".into()
+        };
         out.push(Contribution {
             symbol: p.symbol.clone(),
             industry: p.industry.clone(),
@@ -147,7 +167,10 @@ pub struct DimensionAttribution {
 }
 
 /// 按维度(industry/cap_bucket)聚合贡献。
-pub fn aggregate_by_dimension(contributions: &[Contribution], dimension: &str) -> Vec<DimensionAttribution> {
+pub fn aggregate_by_dimension(
+    contributions: &[Contribution],
+    dimension: &str,
+) -> Vec<DimensionAttribution> {
     let mut buckets: HashMap<String, (f64, f64, usize)> = HashMap::new();
     let mut total_contrib = 0.0_f64;
     for c in contributions {
@@ -169,11 +192,19 @@ pub fn aggregate_by_dimension(contributions: &[Contribution], dimension: &str) -
             bucket,
             weight_avg: if n > 0 { weight_sum / n as f64 } else { 0.0 },
             contribution: contrib,
-            contribution_pct: if total_contrib.abs() > 1e-12 { contrib / total_contrib } else { 0.0 },
+            contribution_pct: if total_contrib.abs() > 1e-12 {
+                contrib / total_contrib
+            } else {
+                0.0
+            },
             n_positions: n,
         })
         .collect();
-    out.sort_by(|a, b| a.contribution.partial_cmp(&b.contribution).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        a.contribution
+            .partial_cmp(&b.contribution)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }
 
@@ -226,7 +257,10 @@ async fn run_drawdown_attribution(
     // 2. 取 start 日持仓 + 行业
     let positions = fetch_positions_with_industry(db, &task_id, start).await?;
     if positions.is_empty() {
-        return Err(format!("{} 在 {} 无持仓(task={})", req.strategy_id, start, task_id));
+        return Err(format!(
+            "{} 在 {} 无持仓(task={})",
+            req.strategy_id, start, task_id
+        ));
     }
     let symbols: Vec<String> = positions.iter().map(|p| p.symbol.clone()).collect();
 
@@ -234,7 +268,8 @@ async fn run_drawdown_attribution(
     let market_caps = fetch_market_cap(db, &symbols, start).await?;
 
     // 4. 算收益贡献
-    let contributions = compute_return_contribution(db, &positions, &market_caps, start, end).await?;
+    let contributions =
+        compute_return_contribution(db, &positions, &market_caps, start, end).await?;
 
     // 5. 维度聚合
     let by_industry = aggregate_by_dimension(&contributions, "industry");
@@ -242,7 +277,11 @@ async fn run_drawdown_attribution(
 
     // 6. top 贡献者(正/负各 5)
     let mut sorted = contributions.clone();
-    sorted.sort_by(|a, b| a.contribution.partial_cmp(&b.contribution).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.contribution
+            .partial_cmp(&b.contribution)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let worst: Vec<&Contribution> = sorted.iter().take(5).collect();
     let best: Vec<&Contribution> = sorted.iter().rev().take(5).collect();
 
@@ -294,9 +333,30 @@ mod tests {
     #[test]
     fn test_aggregate_by_industry() {
         let contribs = vec![
-            Contribution { symbol: "A".into(), industry: Some("银行".into()), cap_bucket: "large".into(), weight_avg: 0.1, stock_return: 0.2, contribution: 0.02 },
-            Contribution { symbol: "B".into(), industry: Some("银行".into()), cap_bucket: "large".into(), weight_avg: 0.1, stock_return: -0.1, contribution: -0.01 },
-            Contribution { symbol: "C".into(), industry: Some("地产".into()), cap_bucket: "mid".into(), weight_avg: 0.05, stock_return: 0.4, contribution: 0.02 },
+            Contribution {
+                symbol: "A".into(),
+                industry: Some("银行".into()),
+                cap_bucket: "large".into(),
+                weight_avg: 0.1,
+                stock_return: 0.2,
+                contribution: 0.02,
+            },
+            Contribution {
+                symbol: "B".into(),
+                industry: Some("银行".into()),
+                cap_bucket: "large".into(),
+                weight_avg: 0.1,
+                stock_return: -0.1,
+                contribution: -0.01,
+            },
+            Contribution {
+                symbol: "C".into(),
+                industry: Some("地产".into()),
+                cap_bucket: "mid".into(),
+                weight_avg: 0.05,
+                stock_return: 0.4,
+                contribution: 0.02,
+            },
         ];
         let agg = aggregate_by_dimension(&contribs, "industry");
         // 银行: 0.02 + (-0.01) = 0.01;地产: 0.02;总 0.03
@@ -310,8 +370,22 @@ mod tests {
     #[test]
     fn test_aggregate_by_market_cap() {
         let contribs = vec![
-            Contribution { symbol: "A".into(), industry: None, cap_bucket: "large".into(), weight_avg: 0.2, stock_return: 0.1, contribution: 0.02 },
-            Contribution { symbol: "B".into(), industry: None, cap_bucket: "small".into(), weight_avg: 0.1, stock_return: 0.3, contribution: 0.03 },
+            Contribution {
+                symbol: "A".into(),
+                industry: None,
+                cap_bucket: "large".into(),
+                weight_avg: 0.2,
+                stock_return: 0.1,
+                contribution: 0.02,
+            },
+            Contribution {
+                symbol: "B".into(),
+                industry: None,
+                cap_bucket: "small".into(),
+                weight_avg: 0.1,
+                stock_return: 0.3,
+                contribution: 0.03,
+            },
         ];
         let agg = aggregate_by_dimension(&contribs, "market_cap");
         assert_eq!(agg.len(), 2);

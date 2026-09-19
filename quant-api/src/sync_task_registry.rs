@@ -109,4 +109,3 @@ where
     let handle = tokio::spawn(future);
     registry.register(&task_id, handle).await;
 }
-

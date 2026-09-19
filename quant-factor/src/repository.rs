@@ -15,7 +15,7 @@ use rust_decimal::prelude::ToPrimitive;
 use sqlx::PgPool;
 
 use crate::combine::{
-    icir_weights_from_evals, equal_weights_from_evals, CombineMethod, FactorWeight,
+    equal_weights_from_evals, icir_weights_from_evals, CombineMethod, FactorWeight,
 };
 
 /// Load IC evaluations for weight computation
