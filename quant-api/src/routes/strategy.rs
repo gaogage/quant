@@ -573,7 +573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "DB 集成测试(本机 PG),显式跑: cargo test -- --ignored"]
     async fn test_load_resolved_strategy_v19() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "DB 集成测试(本机 PG),显式跑: cargo test -- --ignored"]
     async fn test_load_resolved_strategy_invalid() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());

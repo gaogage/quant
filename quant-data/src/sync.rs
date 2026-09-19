@@ -9050,7 +9050,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
     async fn test_sync_fund_basic_writes_list_date() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -9073,7 +9073,7 @@ mod tests {
 /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
 ///       cargo test --release -p quant-data sync_candidate_etf_pool -- --ignored --nocapture
 #[tokio::test]
-#[ignore]
+#[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
 async fn sync_candidate_etf_pool() {
     let db = sqlx::PgPool::connect(
         &std::env::var("DATABASE_URL")
@@ -9117,7 +9117,7 @@ async fn sync_candidate_etf_pool() {
 /// fin_indicator(5-15断)/dividend(5-14断)/share_float(6-16断) 用充值 token 补缺口。
 /// 运行：cargo test --release -p quant-data backfill_stale_sources -- --ignored --nocapture
 #[tokio::test]
-#[ignore]
+#[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
 async fn backfill_stale_sources() {
     let db = sqlx::PgPool::connect(
         &std::env::var("DATABASE_URL")
@@ -9177,7 +9177,7 @@ async fn backfill_stale_sources() {
 /// 切月窗避开。幂等 upsert，已存行无害。
 /// 运行：TUSHARE_TOKEN_ALT=<充值token> cargo test --release -p quant-data share_float_monthly -- --ignored --nocapture
 #[tokio::test]
-#[ignore]
+#[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
 async fn share_float_monthly_backfill() {
     let db = sqlx::PgPool::connect(
         &std::env::var("DATABASE_URL")
@@ -9207,7 +9207,7 @@ async fn share_float_monthly_backfill() {
 /// share_float 超限窗口按 ann_date 逐日补齐（2026-09-05）：
 /// offset 全局上限 10 万，超限窗口（6-23~6-30 单周 >10 万行）改按公告日切分。
 #[tokio::test]
-#[ignore]
+#[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
 async fn share_float_by_anndate() {
     let db = sqlx::PgPool::connect(
         &std::env::var("DATABASE_URL")

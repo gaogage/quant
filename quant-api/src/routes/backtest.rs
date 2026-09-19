@@ -4299,7 +4299,7 @@ mod f1_sleeve_tests {
     /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api f1_sleeve -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn f1_sleeve_full_engine_backtest_2014_2026() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -4364,7 +4364,7 @@ mod h20_regime_tests {
     /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api h20_regime -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn h20_sleeve_regime_policy_comparison() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -4438,7 +4438,7 @@ mod f1_22f_tests {
     /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api f1_22f -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn f1_22f_vs_21f_sleeve_backtest() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -4495,7 +4495,7 @@ mod iso23_solo {
 
     /// 单组 23f（含 F1 中性化）——绕开双组循环的 task 冲突。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn iso23_solo_backtest() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -4530,7 +4530,7 @@ mod f1_quarterly_rerun {
     /// 重跑1：F1 sleeve 正确 quarterly(60日)调仓——此前解析 bug 实际跑的是 20 日。
     /// 对照：72 因子新基线 sleeve（同引擎同参数）。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn f1_sleeve_quarterly_correct() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -4595,7 +4595,7 @@ mod ddctrl_mu_rerun {
 
     /// 重跑3：dd_ctrl_v1 sleeve 用 72 因子新 combo 重测。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn ddctrl_72f_rerun() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -4654,7 +4654,7 @@ mod sleeve_freq_scan {
     /// sleeve 频率扫描：5/10/20/40 日频的 dd_ctrl sleeve 绩效对比。
     /// 机制：dd_ctrl 的回撤检测窗口 vs 调仓响应速度的平衡。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn sleeve_frequency_scan() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -4695,7 +4695,7 @@ mod sleeve_param_grid {
     /// Sleeve 参数网格：top_n × kelly，dd_ctrl_v1，72 因子 combo。
     /// 输出每组 sleeve 的绩效指标，找最佳组合。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn sleeve_param_grid_scan() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());

@@ -289,7 +289,7 @@ mod tests {
     /// 本地验证入口: set -a; source ../.env; source ../.env.quant; set +a;
     /// cargo test --release -p quant-api native_pv_increment_once -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
     async fn native_pv_increment_once() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")

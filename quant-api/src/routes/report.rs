@@ -850,7 +850,7 @@ mod daily_report_tests {
     /// P2-1 集成测试(接真实生产库,验证 push_daily_performance_report 不 panic
     /// 且正确写入 paper_nav_snapshot)。运行: cargo test --lib -- --ignored push_daily_performance_report_writes_snapshot
     #[tokio::test]
-    #[ignore]
+    #[ignore = "DB 集成测试(本机 PG),显式跑: cargo test -- --ignored"]
     async fn push_daily_performance_report_writes_snapshot() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());

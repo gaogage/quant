@@ -1839,7 +1839,7 @@ mod stale_pv_recompute_tests {
     ///       cargo test --release -p quant-api stale_pv_recompute -- --ignored --nocapture
     /// 窗口：起点 07-10（保留 20d 回溯余量），终点改到待补的最新交易日（2026-09-16 更新为 09-15）。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "DB 集成测试(本机 PG),显式跑: cargo test -- --ignored"]
     async fn stale_pv_recompute() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")
@@ -2015,7 +2015,7 @@ mod stale_pv_recompute_tests {
     /// 运行：set -a; source ../.env; set +a;
     ///       cargo test --release -p quant-api pv_std_backfill_2605 -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "DB 集成测试(本机 PG),显式跑: cargo test -- --ignored"]
     async fn pv_std_backfill_2605() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")

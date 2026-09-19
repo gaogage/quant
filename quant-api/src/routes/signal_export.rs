@@ -643,7 +643,7 @@ mod tests {
     ///   set -a; source ../.env; source ../.env.quant; set +a;
     ///   cargo test --release -p quant-api fund_nav_backfill -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
     async fn fund_nav_backfill() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")
@@ -677,7 +677,7 @@ mod tests {
     /// 2020-04-20 南方原油溢价 63% 应命中 block_buy。
     /// 运行: cargo test --release -p quant-api premium_gate_probe -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
     async fn premium_gate_probe() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")
@@ -707,7 +707,7 @@ mod tests {
     /// 运行: set -a; source .env; source .env.quant; set +a;
     ///   cargo test --release -p quant-api dividend_stkdiv_backfill -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
     async fn dividend_stkdiv_backfill() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")
@@ -759,7 +759,7 @@ mod tests {
     /// 运行: set -a; source .env; source .env.quant; set +a;
     ///   cargo test --release -p quant-api fund_div_backfill -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
     async fn fund_div_backfill() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")

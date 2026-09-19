@@ -2740,7 +2740,7 @@ mod stale_factor_recompute_tests {
     /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api stale_factor_recompute -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
     async fn stale_factor_recompute() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")
@@ -2761,7 +2761,7 @@ mod forecast_backfill_byday_tests {
     /// 运行: set -a; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api forecast_backfill_byday -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
     async fn forecast_backfill_byday() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")
@@ -2804,7 +2804,7 @@ mod forecast_daily_tests {
     /// forecast 表补同步（2026-09-05：数据断在 4-29，充值 token 有权限）。
     /// 运行：TUSHARE_TOKEN_ALT=<token> cargo test --release -p quant-api forecast_backfill -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "数据补数/外部 API 工具型(写业务表),手动触发"]
     async fn forecast_backfill_apr_to_now() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")

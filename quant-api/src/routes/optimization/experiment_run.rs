@@ -2251,7 +2251,7 @@ mod experiment_run_tests {
     /// 需 DB,默认不跑(--ignored 触发)。运行:
     ///   cargo test -p quant-api --lib experiment_run_tests -- --ignored
     #[tokio::test]
-    #[ignore]
+    #[ignore = "DB 集成测试(本机 PG),显式跑: cargo test -- --ignored"]
     async fn create_experiment_run_persists_running_and_completed() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());

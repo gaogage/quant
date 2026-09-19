@@ -243,7 +243,7 @@ mod tests {
     /// 需 DB,默认不跑(--ignored 触发)。运行:
     ///   cargo test -p quant-backtest --lib types::tests -- --ignored
     #[tokio::test]
-    #[ignore]
+    #[ignore = "DB 集成测试(本机 PG),显式跑: cargo test -- --ignored"]
     async fn try_from_raw_accepts_registered_rejects_unknown_dv_id() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());

@@ -1114,7 +1114,7 @@ mod f1_combo_tests {
     /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api f1_combo_materialize -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "DB 集成测试(本机 PG),显式跑: cargo test -- --ignored"]
     async fn f1_combo_materialize_22f() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());

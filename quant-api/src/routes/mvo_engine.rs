@@ -399,7 +399,7 @@ mod tests {
     /// 全周期 v19 模拟验证（需本地 quant 库）。
     /// DATABASE_URL=postgres://gaocheng@localhost/quant cargo test --release -p quant-api v19_full_period -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn test_v19_full_period_performance() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -493,7 +493,7 @@ mod tests {
     /// 参数扫描：遍历 dynamic_target 上限，输出 AR/DD/Sharpe/Sortino/Calmar，找 AR/DD 最优平衡。
     /// DATABASE_URL=... cargo test --release -p quant-api scan_target -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn test_scan_target_cap() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -573,7 +573,7 @@ mod tests {
     /// 阶段2 Task C：32因子PIT combo 代入组合层 vs 旧基线，同区间(2017-2026)对照。
     /// DATABASE_URL=... cargo test --release -p quant-api test_scan_pit_combo -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn test_scan_pit_combo() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -649,7 +649,7 @@ mod tests {
     /// 同时输出无杠杆 + 杠杆(vol_target×1.5)。PIT-37f vs base-5f。
     /// DATABASE_URL=... cargo test --release -p quant-api test_pit_oos_lev -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn test_pit_oos_lev() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -759,7 +759,7 @@ mod tests {
     /// 强平门控内建在 rebalance_account，从 paper_account 列读）找风险调整收益最优配置。
     /// DATABASE_URL=... cargo test --release -p quant-api optimize_leverage -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn test_optimize_leverage_with_liquidation() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -851,7 +851,7 @@ mod tests {
     /// Task 7: run_daily_simulation NAV 恒等式验证（盯市 current_nav 复利）。
     /// DATABASE_URL=postgres://gaocheng@localhost/quant cargo test --lib routes::mvo_engine::tests::test_run_daily_simulation_nav_identity -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn test_run_daily_simulation_nav_identity() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -911,7 +911,7 @@ mod tests {
     ///
     /// 运行：cargo test --release -p quant-api v26_maxsharpe -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn test_v26_maxsharpe_vs_minvariance_replay() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -969,7 +969,7 @@ mod tests {
     /// 运行：set -a; source .env; source .env.quant; set +a;
     ///       cargo test --release -p quant-api v24_full_period -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn test_v24_full_period_replay_2016_2026() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1042,7 +1042,7 @@ mod tests {
     /// 运行：set -a; source .env; source .env.quant; set +a;
     ///       cargo test --release -p quant-api v27_etf_expand -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn test_v27_etf_pool_expand_replay() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1107,7 +1107,7 @@ mod v28dd_tests {
     /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api v28dd -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn v28dd_composite_replay_2016_2026() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1168,7 +1168,7 @@ mod v29ra_tests {
     /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api v29ra -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn v29ra_mu_risk_adjusted_replay() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1226,7 +1226,7 @@ mod etf_expand_rerun {
     /// 重跑2：ETF扩池在真实基线（授信预算+weight修复+72因子combo）下重测。
     /// 之前否决时基线虚高12.43%，且 sleeve 用的是拼接体combo（11.14%）。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn etf_pool_expand_clean_rerun() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1282,7 +1282,7 @@ mod v30dd_tests {
     /// v30dd：72 因子 dd_ctrl sleeve 的 composite 重测——最高优先实验。
     /// sleeve 层 9.28%/0.804/-22%，看 composite 能否兑现。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn v30dd_composite_replay() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1325,7 +1325,7 @@ mod v31fx_tests {
 
     /// v31fx：固定权重(30%A+70%ETF池11资产) + dd_ctrl sleeve + 1.5x 回放验证。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn v31fx_composite_replay() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1368,7 +1368,7 @@ mod v31_dual_tests {
 
     /// v31 双组回放：11 资产（修正权重）vs 7 资产（原始池）。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn v31_dual_replay() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1423,7 +1423,7 @@ mod v31_freq_tests {
     /// 跟踪误差消除实验：quarterly vs monthly vs biweekly 三频率对照。
     /// 假设：调仓频率越接近 sleeve 的 10 日频，跟踪误差越小，绩效越接近理论模拟。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn v31_tracking_error_elimination() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1478,7 +1478,7 @@ mod v31_freq_tests {
 mod weekly_test {
     use super::*;
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn v31_weekly() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1524,7 +1524,7 @@ mod freq_final {
     /// 终局频率实验：修复价格空间 BUG 后的公平对比。
     /// 之前 weekly 36.25% 是停牌股价格膨胀污染，本次应为真实绩效。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn freq_final_clean() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1580,7 +1580,7 @@ mod final_optimization {
 
     /// 终局参数优化：最优 sleeve（kelly=0.15）+ weekly + 权重扫描
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn final_weight_scan() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1649,7 +1649,7 @@ mod final_optimization {
     /// 纳指年化 19.93% 仅 14% 权重——结构性拖累。对比规则化权重方案（零拟合先验，
     /// 非全样本挑参）：基准 / 等权 / 增长倾斜 / 半防御倾斜。均 A=20% + kelly=0.15 + weekly @1.5x。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn etf_weight_structure_scan() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1729,7 +1729,7 @@ mod final_optimization {
     /// 在权重结构实验选定的权重上扫 1.5~2.5x，验证 dd_ctrl/强平非线性下的真实曲线。
     /// 权重经环境变量 LEV_SCAN_WEIGHTS 注入（8 元素逗号分隔），缺省用生产现行权重。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn leverage_scan() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1799,7 +1799,7 @@ mod final_optimization {
     /// 等权 ETF 结构下的 A 股权重重扫（2026-09-07）：原 A 权重扫描基于旧权重结构
     /// （国债 32%），等权结构下最优 A 权重可能偏移。ETF 侧等权，A 15%~30%，@2.2x。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn a_weight_scan_equal_weight() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1860,7 +1860,7 @@ mod final_optimization {
     /// 三方案 × 双杠杆档（2.2x 有杠杆 / 1.0x 无杠杆），A=15% 基准，等权零拟合。
     /// X1 扩3：红利+创业板+德国（10 资产）；X2 扩4：+可转债（11）；X3 扩5：+日经（12）。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn pool_expansion_scan() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -1965,7 +1965,7 @@ mod final_optimization {
     /// sleeve(9.4%) 年化高于 ETF 等权池(~7.4%)，无融资成本考量下应提高 A 权重。
     /// A 权重 × ETF 结构（等权/增长倾斜）网格，@1.0x 全部。
     #[tokio::test]
-    #[ignore]
+    #[ignore = "慢测:全周期引擎回放/参数扫描(DB+Tushare,分钟级),显式跑: -- --ignored"]
     async fn unlev_boost_scan() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());

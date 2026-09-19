@@ -15099,7 +15099,7 @@ mod stale_recompute_tests {
     /// 运行：set -a; source ../.env; source ../.env.quant; set +a;
     ///       cargo test --release -p quant-api stale_recompute -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "DB 集成测试(本机 PG),显式跑: cargo test -- --ignored"]
     async fn stale_factor_families_recompute() {
         let db = sqlx::PgPool::connect(
             &std::env::var("DATABASE_URL")
