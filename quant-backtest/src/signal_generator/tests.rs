@@ -10597,6 +10597,1424 @@ fn north_flow_regime_confirm_uses_faster_lookback() {
     assert_eq!(bear.skip_top_pct, 0.05);
 }
 
+// ─── capacity_budget: MarketRegimePolicy preset 构造器补测 ─────────────────
+
+#[test]
+fn quality_regime_alpha_overlay_blend_10pct_attaches_blend_overlay_in_stress_only() {
+    // Phase 7-AP overlay 变体：弱市叠加「质量/价值/复苏三源确认」blend 小权重分数，
+    // 保留 quality 锚不动 combo；overlay 只挂 Bear/HighVol，平静 regime 保持原样。
+    let policy = MarketRegimePolicy::quality_regime_alpha_overlay_blend_10pct_v1("000300.SH");
+    let base = SignalConfig::default();
+
+    for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+        let applied = policy.apply(&base, regime);
+        let overlay = applied.score_overlay.expect("弱市必须挂 blend overlay");
+        assert_eq!(
+            overlay.combo_name,
+            "phase7_quality_value_recovery_confirm_v1"
+        );
+        assert_eq!(overlay.version, "1.0.0");
+        assert_eq!(overlay.weight, 0.10);
+        assert_eq!(overlay.score_direction, ScoreDirection::Descending);
+        assert!(
+            applied.portfolio_sleeve.is_none(),
+            "overlay 策略不应挂 portfolio sleeve"
+        );
+    }
+    for regime in [
+        MarketRegime::Bull,
+        MarketRegime::Sideways,
+        MarketRegime::Mixed,
+    ] {
+        assert!(
+            policy.apply(&base, regime).score_overlay.is_none(),
+            "{:?} 不应挂 overlay",
+            regime
+        );
+    }
+    // 敞口继承 bear_window_guard_v2 基底：Bear 0.72 / HighVol 0.58
+    assert_eq!(
+        policy.apply(&base, MarketRegime::Bear).max_gross_exposure,
+        0.72
+    );
+    assert_eq!(
+        policy
+            .apply(&base, MarketRegime::HighVolatility)
+            .max_gross_exposure,
+        0.58
+    );
+    // 相对关系：与 value_10pct 同权重、同基底，唯一差异是 overlay 的 combo 换成 blend 确认源
+    let value = MarketRegimePolicy::quality_regime_alpha_overlay_value_10pct_v1("000300.SH");
+    assert_eq!(
+        value
+            .apply(&base, MarketRegime::Bear)
+            .score_overlay
+            .unwrap()
+            .combo_name,
+        "phase7_valuation_v1"
+    );
+}
+
+#[test]
+fn quality_regime_alpha_portfolio_sleeve_value_10pct_allocates_thinner_value_sleeve() {
+    // Phase 7-AQ sleeve 变体：弱市把 10% 资金划给独立价值 sleeve（比 15pct 版更薄），
+    // 主锚 ranking 不受扰动；Bear/HighVol 挂 sleeve，平静 regime 不挂。
+    let policy =
+        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_value_10pct_v1("000300.SH");
+    let base = SignalConfig::default();
+
+    for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+        let sleeve = policy
+            .apply(&base, regime)
+            .portfolio_sleeve
+            .expect("弱市必须挂价值 sleeve");
+        assert_eq!(sleeve.combo_name, "phase7_valuation_v1");
+        assert_eq!(sleeve.version, "1.0.0");
+        assert_eq!(sleeve.weight, 0.10);
+        assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+    }
+    assert!(
+        policy
+            .apply(&base, MarketRegime::Bull)
+            .portfolio_sleeve
+            .is_none(),
+        "平静 regime 不应挂 sleeve"
+    );
+    // 相对关系：同为 value sleeve，10pct 版权重严格小于 15pct 版
+    let sleeve_15 =
+        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_value_15pct_v1("000300.SH")
+            .apply(&base, MarketRegime::Bear)
+            .portfolio_sleeve
+            .unwrap();
+    assert!(sleeve_15.weight > 0.10);
+    // 敞口继承 bear_window_guard_v2 基底
+    assert_eq!(
+        policy
+            .apply(&base, MarketRegime::HighVolatility)
+            .max_gross_exposure,
+        0.58
+    );
+}
+
+#[test]
+fn quality_regime_alpha_portfolio_sleeve_blend_10pct_allocates_confirmed_blend_sleeve() {
+    // Phase 7-AQ blend sleeve：弱市划 10% 给「质量/价值/复苏确认」blend sleeve，
+    // 与 value_10pct 同权重同挂载 regime，差异只在 sleeve 的 alpha 源。
+    let policy =
+        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_blend_10pct_v1("000300.SH");
+    let base = SignalConfig::default();
+
+    let bear_sleeve = policy
+        .apply(&base, MarketRegime::Bear)
+        .portfolio_sleeve
+        .expect("bear blend sleeve");
+    assert_eq!(
+        bear_sleeve.combo_name,
+        "phase7_quality_value_recovery_confirm_v1"
+    );
+    assert_eq!(bear_sleeve.version, "1.0.0");
+    assert_eq!(bear_sleeve.weight, 0.10);
+    assert_eq!(bear_sleeve.score_direction, ScoreDirection::Descending);
+
+    let high_vol_sleeve = policy
+        .apply(&base, MarketRegime::HighVolatility)
+        .portfolio_sleeve
+        .expect("high-vol blend sleeve");
+    assert_eq!(
+        high_vol_sleeve.combo_name,
+        "phase7_quality_value_recovery_confirm_v1"
+    );
+    assert!(
+        policy
+            .apply(&base, MarketRegime::Sideways)
+            .portfolio_sleeve
+            .is_none(),
+        "平静 regime 不应挂 sleeve"
+    );
+    // 相对关系：与 value_10pct 唯一差异是 combo 名
+    let value_sleeve =
+        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_value_10pct_v1("000300.SH")
+            .apply(&base, MarketRegime::Bear)
+            .portfolio_sleeve
+            .unwrap();
+    assert_eq!(value_sleeve.weight, bear_sleeve.weight);
+    assert_ne!(value_sleeve.combo_name, bear_sleeve.combo_name);
+}
+
+#[test]
+fn quality_regime_alpha_portfolio_sleeve_event_window_fractional_weights_ladder() {
+    // 事件窗 sleeve 的低权重阶梯补位：05pct / 075pct 两档（10/125/15pct 已测），
+    // 组合构造后按固定权重切走独立事件 alpha sleeve，Bear/HighVol 挂载。
+    let base = SignalConfig::default();
+    for (policy, expected_weight) in [
+        (
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_05pct_v1(
+                "000300.SH",
+            ),
+            0.05,
+        ),
+        (
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_075pct_v1(
+                "000300.SH",
+            ),
+            0.075,
+        ),
+    ] {
+        for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+            let sleeve = policy
+                .apply(&base, regime)
+                .portfolio_sleeve
+                .expect("事件窗 sleeve");
+            assert_eq!(sleeve.combo_name, "phase7_event_window_earnings_v1");
+            assert_eq!(sleeve.version, "1.0.0");
+            assert_eq!(sleeve.weight, expected_weight);
+            assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+        }
+        assert!(
+            policy
+                .apply(&base, MarketRegime::Mixed)
+                .portfolio_sleeve
+                .is_none(),
+            "平静 regime 不应挂事件 sleeve"
+        );
+    }
+    // 相对关系：权重阶梯 0.05 < 0.075 < 0.10（10pct 已在既有测试锁定）
+    let w05 = MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_05pct_v1(
+        "000300.SH",
+    )
+    .apply(&base, MarketRegime::Bear)
+    .portfolio_sleeve
+    .unwrap()
+    .weight;
+    let w075 = MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_075pct_v1(
+        "000300.SH",
+    )
+    .apply(&base, MarketRegime::Bear)
+    .portfolio_sleeve
+    .unwrap()
+    .weight;
+    let w10 = MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_window_10pct_v1(
+        "000300.SH",
+    )
+    .apply(&base, MarketRegime::Bear)
+    .portfolio_sleeve
+    .unwrap()
+    .weight;
+    assert!(w05 < w075 && w075 < w10);
+}
+
+#[test]
+fn quality_all_regime_event_window_sleeve_15pct_covers_every_state() {
+    // 全天候事件 sleeve：不再只在弱市，五个 regime 都切 15% 给事件窗 alpha，
+    // 是 all_regime 族的最重档（05/10pct 已测）。
+    let policy = MarketRegimePolicy::quality_all_regime_event_window_sleeve_15pct_v1("000300.SH");
+    let base = SignalConfig::default();
+
+    for regime in [
+        MarketRegime::Bull,
+        MarketRegime::Bear,
+        MarketRegime::HighVolatility,
+        MarketRegime::Sideways,
+        MarketRegime::Mixed,
+    ] {
+        let sleeve = policy
+            .apply(&base, regime)
+            .portfolio_sleeve
+            .unwrap_or_else(|| panic!("{:?} 必须挂全天候事件 sleeve", regime));
+        assert_eq!(sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(sleeve.version, "1.0.0");
+        assert_eq!(sleeve.weight, 0.15);
+        assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+    }
+    // 相对关系：all_regime 族内部权重阶梯 0.05 < 0.10 < 0.15
+    let w10 = MarketRegimePolicy::quality_all_regime_event_window_sleeve_10pct_v1("000300.SH")
+        .apply(&base, MarketRegime::Sideways)
+        .portfolio_sleeve
+        .unwrap()
+        .weight;
+    assert!(w10 < 0.15);
+}
+
+#[test]
+fn quality_regime_alpha_portfolio_sleeve_event_surprise_weight_ladder() {
+    // 事件「惊喜度」alpha sleeve：以业绩超预期幅度为分数源（区别于事件窗时长族），
+    // 05/10pct 补位（15pct 已测），挂载 regime 与其它弱市 sleeve 一致。
+    let base = SignalConfig::default();
+    for (policy, expected_weight) in [
+        (
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_surprise_05pct_v1(
+                "000300.SH",
+            ),
+            0.05,
+        ),
+        (
+            MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_surprise_10pct_v1(
+                "000300.SH",
+            ),
+            0.10,
+        ),
+    ] {
+        for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+            let sleeve = policy
+                .apply(&base, regime)
+                .portfolio_sleeve
+                .expect("事件惊喜 sleeve");
+            assert_eq!(sleeve.combo_name, "phase7_event_surprise_v1");
+            assert_eq!(sleeve.version, "1.0.0");
+            assert_eq!(sleeve.weight, expected_weight);
+            assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+        }
+        assert!(
+            policy
+                .apply(&base, MarketRegime::Bull)
+                .portfolio_sleeve
+                .is_none(),
+            "平静 regime 不应挂事件惊喜 sleeve"
+        );
+    }
+    // 相对关系：同源 15pct 版构成递增阶梯
+    let w15 = MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_event_surprise_15pct_v1(
+        "000300.SH",
+    )
+    .apply(&base, MarketRegime::Bear)
+    .portfolio_sleeve
+    .unwrap()
+    .weight;
+    assert!(0.05 < 0.10 && 0.10 < w15);
+}
+
+#[test]
+fn quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_keeps_ascending_direction() {
+    // 低风险 sleeve 10pct 档（15pct 已测）：弱市划 10% 给价格量扩张（低风险）alpha，
+    // sleeve 方向为 Ascending——sleeve 族里唯一反向的 alpha 源。
+    let policy =
+        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_lowrisk_10pct_v1("000300.SH");
+    let base = SignalConfig::default();
+
+    for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+        let sleeve = policy
+            .apply(&base, regime)
+            .portfolio_sleeve
+            .expect("低风险 sleeve");
+        assert_eq!(sleeve.combo_name, "phase7_price_volume_expanded_v1");
+        assert_eq!(sleeve.version, "1.0.0");
+        assert_eq!(sleeve.weight, 0.10);
+        assert_eq!(sleeve.score_direction, ScoreDirection::Ascending);
+    }
+    assert!(
+        policy
+            .apply(&base, MarketRegime::Mixed)
+            .portfolio_sleeve
+            .is_none(),
+        "平静 regime 不应挂低风险 sleeve"
+    );
+    // 相对关系：与 15pct 版同源同方向，权重更薄
+    let w15 =
+        MarketRegimePolicy::quality_regime_alpha_portfolio_sleeve_lowrisk_15pct_v1("000300.SH")
+            .apply(&base, MarketRegime::Bear)
+            .portfolio_sleeve
+            .unwrap()
+            .weight;
+    assert!(w15 > 0.10);
+}
+
+#[test]
+fn quality_bear_position_guard_v2_cuts_harder_than_v1_but_keeps_triggers() {
+    // U2 锚的更强 position guard（v1/v3 已测）：持仓数升到 30、熊/高波敞口与单票帽同步收紧，
+    // 但 regime 触发阈值与 v1 完全一致（只改风险形状，不改识别灵敏度）。
+    let policy = MarketRegimePolicy::quality_bear_position_guard_v2("000300.SH");
+    let base = SignalConfig::default();
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.top_n, 30);
+    assert_eq!(bear.rebalance_freq_days, 80);
+    assert_eq!(bear.max_gross_exposure, 0.68);
+    assert_eq!(bear.skip_top_pct, 0.05);
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(8, 2))
+    );
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    assert_eq!(high_vol.top_n, 30);
+    assert_eq!(high_vol.rebalance_freq_days, 40);
+    assert_eq!(high_vol.max_gross_exposure, 0.52);
+    assert_eq!(high_vol.skip_top_pct, 0.05);
+    assert_eq!(
+        policy.rules[&MarketRegime::HighVolatility].max_position_pct,
+        Some(Decimal::new(65, 3))
+    );
+
+    // 触发阈值与 v1 同源（bear_window_guard 系）：126 天回看、20 日起判、高波 0.28
+    assert_eq!(policy.lookback_days, 126);
+    assert_eq!(policy.min_observations, 20);
+    assert_eq!(policy.high_volatility_threshold, 0.28);
+    assert_eq!(policy.bear_return_threshold, -0.03);
+    assert_eq!(policy.bear_drawdown_threshold, 0.14);
+
+    // 相对关系：防御强度 v1 < v2 < v3 反转——v2 是最紧档（v3 为保收益放宽）
+    let v1 = MarketRegimePolicy::quality_bear_position_guard_v1("000300.SH");
+    let v3 = MarketRegimePolicy::quality_bear_position_guard_v3("000300.SH");
+    assert_eq!(v1.apply(&base, MarketRegime::Bear).max_gross_exposure, 0.74);
+    assert_eq!(v3.apply(&base, MarketRegime::Bear).max_gross_exposure, 0.82);
+    assert!(
+        v1.apply(&base, MarketRegime::Bear).max_gross_exposure > bear.max_gross_exposure
+            && bear.max_gross_exposure < v3.apply(&base, MarketRegime::Bear).max_gross_exposure
+    );
+}
+
+#[test]
+fn quality_event_window_position_guard_v1_v2_attach_event_sleeve_on_position_guards() {
+    // 事件窗 position guard（v3 已测）：在 bear position guard 的风险形状上，
+    // 给 Bear/HighVol 追加 15% 事件窗 earnings sleeve；v1/v2 继承对应 guard 的持仓参数。
+    let base = SignalConfig::default();
+    let cases = [
+        (
+            MarketRegimePolicy::quality_event_window_position_guard_v1("000300.SH"),
+            25,
+            80,
+            0.74,
+            Decimal::new(9, 2),
+        ),
+        (
+            MarketRegimePolicy::quality_event_window_position_guard_v2("000300.SH"),
+            30,
+            80,
+            0.68,
+            Decimal::new(8, 2),
+        ),
+    ];
+    for (policy, bear_top_n, bear_rebalance, bear_exposure, bear_position) in cases {
+        let bear = policy.apply(&base, MarketRegime::Bear);
+        assert_eq!(bear.top_n, bear_top_n);
+        assert_eq!(bear.rebalance_freq_days, bear_rebalance);
+        assert_eq!(bear.max_gross_exposure, bear_exposure);
+        assert_eq!(bear.skip_top_pct, 0.05);
+        assert_eq!(
+            policy.rules[&MarketRegime::Bear].max_position_pct,
+            Some(bear_position)
+        );
+        for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+            let sleeve = policy
+                .apply(&base, regime)
+                .portfolio_sleeve
+                .expect("事件窗 position sleeve");
+            assert_eq!(sleeve.combo_name, "phase7_event_window_earnings_v1");
+            assert_eq!(sleeve.version, "1.0.0");
+            assert_eq!(sleeve.weight, 0.15);
+            assert_eq!(sleeve.score_direction, ScoreDirection::Descending);
+        }
+        for regime in [
+            MarketRegime::Bull,
+            MarketRegime::Sideways,
+            MarketRegime::Mixed,
+        ] {
+            assert!(
+                policy.apply(&base, regime).portfolio_sleeve.is_none(),
+                "{:?} 不应挂事件 sleeve",
+                regime
+            );
+        }
+    }
+}
+
+#[test]
+fn quality_event_window_return_sharpe_router_v2_is_the_widest_neighbor() {
+    // 事件窗 sharpe router v2（v1/v3/v4 已测）：族内最宽的相邻候选——
+    // Bear 0.78/11%、HighVol 0.64/9%，同时保留 15% 事件 sleeve 与 20 只/60 日节奏。
+    let policy = MarketRegimePolicy::quality_event_window_return_sharpe_router_v2("000300.SH");
+    let base = SignalConfig::default();
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.top_n, 20);
+    assert_eq!(bear.rebalance_freq_days, 60);
+    assert_eq!(bear.max_gross_exposure, 0.78);
+    assert_eq!(bear.max_pairwise_correlation, Some(0.65));
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(11, 2))
+    );
+    let bear_sleeve = bear.portfolio_sleeve.expect("事件 sleeve 继承");
+    assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+    assert_eq!(bear_sleeve.weight, 0.15);
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    assert_eq!(high_vol.max_gross_exposure, 0.64);
+    assert_eq!(high_vol.max_pairwise_correlation, Some(0.65));
+    assert_eq!(
+        policy.rules[&MarketRegime::HighVolatility].max_position_pct,
+        Some(Decimal::new(9, 2))
+    );
+
+    // 相对关系：v2 敞口比 v1(0.72)/v3(0.75)/v4(0.68) 都宽，是 sharpe 搜索的宽松邻域点
+    for (name, other) in [
+        (
+            "v1",
+            MarketRegimePolicy::quality_event_window_return_sharpe_router_v1("000300.SH"),
+        ),
+        (
+            "v3",
+            MarketRegimePolicy::quality_event_window_return_sharpe_router_v3("000300.SH"),
+        ),
+        (
+            "v4",
+            MarketRegimePolicy::quality_event_window_return_sharpe_router_v4("000300.SH"),
+        ),
+    ] {
+        assert!(
+            other.apply(&base, MarketRegime::Bear).max_gross_exposure < bear.max_gross_exposure,
+            "{name} 的 Bear 敞口应窄于 v2"
+        );
+    }
+}
+
+#[test]
+fn quality_state_alpha_selector_v2_relaxes_stress_and_reweights_sleeves() {
+    // 状态 alpha 路由 v2（v1 已测）：弱市敞口放宽（0.68→0.75/0.54→0.62），
+    // 事件 sleeve 降到 0.125，牛/震荡 sleeve 换向 blend 与 valuation 源。
+    let policy = MarketRegimePolicy::quality_state_alpha_selector_v2("000300.SH");
+    let base = SignalConfig::default();
+
+    let bull_sleeve = policy
+        .apply(&base, MarketRegime::Bull)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(
+        bull_sleeve.combo_name,
+        "phase7_quality_value_recovery_confirm_v1"
+    );
+    assert_eq!(bull_sleeve.weight, 0.10);
+    assert_eq!(bull_sleeve.score_direction, ScoreDirection::Descending);
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.top_n, 20);
+    assert_eq!(bear.rebalance_freq_days, 60);
+    assert_eq!(bear.max_gross_exposure, 0.75);
+    assert_eq!(bear.max_pairwise_correlation, Some(0.65));
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(10, 2))
+    );
+    let bear_sleeve = bear.portfolio_sleeve.unwrap();
+    assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+    assert_eq!(bear_sleeve.weight, 0.125);
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    assert_eq!(high_vol.max_gross_exposure, 0.62);
+    assert_eq!(
+        policy.rules[&MarketRegime::HighVolatility].max_position_pct,
+        Some(Decimal::new(9, 2))
+    );
+
+    let sideways_sleeve = policy
+        .apply(&base, MarketRegime::Sideways)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(sideways_sleeve.combo_name, "phase7_valuation_v1");
+    assert_eq!(sideways_sleeve.weight, 0.10);
+
+    let mixed_sleeve = policy
+        .apply(&base, MarketRegime::Mixed)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(
+        mixed_sleeve.combo_name,
+        "phase7_quality_value_recovery_confirm_v1"
+    );
+    assert_eq!(mixed_sleeve.weight, 0.05);
+
+    // 相对关系：v2 弱市比 v1 放松（v1 Bear 0.68 / HighVol 0.54）
+    let v1 = MarketRegimePolicy::quality_state_alpha_selector_v1("000300.SH");
+    assert_eq!(v1.apply(&base, MarketRegime::Bear).max_gross_exposure, 0.68);
+    assert!(bear.max_gross_exposure > v1.apply(&base, MarketRegime::Bear).max_gross_exposure);
+}
+
+#[test]
+fn quality_state_alpha_selector_v3_routes_price_volume_in_high_volatility() {
+    // 状态 alpha 路由 v3：高波 regime 的 sleeve 从事件窗换成反向价格量（Ascending），
+    // 弱市敞口回到 0.72/0.58；Mixed 挂 blend 确认源 sleeve。
+    let policy = MarketRegimePolicy::quality_state_alpha_selector_v3("000300.SH");
+    let base = SignalConfig::default();
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    assert_eq!(high_vol.top_n, 20);
+    assert_eq!(high_vol.rebalance_freq_days, 60);
+    assert_eq!(high_vol.max_gross_exposure, 0.58);
+    assert_eq!(
+        policy.rules[&MarketRegime::HighVolatility].max_position_pct,
+        Some(Decimal::new(8, 2))
+    );
+    let high_vol_sleeve = high_vol.portfolio_sleeve.unwrap();
+    assert_eq!(
+        high_vol_sleeve.combo_name,
+        "phase7_price_volume_expanded_v1"
+    );
+    assert_eq!(high_vol_sleeve.weight, 0.10);
+    assert_eq!(high_vol_sleeve.score_direction, ScoreDirection::Ascending);
+
+    let bear_sleeve = policy
+        .apply(&base, MarketRegime::Bear)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+    assert_eq!(bear_sleeve.weight, 0.15);
+    assert_eq!(
+        policy.apply(&base, MarketRegime::Bear).max_gross_exposure,
+        0.72
+    );
+
+    let mixed_sleeve = policy
+        .apply(&base, MarketRegime::Mixed)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(
+        mixed_sleeve.combo_name,
+        "phase7_quality_value_recovery_confirm_v1"
+    );
+    assert_eq!(mixed_sleeve.weight, 0.10);
+    // 平静 regime 满敞口
+    assert_eq!(
+        policy
+            .apply(&base, MarketRegime::Sideways)
+            .max_gross_exposure,
+        1.0
+    );
+}
+
+#[test]
+fn quality_state_alpha_h1h20_selector_routes_horizon_specific_combos() {
+    // B1 horizon 自适应路由：牛市用 h1 组合（full_pit_icir_37f，牛市强 Sharpe），
+    // 其余 regime 用 h20 组合（Ascending）；弱市敞口 0.72/0.58，事件权重按 regime 分层。
+    let policy = MarketRegimePolicy::quality_state_alpha_h1h20_selector("000300.SH");
+    let base = SignalConfig::default();
+
+    let bull_sleeve = policy
+        .apply(&base, MarketRegime::Bull)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(bull_sleeve.combo_name, "full_pit_icir_37f");
+    assert_eq!(bull_sleeve.weight, 0.10);
+    assert_eq!(bull_sleeve.score_direction, ScoreDirection::Descending);
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.max_gross_exposure, 0.72);
+    assert_eq!(bear.top_n, 20);
+    assert_eq!(bear.rebalance_freq_days, 60);
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(10, 2))
+    );
+    let bear_sleeve = bear.portfolio_sleeve.unwrap();
+    assert_eq!(bear_sleeve.combo_name, "full_pit_icir_37f_h20");
+    assert_eq!(bear_sleeve.weight, 0.15);
+    assert_eq!(bear_sleeve.score_direction, ScoreDirection::Ascending);
+
+    let high_vol_sleeve = policy
+        .apply(&base, MarketRegime::HighVolatility)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(high_vol_sleeve.combo_name, "full_pit_icir_37f_h20");
+    assert_eq!(high_vol_sleeve.weight, 0.125);
+    assert_eq!(high_vol_sleeve.score_direction, ScoreDirection::Ascending);
+
+    // 震荡/混合也是 h20 反向源，且保持满敞口
+    for regime in [MarketRegime::Sideways, MarketRegime::Mixed] {
+        let applied = policy.apply(&base, regime);
+        assert_eq!(
+            applied.portfolio_sleeve.as_ref().unwrap().combo_name,
+            "full_pit_icir_37f_h20"
+        );
+        assert_eq!(
+            applied.portfolio_sleeve.as_ref().unwrap().score_direction,
+            ScoreDirection::Ascending
+        );
+        assert_eq!(applied.max_gross_exposure, 1.0);
+    }
+    // 切换阈值继承 bear_window_guard_v2 基底（trailing-12m 检测，非全周期调参）
+    assert_eq!(policy.lookback_days, 126);
+    assert_eq!(policy.bear_return_threshold, -0.03);
+}
+
+#[test]
+fn quality_mixed_event_state_selector_v1_routes_event_flow_in_mixed_state() {
+    // 混合态事件路由 v1（此前仅被 overlay/router 间接触达）：Mixed 挂 10% 事件窗 sleeve，
+    // 高波挂反向价格量，熊市 15% 事件窗——把事件流 alpha 引入混合态是本族的立意。
+    let policy = MarketRegimePolicy::quality_mixed_event_state_selector_v1("000300.SH");
+    let base = SignalConfig::default();
+
+    let mixed = policy.apply(&base, MarketRegime::Mixed);
+    let mixed_sleeve = mixed.portfolio_sleeve.unwrap();
+    assert_eq!(mixed_sleeve.combo_name, "phase7_event_window_earnings_v1");
+    assert_eq!(mixed_sleeve.weight, 0.10);
+    assert_eq!(mixed_sleeve.score_direction, ScoreDirection::Descending);
+    assert_eq!(mixed.max_gross_exposure, 1.0);
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.max_gross_exposure, 0.72);
+    assert_eq!(bear.top_n, 20);
+    assert_eq!(bear.rebalance_freq_days, 60);
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(10, 2))
+    );
+    assert_eq!(
+        bear.portfolio_sleeve.as_ref().unwrap().combo_name,
+        "phase7_event_window_earnings_v1"
+    );
+    assert_eq!(bear.portfolio_sleeve.as_ref().unwrap().weight, 0.15);
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    let high_vol_sleeve = high_vol.portfolio_sleeve.unwrap();
+    assert_eq!(
+        high_vol_sleeve.combo_name,
+        "phase7_price_volume_expanded_v1"
+    );
+    assert_eq!(high_vol_sleeve.score_direction, ScoreDirection::Ascending);
+    assert_eq!(high_vol.max_gross_exposure, 0.58);
+
+    let sideways_sleeve = policy
+        .apply(&base, MarketRegime::Sideways)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(sideways_sleeve.combo_name, "phase7_valuation_v1");
+    assert_eq!(sideways_sleeve.weight, 0.10);
+}
+
+#[test]
+fn quality_mixed_event_state_selector_v2_deepens_event_flow_and_tightens_stress() {
+    // 混合态事件路由 v2：Mixed 事件权重加深到 15%、震荡也换反向价格量源，
+    // 同时弱市风险收紧（Bear 0.72→0.68、HighVol 0.58→0.54）。
+    let policy = MarketRegimePolicy::quality_mixed_event_state_selector_v2("000300.SH");
+    let base = SignalConfig::default();
+
+    let mixed_sleeve = policy
+        .apply(&base, MarketRegime::Mixed)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(mixed_sleeve.combo_name, "phase7_event_window_earnings_v1");
+    assert_eq!(mixed_sleeve.weight, 0.15);
+    assert_eq!(mixed_sleeve.score_direction, ScoreDirection::Descending);
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.max_gross_exposure, 0.68);
+    assert_eq!(bear.max_pairwise_correlation, Some(0.65));
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(9, 2))
+    );
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    assert_eq!(high_vol.max_gross_exposure, 0.54);
+    assert_eq!(
+        policy.rules[&MarketRegime::HighVolatility].max_position_pct,
+        Some(Decimal::new(7, 2))
+    );
+
+    // 震荡换向反向价格量源（v1 是 valuation）
+    let sideways_sleeve = policy
+        .apply(&base, MarketRegime::Sideways)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(
+        sideways_sleeve.combo_name,
+        "phase7_price_volume_expanded_v1"
+    );
+    assert_eq!(sideways_sleeve.score_direction, ScoreDirection::Ascending);
+
+    // 相对关系：v2 弱市全面紧于 v1
+    let v1 = MarketRegimePolicy::quality_mixed_event_state_selector_v1("000300.SH");
+    assert!(bear.max_gross_exposure < v1.apply(&base, MarketRegime::Bear).max_gross_exposure);
+    assert!(
+        high_vol.max_gross_exposure
+            < v1.apply(&base, MarketRegime::HighVolatility)
+                .max_gross_exposure
+    );
+}
+
+#[test]
+fn quality_mixed_event_state_overlay_selector_v2_adds_triple_orthogonal_overlays() {
+    // 混合态事件路由 + 三源正交 overlay（v1 已测两源）：在 v2 紧凑风险形状上，
+    // Bear/Mixed/HighVol 各叠 3% 小权重正交分数（value/blend/price_volume），sleeve 不受影响。
+    let policy = MarketRegimePolicy::quality_mixed_event_state_overlay_selector_v2("000300.SH");
+    let base = SignalConfig::default();
+
+    let bear_overlay = policy
+        .apply(&base, MarketRegime::Bear)
+        .score_overlay
+        .unwrap();
+    assert_eq!(bear_overlay.combo_name, "phase7_valuation_v1");
+    assert_eq!(bear_overlay.weight, 0.03);
+    assert_eq!(bear_overlay.score_direction, ScoreDirection::Descending);
+
+    let mixed_applied = policy.apply(&base, MarketRegime::Mixed);
+    let mixed_overlay = mixed_applied.score_overlay.unwrap();
+    assert_eq!(
+        mixed_overlay.combo_name,
+        "phase7_quality_value_recovery_confirm_v1"
+    );
+    assert_eq!(mixed_overlay.weight, 0.03);
+    // sleeve 与 overlay 并存：Mixed 仍保留 15% 事件 sleeve
+    let mixed_sleeve = mixed_applied.portfolio_sleeve.unwrap();
+    assert_eq!(mixed_sleeve.combo_name, "phase7_event_window_earnings_v1");
+    assert_eq!(mixed_sleeve.weight, 0.15);
+
+    let high_vol_overlay = policy
+        .apply(&base, MarketRegime::HighVolatility)
+        .score_overlay
+        .unwrap();
+    assert_eq!(
+        high_vol_overlay.combo_name,
+        "phase7_price_volume_expanded_v1"
+    );
+    assert_eq!(high_vol_overlay.weight, 0.03);
+    assert_eq!(high_vol_overlay.score_direction, ScoreDirection::Ascending);
+
+    // 风险形状继承 selector_v2：Bear 0.68
+    assert_eq!(
+        policy.apply(&base, MarketRegime::Bear).max_gross_exposure,
+        0.68
+    );
+    // 未挂 overlay 的 regime 保持干净
+    assert!(policy
+        .apply(&base, MarketRegime::Bull)
+        .score_overlay
+        .is_none());
+}
+
+#[test]
+fn quality_mixed_orthogonal_alpha_selector_v2_confirms_event_in_mixed_sleeve() {
+    // 正交 alpha 选择器 v2（v1 已测，此前 v2 仅被 router 间接触达）：
+    // 牛/混合 sleeve 换成「事件确认」blend 源，Mixed 再叠 3% 残差确认 overlay。
+    let policy = MarketRegimePolicy::quality_mixed_orthogonal_alpha_selector_v2("000300.SH");
+    let base = SignalConfig::default();
+
+    let mixed_applied = policy.apply(&base, MarketRegime::Mixed);
+    let mixed_sleeve = mixed_applied.portfolio_sleeve.unwrap();
+    assert_eq!(
+        mixed_sleeve.combo_name,
+        "phase7_quality_value_recovery_event_confirm_v1"
+    );
+    assert_eq!(mixed_sleeve.weight, 0.10);
+    assert_eq!(mixed_sleeve.score_direction, ScoreDirection::Descending);
+    let mixed_overlay = mixed_applied.score_overlay.unwrap();
+    assert_eq!(
+        mixed_overlay.combo_name,
+        "phase7_quality_residual_confirm_10pct_v1"
+    );
+    assert_eq!(mixed_overlay.weight, 0.03);
+    assert_eq!(mixed_overlay.score_direction, ScoreDirection::Ascending);
+
+    let bull_sleeve = policy
+        .apply(&base, MarketRegime::Bull)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(
+        bull_sleeve.combo_name,
+        "phase7_quality_value_recovery_event_confirm_v1"
+    );
+    assert_eq!(bull_sleeve.weight, 0.05);
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.max_gross_exposure, 0.72);
+    assert_eq!(bear.top_n, 20);
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(10, 2))
+    );
+    // 震荡换向反向价格量源（v1 是 valuation）
+    let sideways_sleeve = policy
+        .apply(&base, MarketRegime::Sideways)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(
+        sideways_sleeve.combo_name,
+        "phase7_price_volume_expanded_v1"
+    );
+    assert_eq!(sideways_sleeve.score_direction, ScoreDirection::Ascending);
+}
+
+#[test]
+fn quality_mixed_orthogonal_alpha_selector_v3_uses_blend_defensive_in_mixed() {
+    // 正交 alpha 选择器 v3（此前仅被 router 间接触达）：无 overlay 的纯 selector，
+    // Mixed 的 alpha 源换成防御型 blend 残差（Ascending），其余与 v1 骨架一致。
+    let policy = MarketRegimePolicy::quality_mixed_orthogonal_alpha_selector_v3("000300.SH");
+    let base = SignalConfig::default();
+
+    let mixed_applied = policy.apply(&base, MarketRegime::Mixed);
+    let mixed_sleeve = mixed_applied.portfolio_sleeve.unwrap();
+    assert_eq!(mixed_sleeve.combo_name, "phase7_blend_defensive_rel_v1");
+    assert_eq!(mixed_sleeve.weight, 0.10);
+    assert_eq!(mixed_sleeve.score_direction, ScoreDirection::Ascending);
+    assert!(mixed_applied.score_overlay.is_none(), "v3 是纯 selector");
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.max_gross_exposure, 0.72);
+    assert_eq!(bear.top_n, 20);
+    assert_eq!(bear.rebalance_freq_days, 60);
+    assert_eq!(bear.max_pairwise_correlation, Some(0.65));
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(10, 2))
+    );
+    assert_eq!(
+        bear.portfolio_sleeve.unwrap().combo_name,
+        "phase7_event_window_earnings_v1"
+    );
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    assert_eq!(high_vol.max_gross_exposure, 0.58);
+    assert_eq!(
+        policy.rules[&MarketRegime::HighVolatility].max_position_pct,
+        Some(Decimal::new(8, 2))
+    );
+
+    // 牛市 sleeve 回到 blend 确认源
+    let bull_sleeve = policy
+        .apply(&base, MarketRegime::Bull)
+        .portfolio_sleeve
+        .unwrap();
+    assert_eq!(
+        bull_sleeve.combo_name,
+        "phase7_quality_value_recovery_confirm_v1"
+    );
+    assert_eq!(bull_sleeve.weight, 0.05);
+}
+
+#[test]
+fn quality_nonlinear_alpha_router_v2_relaxes_stress_and_mixes_overlays() {
+    // 非线性 alpha 路由 v2（v1 已测）：弱市敞口放宽到 0.78/0.62、事件 sleeve 减到 0.125，
+    // overlay 换成 HighVol 事件窗 + Mixed 残差确认，Mixed 风险记忆放宽到 1.0/15%/0.75。
+    let policy = MarketRegimePolicy::quality_nonlinear_alpha_router_v2("000300.SH");
+    let base = SignalConfig::default();
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.max_gross_exposure, 0.78);
+    assert_eq!(bear.top_n, 20);
+    assert_eq!(bear.rebalance_freq_days, 60);
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(11, 2))
+    );
+    assert_eq!(
+        bear.portfolio_sleeve.as_ref().unwrap().combo_name,
+        "phase7_event_window_earnings_v1"
+    );
+    assert_eq!(bear.portfolio_sleeve.as_ref().unwrap().weight, 0.125);
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    assert_eq!(high_vol.max_gross_exposure, 0.62);
+    let high_vol_overlay = high_vol.score_overlay.unwrap();
+    assert_eq!(
+        high_vol_overlay.combo_name,
+        "phase7_event_window_earnings_v1"
+    );
+    assert_eq!(high_vol_overlay.weight, 0.03);
+    assert_eq!(high_vol_overlay.score_direction, ScoreDirection::Descending);
+
+    // 非线性 Mixed 风险记忆：20 只/60 日/满敞口/15% 单票/0.75 相关帽
+    let mixed = policy.apply(&base, MarketRegime::Mixed);
+    assert_eq!(mixed.top_n, 20);
+    assert_eq!(mixed.rebalance_freq_days, 60);
+    assert_eq!(mixed.max_gross_exposure, 1.0);
+    assert_eq!(
+        policy.rules[&MarketRegime::Mixed].max_position_pct,
+        Some(Decimal::new(15, 2))
+    );
+    assert_eq!(mixed.max_pairwise_correlation, Some(0.75));
+    let mixed_overlay = mixed.score_overlay.unwrap();
+    assert_eq!(
+        mixed_overlay.combo_name,
+        "phase7_quality_residual_confirm_10pct_v1"
+    );
+    assert_eq!(mixed_overlay.weight, 0.03);
+
+    // 相对关系：v2 弱市比 v1（0.74/0.60）全面放宽，用于 sharpe 桥接的返回端
+    let v1 = MarketRegimePolicy::quality_nonlinear_alpha_router_v1("000300.SH");
+    assert!(bear.max_gross_exposure > v1.apply(&base, MarketRegime::Bear).max_gross_exposure);
+    assert!(
+        high_vol.max_gross_exposure
+            > v1.apply(&base, MarketRegime::HighVolatility)
+                .max_gross_exposure
+    );
+}
+
+#[test]
+fn quality_mixed_orthogonal_risk_memory_router_v1_tightens_mixed_state() {
+    // 正交 alpha + 风险记忆路由 v1（v2/v3 已测）：在 orthogonal selector v1 上
+    // 收紧 Mixed 为 20 只/60 日/0.90 敞口/13% 单票/0.70 相关帽。
+    let policy = MarketRegimePolicy::quality_mixed_orthogonal_risk_memory_router_v1("000300.SH");
+    let base = SignalConfig::default();
+
+    let mixed = policy.apply(&base, MarketRegime::Mixed);
+    assert_eq!(mixed.top_n, 20);
+    assert_eq!(mixed.rebalance_freq_days, 60);
+    assert_eq!(mixed.max_gross_exposure, 0.90);
+    assert_eq!(
+        policy.rules[&MarketRegime::Mixed].max_position_pct,
+        Some(Decimal::new(13, 2))
+    );
+    assert_eq!(mixed.max_pairwise_correlation, Some(0.70));
+    // sleeve 与 overlay 继承 orthogonal selector v1：残差确认 sleeve + valuation overlay
+    let mixed_sleeve = mixed.portfolio_sleeve.unwrap();
+    assert_eq!(
+        mixed_sleeve.combo_name,
+        "phase7_quality_residual_confirm_10pct_v1"
+    );
+    assert_eq!(mixed_sleeve.weight, 0.10);
+    assert_eq!(mixed_sleeve.score_direction, ScoreDirection::Ascending);
+    assert_eq!(
+        mixed.score_overlay.as_ref().unwrap().combo_name,
+        "phase7_valuation_v1"
+    );
+    assert_eq!(mixed.score_overlay.as_ref().unwrap().weight, 0.03);
+
+    // 弱市形状不被风险记忆改写：Bear 仍是 selector 的 0.72 / 事件 sleeve
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.max_gross_exposure, 0.72);
+    assert_eq!(
+        bear.portfolio_sleeve.unwrap().combo_name,
+        "phase7_event_window_earnings_v1"
+    );
+}
+
+#[test]
+fn quality_mixed_state_risk_memory_router_v1_v2_v3_early_ladder() {
+    // 混合态风险记忆路由早期三档（v4/v14/v16 已测）：
+    // v1 0.85/12%/0.70、v2 0.75/10%/0.65（最紧）、v3 基于 overlay 版 0.82/11%/0.65。
+    let base = SignalConfig::default();
+    let v1 = MarketRegimePolicy::quality_mixed_state_risk_memory_router_v1("000300.SH");
+    let v2 = MarketRegimePolicy::quality_mixed_state_risk_memory_router_v2("000300.SH");
+    let v3 = MarketRegimePolicy::quality_mixed_state_risk_memory_router_v3("000300.SH");
+
+    let expected = [
+        (&v1, 0.85, Decimal::new(12, 2), 0.70),
+        (&v2, 0.75, Decimal::new(10, 2), 0.65),
+        (&v3, 0.82, Decimal::new(11, 2), 0.65),
+    ];
+    for (policy, exposure, position_pct, correlation) in expected {
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        assert_eq!(mixed.top_n, 20, "风险记忆固定 20 只");
+        assert_eq!(mixed.rebalance_freq_days, 60, "风险记忆固定 60 日");
+        assert_eq!(mixed.max_gross_exposure, exposure);
+        assert_eq!(
+            policy.rules[&MarketRegime::Mixed].max_position_pct,
+            Some(position_pct)
+        );
+        assert_eq!(mixed.max_pairwise_correlation, Some(correlation));
+        // Mixed 事件 sleeve 继承 selector_v1：0.10 权重
+        let mixed_sleeve = mixed.portfolio_sleeve.unwrap();
+        assert_eq!(mixed_sleeve.combo_name, "phase7_event_window_earnings_v1");
+        assert_eq!(mixed_sleeve.weight, 0.10);
+    }
+    // v3 独有：基于 overlay selector，Bear 还带 valuation overlay
+    let bear_v3 = v3.apply(&base, MarketRegime::Bear);
+    assert_eq!(
+        bear_v3.score_overlay.as_ref().unwrap().combo_name,
+        "phase7_valuation_v1"
+    );
+    assert_eq!(bear_v3.score_overlay.as_ref().unwrap().weight, 0.05);
+    assert!(v1.apply(&base, MarketRegime::Bear).score_overlay.is_none());
+    // 相对关系：v2 是早期最紧档
+    assert!(
+        v2.apply(&base, MarketRegime::Mixed).max_gross_exposure
+            < v1.apply(&base, MarketRegime::Mixed).max_gross_exposure
+    );
+}
+
+#[test]
+fn quality_mixed_state_risk_memory_router_v5_to_v13_ladder() {
+    // 混合态风险记忆路由 v5-v13（selector_v1 基底 + Mixed 风险三元组微调）：
+    // 逐档锁定 Mixed 敞口/单票帽/相关帽，用于混合态 sharpe 网格搜索。
+    let base = SignalConfig::default();
+    /// (构造器, Mixed 敞口, top_n, 单票帽万分位, 相关帽)
+    type Case9 = (fn(&str) -> MarketRegimePolicy, f64, i64, u32, f64);
+    let cases: [Case9; 9] = [
+        (
+            |b| MarketRegimePolicy::quality_mixed_state_risk_memory_router_v5(b),
+            0.95,
+            14,
+            2,
+            0.75,
+        ),
+        (
+            |b| MarketRegimePolicy::quality_mixed_state_risk_memory_router_v6(b),
+            0.90,
+            13,
+            2,
+            0.70,
+        ),
+        (
+            |b| MarketRegimePolicy::quality_mixed_state_risk_memory_router_v7(b),
+            0.92,
+            13,
+            2,
+            0.72,
+        ),
+        (
+            |b| MarketRegimePolicy::quality_mixed_state_risk_memory_router_v8(b),
+            0.93,
+            13,
+            2,
+            0.73,
+        ),
+        (
+            |b| MarketRegimePolicy::quality_mixed_state_risk_memory_router_v9(b),
+            0.94,
+            14,
+            2,
+            0.74,
+        ),
+        (
+            |b| MarketRegimePolicy::quality_mixed_state_risk_memory_router_v10(b),
+            0.95,
+            13,
+            2,
+            0.72,
+        ),
+        (
+            |b| MarketRegimePolicy::quality_mixed_state_risk_memory_router_v11(b),
+            0.94,
+            13,
+            2,
+            0.70,
+        ),
+        (
+            |b| MarketRegimePolicy::quality_mixed_state_risk_memory_router_v12(b),
+            0.96,
+            13,
+            2,
+            0.70,
+        ),
+        (
+            |b| MarketRegimePolicy::quality_mixed_state_risk_memory_router_v13(b),
+            0.98,
+            13,
+            2,
+            0.70,
+        ),
+    ];
+    for (build, exposure, position_mantissa, position_scale, correlation) in cases {
+        let policy = build("000300.SH");
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        assert_eq!(mixed.top_n, 20);
+        assert_eq!(mixed.rebalance_freq_days, 60);
+        assert_eq!(mixed.max_gross_exposure, exposure);
+        assert_eq!(
+            policy.rules[&MarketRegime::Mixed].max_position_pct,
+            Some(Decimal::new(position_mantissa, position_scale))
+        );
+        assert_eq!(mixed.max_pairwise_correlation, Some(correlation));
+        assert_eq!(
+            mixed.portfolio_sleeve.unwrap().combo_name,
+            "phase7_event_window_earnings_v1"
+        );
+    }
+    // v6 独有：与 v3 同用 overlay selector 基底，Bear 带 valuation overlay
+    let bear_v6 = MarketRegimePolicy::quality_mixed_state_risk_memory_router_v6("000300.SH")
+        .apply(&base, MarketRegime::Bear);
+    assert_eq!(
+        bear_v6.score_overlay.as_ref().unwrap().combo_name,
+        "phase7_valuation_v1"
+    );
+    assert_eq!(bear_v6.score_overlay.as_ref().unwrap().weight, 0.05);
+    // 弱市形状不被 Mixed 风险记忆波及（selector_v1 的 Bear 0.72）
+    let bear_v5 = MarketRegimePolicy::quality_mixed_state_risk_memory_router_v5("000300.SH")
+        .apply(&base, MarketRegime::Bear);
+    assert_eq!(bear_v5.max_gross_exposure, 0.72);
+}
+
+#[test]
+fn quality_mixed_state_risk_memory_router_v15_v17_v18_extend_relaxed_ladder() {
+    // 混合态风险记忆路由的宽松端补充（v14=1.00/13/0.70、v16=1.00/15/0.75 已测）：
+    // v15 1.00/14%/0.72、v17 0.98/14%/0.72、v18 0.98/15%/0.75。
+    let base = SignalConfig::default();
+    /// (Mixed 敞口, top_n, 单票帽, 构造器)
+    type Case3 = (f64, i64, f64, fn(&str) -> MarketRegimePolicy);
+    let cases: [Case3; 3] = [
+        (1.00, 14, 0.72, |b| {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v15(b)
+        }),
+        (0.98, 14, 0.72, |b| {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v17(b)
+        }),
+        (0.98, 15, 0.75, |b| {
+            MarketRegimePolicy::quality_mixed_state_risk_memory_router_v18(b)
+        }),
+    ];
+    for (exposure, position_mantissa, correlation, build) in cases {
+        let policy = build("000300.SH");
+        let mixed = policy.apply(&base, MarketRegime::Mixed);
+        assert_eq!(mixed.top_n, 20);
+        assert_eq!(mixed.rebalance_freq_days, 60);
+        assert_eq!(mixed.max_gross_exposure, exposure);
+        assert_eq!(
+            policy.rules[&MarketRegime::Mixed].max_position_pct,
+            Some(Decimal::new(position_mantissa, 2))
+        );
+        assert_eq!(mixed.max_pairwise_correlation, Some(correlation));
+        let mixed_sleeve = mixed.portfolio_sleeve.unwrap();
+        assert_eq!(
+            mixed_sleeve.weight, 0.10,
+            "Mixed 事件 sleeve 继承 selector_v1"
+        );
+    }
+    // v15 混合态允许满仓敞口（保留收益端弹性）
+    assert_eq!(
+        MarketRegimePolicy::quality_mixed_state_risk_memory_router_v15("000300.SH")
+            .apply(&base, MarketRegime::Mixed)
+            .max_gross_exposure,
+        1.0
+    );
+}
+
+#[test]
+fn quality_state_alpha_overlay_selector_v2_overlays_quality_in_bear_and_value_in_mixed() {
+    // 状态 alpha overlay 选择器 v2（v1 已测）：基于 selector_v2 的宽松弱市形状，
+    // Bear 叠 5% blend 确认 overlay、Mixed 叠 5% valuation overlay。
+    let policy = MarketRegimePolicy::quality_state_alpha_overlay_selector_v2("000300.SH");
+    let base = SignalConfig::default();
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    let bear_overlay = bear.score_overlay.unwrap();
+    assert_eq!(
+        bear_overlay.combo_name,
+        "phase7_quality_value_recovery_confirm_v1"
+    );
+    assert_eq!(bear_overlay.version, "1.0.0");
+    assert_eq!(bear_overlay.weight, 0.05);
+    assert_eq!(bear_overlay.score_direction, ScoreDirection::Descending);
+    // 风险形状继承 selector_v2：Bear 0.75、事件 sleeve 0.125
+    assert_eq!(bear.max_gross_exposure, 0.75);
+    let bear_sleeve = bear.portfolio_sleeve.unwrap();
+    assert_eq!(bear_sleeve.combo_name, "phase7_event_window_earnings_v1");
+    assert_eq!(bear_sleeve.weight, 0.125);
+
+    let mixed_applied = policy.apply(&base, MarketRegime::Mixed);
+    let mixed_overlay = mixed_applied.score_overlay.unwrap();
+    assert_eq!(mixed_overlay.combo_name, "phase7_valuation_v1");
+    assert_eq!(mixed_overlay.weight, 0.05);
+    assert_eq!(mixed_overlay.score_direction, ScoreDirection::Descending);
+
+    // 高波不挂 overlay（v2 的 overlay 只打 Bear/Mixed）
+    assert!(policy
+        .apply(&base, MarketRegime::HighVolatility)
+        .score_overlay
+        .is_none());
+}
+
+#[test]
+fn quality_state_alpha_overlay_selector_v3_trims_overlay_weights() {
+    // 状态 alpha overlay 选择器 v3（v1 已测）：基于 selector_v3，overlay 权重从 5% 减半到 3%，
+    // Bear 用 valuation、HighVol 用反向价格量——正交扰动更小。
+    let policy = MarketRegimePolicy::quality_state_alpha_overlay_selector_v3("000300.SH");
+    let base = SignalConfig::default();
+
+    let bear_overlay = policy
+        .apply(&base, MarketRegime::Bear)
+        .score_overlay
+        .unwrap();
+    assert_eq!(bear_overlay.combo_name, "phase7_valuation_v1");
+    assert_eq!(bear_overlay.weight, 0.03);
+    assert_eq!(bear_overlay.score_direction, ScoreDirection::Descending);
+
+    let high_vol_applied = policy.apply(&base, MarketRegime::HighVolatility);
+    let high_vol_overlay = high_vol_applied.score_overlay.unwrap();
+    assert_eq!(
+        high_vol_overlay.combo_name,
+        "phase7_price_volume_expanded_v1"
+    );
+    assert_eq!(high_vol_overlay.weight, 0.03);
+    assert_eq!(high_vol_overlay.score_direction, ScoreDirection::Ascending);
+    // sleeve 继承 selector_v3：高波反向价格量 0.10
+    assert_eq!(
+        high_vol_applied
+            .portfolio_sleeve
+            .as_ref()
+            .unwrap()
+            .combo_name,
+        "phase7_price_volume_expanded_v1"
+    );
+    assert_eq!(
+        high_vol_applied.portfolio_sleeve.as_ref().unwrap().weight,
+        0.10
+    );
+
+    // 风险形状继承 selector_v3：HighVol 0.58 / Bear 0.72
+    assert_eq!(high_vol_applied.max_gross_exposure, 0.58);
+    assert_eq!(
+        policy.apply(&base, MarketRegime::Bear).max_gross_exposure,
+        0.72
+    );
+    // 相对关系：v3 的 overlay 权重比 v1（0.05）减半
+    let v1_overlay = MarketRegimePolicy::quality_state_alpha_overlay_selector_v1("000300.SH")
+        .apply(&base, MarketRegime::Bear)
+        .score_overlay
+        .unwrap();
+    assert!(v1_overlay.weight > bear_overlay.weight);
+}
+
+#[test]
+fn quality_state_sharpe_bridge_router_v2_relaxes_stress_neighborhood() {
+    // 状态 sharpe 桥路由 v2（v1 已测）：保留 overlay selector v1 的 alpha 结构，
+    // Bear/HighVol/Mixed 风险三轴放宽（0.74/0.60/0.98），20 只/60 日统一节奏。
+    let policy = MarketRegimePolicy::quality_state_sharpe_bridge_router_v2("000300.SH");
+    let base = SignalConfig::default();
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.top_n, 20);
+    assert_eq!(bear.rebalance_freq_days, 60);
+    assert_eq!(bear.max_gross_exposure, 0.74);
+    assert_eq!(bear.max_pairwise_correlation, Some(0.65));
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(10, 2))
+    );
+    // alpha 结构继承：Bear 事件 sleeve 0.15 + valuation overlay 0.05
+    assert_eq!(
+        bear.portfolio_sleeve.as_ref().unwrap().combo_name,
+        "phase7_event_window_earnings_v1"
+    );
+    assert_eq!(bear.portfolio_sleeve.as_ref().unwrap().weight, 0.15);
+    assert_eq!(
+        bear.score_overlay.as_ref().unwrap().combo_name,
+        "phase7_valuation_v1"
+    );
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    assert_eq!(high_vol.max_gross_exposure, 0.60);
+    assert_eq!(
+        policy.rules[&MarketRegime::HighVolatility].max_position_pct,
+        Some(Decimal::new(8, 2))
+    );
+    let mixed = policy.apply(&base, MarketRegime::Mixed);
+    assert_eq!(mixed.max_gross_exposure, 0.98);
+    assert_eq!(
+        policy.rules[&MarketRegime::Mixed].max_position_pct,
+        Some(Decimal::new(14, 2))
+    );
+    assert_eq!(mixed.max_pairwise_correlation, Some(0.72));
+}
+
+#[test]
+fn quality_state_sharpe_bridge_router_v3_tightens_stress_neighborhood() {
+    // 状态 sharpe 桥路由 v3（v1/v2 已测）：同一 alpha 结构的最紧端——
+    // Bear 0.66/8%/0.62、HighVol 0.52/7%/0.62、Mixed 0.92/12%/0.68。
+    let policy = MarketRegimePolicy::quality_state_sharpe_bridge_router_v3("000300.SH");
+    let base = SignalConfig::default();
+
+    let bear = policy.apply(&base, MarketRegime::Bear);
+    assert_eq!(bear.top_n, 20);
+    assert_eq!(bear.rebalance_freq_days, 60);
+    assert_eq!(bear.max_gross_exposure, 0.66);
+    assert_eq!(bear.max_pairwise_correlation, Some(0.62));
+    assert_eq!(
+        policy.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(8, 2))
+    );
+
+    let high_vol = policy.apply(&base, MarketRegime::HighVolatility);
+    assert_eq!(high_vol.max_gross_exposure, 0.52);
+    assert_eq!(
+        policy.rules[&MarketRegime::HighVolatility].max_position_pct,
+        Some(Decimal::new(7, 2))
+    );
+    assert_eq!(high_vol.max_pairwise_correlation, Some(0.62));
+
+    let mixed = policy.apply(&base, MarketRegime::Mixed);
+    assert_eq!(mixed.max_gross_exposure, 0.92);
+    assert_eq!(
+        policy.rules[&MarketRegime::Mixed].max_position_pct,
+        Some(Decimal::new(12, 2))
+    );
+    assert_eq!(mixed.max_pairwise_correlation, Some(0.68));
+
+    // 相对关系：v3 全面紧于 v1（0.70/0.56/0.96）与 v2（0.74/0.60/0.98）
+    for other in [
+        MarketRegimePolicy::quality_state_sharpe_bridge_router_v1("000300.SH"),
+        MarketRegimePolicy::quality_state_sharpe_bridge_router_v2("000300.SH"),
+    ] {
+        assert!(
+            bear.max_gross_exposure < other.apply(&base, MarketRegime::Bear).max_gross_exposure
+        );
+        assert!(
+            mixed.max_gross_exposure < other.apply(&base, MarketRegime::Mixed).max_gross_exposure
+        );
+    }
+    // alpha 结构继承 overlay selector v1：高波反向价格量 overlay 0.05
+    let high_vol_overlay = high_vol.score_overlay.unwrap();
+    assert_eq!(
+        high_vol_overlay.combo_name,
+        "phase7_price_volume_expanded_v1"
+    );
+    assert_eq!(high_vol_overlay.weight, 0.05);
+    assert_eq!(high_vol_overlay.score_direction, ScoreDirection::Ascending);
+}
+
+#[test]
+fn quality_frontier_regime_bridge_router_v2_v3_split_return_and_risk_axes() {
+    // 前沿 regime 桥路由 v2/v3（v1/v4-v7 已测）：v2 走满仓混合端
+    // （0.76/0.62/1.00），v3 走收缩端（0.70/0.56/0.96 + 更紧相关帽 0.62）。
+    let base = SignalConfig::default();
+    let v2 = MarketRegimePolicy::quality_frontier_regime_bridge_router_v2("000300.SH");
+    let v3 = MarketRegimePolicy::quality_frontier_regime_bridge_router_v3("000300.SH");
+
+    // v2：Bear/HighVol/Mixed = (0.76, 0.10, 0.65) / (0.62, 0.08, 0.65) / (1.00, 0.14, 0.72)
+    let v2_bear = v2.apply(&base, MarketRegime::Bear);
+    assert_eq!(v2_bear.top_n, 20);
+    assert_eq!(v2_bear.rebalance_freq_days, 60);
+    assert_eq!(v2_bear.max_gross_exposure, 0.76);
+    assert_eq!(v2_bear.max_pairwise_correlation, Some(0.65));
+    assert_eq!(
+        v2.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(10, 2))
+    );
+    let v2_mixed = v2.apply(&base, MarketRegime::Mixed);
+    assert_eq!(v2_mixed.max_gross_exposure, 1.0);
+    assert_eq!(
+        v2.rules[&MarketRegime::Mixed].max_position_pct,
+        Some(Decimal::new(14, 2))
+    );
+    assert_eq!(v2_mixed.max_pairwise_correlation, Some(0.72));
+    assert_eq!(
+        v2.apply(&base, MarketRegime::HighVolatility)
+            .max_gross_exposure,
+        0.62
+    );
+
+    // v3：Bear/HighVol/Mixed = (0.70, 0.09, 0.62) / (0.56, 0.07, 0.62) / (0.96, 0.13, 0.70)
+    let v3_bear = v3.apply(&base, MarketRegime::Bear);
+    assert_eq!(v3_bear.max_gross_exposure, 0.70);
+    assert_eq!(v3_bear.max_pairwise_correlation, Some(0.62));
+    assert_eq!(
+        v3.rules[&MarketRegime::Bear].max_position_pct,
+        Some(Decimal::new(9, 2))
+    );
+    let v3_mixed = v3.apply(&base, MarketRegime::Mixed);
+    assert_eq!(v3_mixed.max_gross_exposure, 0.96);
+    assert_eq!(
+        v3.rules[&MarketRegime::Mixed].max_position_pct,
+        Some(Decimal::new(13, 2))
+    );
+    assert_eq!(v3_mixed.max_pairwise_correlation, Some(0.70));
+    assert_eq!(
+        v3.apply(&base, MarketRegime::HighVolatility)
+            .max_gross_exposure,
+        0.56
+    );
+
+    // 相对关系：v2 与 v3 在 Bear 敞口同位（0.76>0.70），差异主轴在 Mixed 满仓 vs 收缩
+    assert!(v2_mixed.max_gross_exposure > v3_mixed.max_gross_exposure);
+    // 两版都保留 overlay selector v1 的 alpha 结构（Bear 事件 sleeve + valuation overlay）
+    assert_eq!(
+        v2_bear.portfolio_sleeve.unwrap().combo_name,
+        "phase7_event_window_earnings_v1"
+    );
+    assert_eq!(
+        v3_bear.score_overlay.unwrap().combo_name,
+        "phase7_valuation_v1"
+    );
+}
+
 // ─── generation: 混合/事件门控的防御分支补充 ─────────────────
 
 #[test]

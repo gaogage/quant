@@ -1946,4 +1946,530 @@ mod tests {
         assert_eq!(stats.benchmark_data_hits, 1);
         assert_eq!(stats.benchmark_data_misses, 0);
     }
+
+    #[test]
+    fn schedule_signals_maps_each_signal_to_next_trading_day() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let d3 = NaiveDate::from_ymd_opt(2024, 1, 4).unwrap();
+        let signal = |date, symbol: &str, weight: i64| StrategySignal {
+            date,
+            target_weights: HashMap::from([(symbol.to_string(), Decimal::new(weight, 2))]),
+        };
+        let signals = HashMap::from([
+            (d1, signal(d1, "000001.SZ", 50)),
+            (d2, signal(d2, "000002.SZ", 60)),
+        ]);
+
+        let scheduled = schedule_signals_for_execution(&[d1, d2, d3], &signals);
+
+        // windows(2) 语义：信号日 -> 次个交易日执行
+        assert_eq!(scheduled.len(), 2);
+        assert_eq!(
+            scheduled.get(&d2).map(|s| &s.target_weights),
+            Some(&HashMap::from([(
+                "000001.SZ".to_string(),
+                Decimal::new(50, 2)
+            )]))
+        );
+        assert_eq!(
+            scheduled.get(&d3).map(|s| &s.target_weights),
+            Some(&HashMap::from([(
+                "000002.SZ".to_string(),
+                Decimal::new(60, 2)
+            )]))
+        );
+        assert!(
+            !scheduled.contains_key(&d1),
+            "首日信号只能映射到次日执行，执行键不可能是信号日自身"
+        );
+    }
+
+    #[test]
+    fn schedule_signals_drops_last_day_signal_and_non_trading_day_signal() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let d3 = NaiveDate::from_ymd_opt(2024, 1, 4).unwrap();
+        let d5 = NaiveDate::from_ymd_opt(2024, 1, 8).unwrap();
+        let make = |date: NaiveDate| StrategySignal {
+            date,
+            target_weights: HashMap::from([("000001.SZ".to_string(), Decimal::ONE)]),
+        };
+        // d3 是最后一个交易日，没有次个交易日可执行；d5 不在交易日历中
+        let signals = HashMap::from([(d3, make(d3)), (d5, make(d5))]);
+
+        let scheduled = schedule_signals_for_execution(&[d1, d2, d3], &signals);
+
+        assert!(scheduled.is_empty());
+    }
+
+    #[test]
+    fn schedule_signals_handles_empty_and_single_day_inputs() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let signals = HashMap::from([(
+            d1,
+            StrategySignal {
+                date: d1,
+                target_weights: HashMap::new(),
+            },
+        )]);
+
+        // 交易日历不足两天时 windows(2) 为空，安全返回空 map
+        assert!(schedule_signals_for_execution(&[], &HashMap::new()).is_empty());
+        assert!(schedule_signals_for_execution(&[], &signals).is_empty());
+        assert!(schedule_signals_for_execution(&[d1], &signals).is_empty());
+    }
+
+    #[test]
+    fn backtest_cache_stats_delta_computes_per_field_difference() {
+        let before = BacktestDataCacheStats {
+            trading_day_hits: 3,
+            trading_day_misses: 1,
+            benchmark_data_hits: 4,
+            benchmark_data_misses: 2,
+            daily_bar_symbol_hits: 10,
+            daily_bar_covering_window_hits: 2,
+            daily_bar_snapshot_hits: 1,
+            daily_bar_symbol_misses: 5,
+            trading_profile_symbol_hits: 6,
+            trading_profile_symbol_misses: 3,
+        };
+        let after = BacktestDataCacheStats {
+            trading_day_hits: 10,
+            trading_day_misses: 4,
+            benchmark_data_hits: 9,
+            benchmark_data_misses: 2,
+            daily_bar_symbol_hits: 12,
+            daily_bar_covering_window_hits: 5,
+            daily_bar_snapshot_hits: 4,
+            daily_bar_symbol_misses: 9,
+            trading_profile_symbol_hits: 8,
+            trading_profile_symbol_misses: 3,
+        };
+
+        let delta = backtest_cache_stats_delta(before, after);
+
+        assert_eq!(delta.trading_day_hits, 7);
+        assert_eq!(delta.trading_day_misses, 3);
+        assert_eq!(delta.benchmark_data_hits, 5);
+        assert_eq!(delta.benchmark_data_misses, 0);
+        assert_eq!(delta.daily_bar_symbol_hits, 2);
+        assert_eq!(delta.daily_bar_covering_window_hits, 3);
+        assert_eq!(delta.daily_bar_snapshot_hits, 3);
+        assert_eq!(delta.daily_bar_symbol_misses, 4);
+        assert_eq!(delta.trading_profile_symbol_hits, 2);
+        assert_eq!(delta.trading_profile_symbol_misses, 0);
+    }
+
+    #[test]
+    fn backtest_cache_stats_delta_saturates_when_counters_reset() {
+        // from_snapshot 会把计数器清零：after < before 时 delta 必须饱和为 0 而不是下溢 panic
+        let before = BacktestDataCacheStats {
+            trading_day_hits: 10,
+            trading_day_misses: 4,
+            benchmark_data_hits: 9,
+            benchmark_data_misses: 2,
+            daily_bar_symbol_hits: 12,
+            daily_bar_covering_window_hits: 5,
+            daily_bar_snapshot_hits: 4,
+            daily_bar_symbol_misses: 9,
+            trading_profile_symbol_hits: 8,
+            trading_profile_symbol_misses: 3,
+        };
+
+        let delta = backtest_cache_stats_delta(before, BacktestDataCacheStats::default());
+
+        assert_eq!(delta.trading_day_hits, 0);
+        assert_eq!(delta.trading_day_misses, 0);
+        assert_eq!(delta.benchmark_data_hits, 0);
+        assert_eq!(delta.benchmark_data_misses, 0);
+        assert_eq!(delta.daily_bar_symbol_hits, 0);
+        assert_eq!(delta.daily_bar_covering_window_hits, 0);
+        assert_eq!(delta.daily_bar_snapshot_hits, 0);
+        assert_eq!(delta.daily_bar_symbol_misses, 0);
+        assert_eq!(delta.trading_profile_symbol_hits, 0);
+        assert_eq!(delta.trading_profile_symbol_misses, 0);
+    }
+
+    #[test]
+    fn snapshot_key_trims_inputs_and_normalizes_symbol_order() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 3, 31).unwrap();
+
+        let key = BacktestMarketDataSnapshotKey::new(
+            "  dv-2024-q1  ",
+            " 000300.SH ",
+            start,
+            end,
+            &["000002.SZ".to_string(), "000001.SZ".to_string()],
+        );
+        let equivalent = BacktestMarketDataSnapshotKey::new(
+            "dv-2024-q1",
+            "000300.SH",
+            start,
+            end,
+            &[
+                "000001.SZ".to_string(),
+                "000002.SZ".to_string(),
+                "000001.SZ".to_string(),
+            ],
+        );
+
+        // 输入 trim；符号顺序/重复归一化后键等价
+        assert_eq!(key.data_version_id, "dv-2024-q1");
+        assert_eq!(key.benchmark, "000300.SH");
+        assert_eq!(key, equivalent);
+        assert_eq!(key.universe_hash, equivalent.universe_hash);
+        assert_eq!(key.universe_hash.len(), 16);
+        assert!(key.universe_hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Hash/Eq 语义一致：作为 HashMap 键时归一化后的 key 视为同一键
+        let mut map = HashMap::new();
+        map.insert(key, 1);
+        map.insert(equivalent, 2);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.values().next(), Some(&2));
+    }
+
+    #[test]
+    fn snapshot_key_distinguishes_universe_window_and_version() {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 3, 31).unwrap();
+        let later_end = NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
+        let pair = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
+
+        let base =
+            BacktestMarketDataSnapshotKey::new("dv-1", "000300.SH", start, end, &pair("A", "B"));
+        let other_universe =
+            BacktestMarketDataSnapshotKey::new("dv-1", "000300.SH", start, end, &pair("A", "C"));
+        let other_window = BacktestMarketDataSnapshotKey::new(
+            "dv-1",
+            "000300.SH",
+            start,
+            later_end,
+            &pair("A", "B"),
+        );
+        let other_version =
+            BacktestMarketDataSnapshotKey::new("dv-2", "000300.SH", start, end, &pair("A", "B"));
+
+        assert_ne!(base.universe_hash, other_universe.universe_hash);
+        assert_ne!(base, other_universe);
+        assert_ne!(base, other_window);
+        assert_ne!(base, other_version);
+    }
+
+    #[test]
+    fn symbol_universe_hash_is_deterministic_and_non_trivial() {
+        // DefaultHasher::new() 使用固定 key，同输入跨调用结果稳定
+        assert_eq!(symbol_universe_hash(&[]), symbol_universe_hash(&[]));
+        assert_eq!(symbol_universe_hash(&[]).len(), 16);
+        assert!(symbol_universe_hash(&[])
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
+
+        let single = vec!["600000.SH".to_string()];
+        assert_eq!(symbol_universe_hash(&single), symbol_universe_hash(&single));
+        assert_ne!(symbol_universe_hash(&single), symbol_universe_hash(&[]));
+    }
+
+    #[test]
+    fn backtest_data_cache_snapshot_roundtrip_preserves_all_caches() {
+        let dv_id = "dv-snap-001";
+        let start = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 1, 4).unwrap();
+        let mut cache = BacktestDataCache::default();
+
+        cache.insert_trading_days(start, end, vec![start, end]);
+        cache.insert_benchmark_data(
+            "000300.SH",
+            start,
+            end,
+            HashMap::from([(start, (Decimal::new(100, 0), Decimal::new(99, 0)))]),
+        );
+        cache.insert_daily_bar_rows(
+            dv_id,
+            start,
+            end,
+            &["000001.SZ".to_string()],
+            vec![DailyBarRecord {
+                trade_date: start,
+                symbol: "000001.SZ".into(),
+                open: Decimal::new(101, 1),
+                close: Decimal::new(102, 1),
+                pre_close: Decimal::new(100, 1),
+                amount: Decimal::new(1000, 0),
+                data_version_id: dv_id.into(),
+            }],
+        );
+        cache.insert_trading_profiles(
+            &["000001.SZ".to_string(), "000002.SZ".to_string()],
+            vec![(
+                "000001.SZ".to_string(),
+                Some("SZSE".to_string()),
+                Some("主板".to_string()),
+                Some(false),
+                Some("stock".to_string()),
+            )],
+        );
+
+        // snapshot 只读克隆，不触碰命中统计
+        let snapshot = cache.snapshot();
+        assert_eq!(cache.stats().trading_day_hits, 0);
+        assert_eq!(cache.stats().daily_bar_symbol_hits, 0);
+
+        let mut restored = BacktestDataCache::from_snapshot(&snapshot);
+        // from_snapshot 重置统计计数器
+        assert_eq!(restored.stats().trading_day_hits, 0);
+        assert_eq!(restored.stats().trading_day_misses, 0);
+
+        // 交易日历精确键命中
+        let days = restored
+            .cached_trading_days(start, end)
+            .expect("trading days must survive snapshot roundtrip");
+        assert_eq!(days, vec![start, end]);
+
+        // 基准数据精确键命中
+        let benchmark = restored
+            .cached_benchmark_data("000300.SH", start, end)
+            .expect("benchmark data must survive snapshot roundtrip");
+        assert_eq!(
+            benchmark.get(&start).copied(),
+            Some((Decimal::new(100, 0), Decimal::new(99, 0)))
+        );
+
+        // 日线记录命中
+        let (missing, bars) =
+            restored.cached_daily_bar_symbols(dv_id, &["000001.SZ".to_string()], start, end);
+        assert!(missing.is_empty());
+        assert_eq!(
+            bars.get(&start)
+                .and_then(|day| day.get("000001.SZ"))
+                .map(|(_, close, _, _)| *close),
+            Some(Decimal::new(102, 1))
+        );
+
+        // 交易特征：000001 有档命中；000002 走负缓存命中（不在 missing）
+        let (missing_profiles, cached_profiles) =
+            restored.cached_trading_profiles(&["000001.SZ".to_string(), "000002.SZ".to_string()]);
+        assert!(missing_profiles.is_empty());
+        assert_eq!(cached_profiles.len(), 1);
+        assert!(cached_profiles.contains_key("000001.SZ"));
+
+        let stats = restored.stats();
+        assert_eq!(stats.trading_day_hits, 1);
+        assert_eq!(stats.trading_day_misses, 0);
+        assert_eq!(stats.benchmark_data_hits, 1);
+        assert_eq!(stats.daily_bar_symbol_hits, 1);
+        assert_eq!(stats.daily_bar_symbol_misses, 0);
+        assert_eq!(stats.trading_profile_symbol_hits, 2);
+        assert_eq!(stats.trading_profile_symbol_misses, 0);
+
+        // 二次往返：恢复出的缓存再次快照/恢复仍完整
+        let snapshot2 = restored.snapshot();
+        let mut restored2 = BacktestDataCache::from_snapshot(&snapshot2);
+        let (missing2, bars2) =
+            restored2.cached_daily_bar_symbols(dv_id, &["000001.SZ".to_string()], start, end);
+        assert!(missing2.is_empty());
+        assert_eq!(
+            bars2
+                .get(&start)
+                .and_then(|day| day.get("000001.SZ"))
+                .map(|(_, close, _, _)| *close),
+            Some(Decimal::new(102, 1))
+        );
+    }
+
+    #[test]
+    fn normalized_symbol_key_sorts_and_dedups() {
+        assert_eq!(
+            normalized_symbol_key(&[
+                "C.SZ".to_string(),
+                "A.SZ".to_string(),
+                "B.SH".to_string(),
+                "A.SZ".to_string(),
+            ]),
+            vec!["A.SZ".to_string(), "B.SH".to_string(), "C.SZ".to_string()]
+        );
+        assert!(normalized_symbol_key(&[]).is_empty());
+    }
+
+    #[test]
+    fn merge_daily_bar_records_indexes_by_date_and_overwrites_same_symbol() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let record = |date, symbol: &str, close: i64| DailyBarRecord {
+            trade_date: date,
+            symbol: symbol.into(),
+            open: Decimal::new(close - 1, 0),
+            close: Decimal::new(close, 0),
+            pre_close: Decimal::new(close - 2, 0),
+            amount: Decimal::new(close * 10, 0),
+            data_version_id: "dv".into(),
+        };
+
+        let mut target = DailyBarsByDate::new();
+        merge_daily_bar_records(
+            &mut target,
+            &[
+                record(d1, "A", 10),
+                record(d1, "B", 20),
+                record(d2, "A", 11),
+                // 同 (date, symbol) 后写覆盖
+                record(d1, "A", 12),
+            ],
+        );
+
+        assert_eq!(target.len(), 2);
+        assert_eq!(target[&d1].len(), 2);
+        assert_eq!(target[&d1]["A"].0, Decimal::new(11, 0));
+        assert_eq!(target[&d1]["A"].1, Decimal::new(12, 0));
+        assert_eq!(target[&d1]["A"].2, Decimal::new(10, 0));
+        assert_eq!(target[&d1]["A"].3, Decimal::new(120, 0));
+        assert_eq!(target[&d1]["B"].1, Decimal::new(20, 0));
+        assert_eq!(target[&d2]["A"].1, Decimal::new(11, 0));
+    }
+
+    #[test]
+    fn merge_daily_bars_overlays_same_date_and_appends_new_days() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let bar = |close: i64| {
+            (
+                Decimal::new(close - 1, 0),
+                Decimal::new(close, 0),
+                Decimal::new(close - 2, 0),
+                Decimal::new(close * 10, 0),
+            )
+        };
+        let mut target: DailyBarsByDate =
+            HashMap::from([(d1, HashMap::from([("A".to_string(), bar(10))]))]);
+        let source: DailyBarsByDate = HashMap::from([
+            // 同日期：A 被覆盖为 99，B 新增
+            (
+                d1,
+                HashMap::from([("A".to_string(), bar(99)), ("B".to_string(), bar(20))]),
+            ),
+            (d2, HashMap::from([("A".to_string(), bar(11))])),
+        ]);
+
+        merge_daily_bars(&mut target, source);
+
+        assert_eq!(target.len(), 2);
+        assert_eq!(target[&d1].len(), 2);
+        assert_eq!(target[&d1]["A"].1, Decimal::new(99, 0));
+        assert_eq!(target[&d1]["B"].1, Decimal::new(20, 0));
+        assert_eq!(target[&d2]["A"].1, Decimal::new(11, 0));
+    }
+
+    #[test]
+    fn backtest_task_insert_from_config_maps_all_fields() {
+        let config = BacktestConfig {
+            strategy_version_id: "sv-42".into(),
+            data_version_id: "dv-42".into(),
+            prediction_set_id: Some("ps-42".into()),
+            benchmark: "000905.SH".into(),
+            symbols: vec!["000001.SZ".into(), "600000.SH".into()],
+            rebalance_frequency: "weekly".into(),
+            mode: BacktestMode::Audit,
+            ..Default::default()
+        };
+
+        let insert = BacktestTaskInsert::from_config("task-42", &config);
+
+        assert_eq!(insert.task_id, "task-42");
+        assert_eq!(insert.strategy_version_id, "sv-42");
+        assert_eq!(insert.data_version_id, "dv-42");
+        assert_eq!(insert.prediction_set_id.as_deref(), Some("ps-42"));
+        assert_eq!(insert.benchmark_symbol, "000905.SH");
+        assert_eq!(
+            insert.symbols,
+            vec!["000001.SZ".to_string(), "600000.SH".to_string()]
+        );
+        assert_eq!(insert.rebalance_frequency, "weekly");
+        assert_eq!(insert.mode, "audit");
+    }
+
+    #[test]
+    fn backtest_task_insert_from_config_covers_remaining_modes() {
+        for (mode, expected) in [
+            (BacktestMode::Fast, "fast"),
+            (BacktestMode::Standard, "standard"),
+        ] {
+            let config = BacktestConfig {
+                mode,
+                ..Default::default()
+            };
+            assert_eq!(BacktestTaskInsert::from_config("t", &config).mode, expected);
+        }
+
+        // prediction_set_id 缺省映射为 None
+        let insert = BacktestTaskInsert::from_config("t", &BacktestConfig::default());
+        assert_eq!(insert.prediction_set_id, None);
+        assert_eq!(insert.mode, "standard");
+    }
+
+    #[test]
+    fn backtest_task_parameters_fills_missing_audit_keys_from_config() {
+        let config = BacktestConfig {
+            research_dataset_id: Some("rd-1".into()),
+            feature_set_version_id: None,
+            prediction_set_id: Some("ps-1".into()),
+            portfolio_policy_id: None,
+            parameters: json!({"custom_key": 7}),
+            ..Default::default()
+        };
+
+        let parameters = backtest_task_parameters(&config);
+
+        let object = parameters
+            .as_object()
+            .expect("parameters must stay an object");
+        assert_eq!(object.get("custom_key"), Some(&json!(7)));
+        assert_eq!(object.get("research_dataset_id"), Some(&json!("rd-1")));
+        assert_eq!(object.get("feature_set_version_id"), Some(&Value::Null));
+        assert_eq!(object.get("prediction_set_id"), Some(&json!("ps-1")));
+        assert_eq!(object.get("portfolio_policy_id"), Some(&Value::Null));
+        assert_eq!(object.len(), 5);
+    }
+
+    #[test]
+    fn backtest_task_parameters_preserves_existing_keys_and_coerces_non_object() {
+        // 已有键不被 config 值覆盖（or_insert 语义）
+        let config = BacktestConfig {
+            research_dataset_id: Some("rd-1".into()),
+            parameters: json!({"research_dataset_id": "keep-me"}),
+            ..Default::default()
+        };
+        let parameters = backtest_task_parameters(&config);
+        assert_eq!(
+            parameters.get("research_dataset_id"),
+            Some(&json!("keep-me"))
+        );
+
+        // 非对象 parameters（字符串）被重置为空对象后再注入 4 个审计键
+        let config = BacktestConfig {
+            parameters: json!("not-an-object"),
+            ..Default::default()
+        };
+        let parameters = backtest_task_parameters(&config);
+        let object = parameters
+            .as_object()
+            .expect("non-object parameters must be coerced to object");
+        assert_eq!(object.len(), 4);
+        for key in [
+            "research_dataset_id",
+            "feature_set_version_id",
+            "prediction_set_id",
+            "portfolio_policy_id",
+        ] {
+            assert_eq!(object.get(key), Some(&Value::Null));
+        }
+
+        // JSON Null 同样被重置
+        let config = BacktestConfig {
+            parameters: Value::Null,
+            ..Default::default()
+        };
+        assert!(backtest_task_parameters(&config).is_object());
+    }
 }

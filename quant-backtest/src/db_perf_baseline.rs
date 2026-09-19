@@ -563,4 +563,327 @@ mod tests {
             hash_equity_curve(&curve_jitter_b)
         );
     }
+
+    #[test]
+    fn hash_equity_curve_empty_curve_matches_sha256_of_empty_input() {
+        // 空曲线不向 hasher 写入任何字节 => SHA-256("") 官方向量
+        assert_eq!(
+            hash_equity_curve(&[]),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn hash_signals_is_insertion_order_insensitive_and_distinguishes_changes() {
+        let d1 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let make = |date, first_weight: i64| StrategySignal {
+            date,
+            target_weights: HashMap::from([
+                ("000001.SZ".to_string(), Decimal::new(first_weight, 2)),
+                ("000002.SZ".to_string(), Decimal::new(70, 2)),
+            ]),
+        };
+
+        // 内容相同、声明（插入）顺序不同的两个 map
+        let signals_a = HashMap::from([
+            (d1, make(d1, 30)),
+            (
+                d2,
+                StrategySignal {
+                    date: d2,
+                    target_weights: HashMap::from([("600000.SH".to_string(), Decimal::ONE)]),
+                },
+            ),
+        ]);
+        let signals_b = HashMap::from([
+            (
+                d2,
+                StrategySignal {
+                    date: d2,
+                    target_weights: HashMap::from([("600000.SH".to_string(), Decimal::ONE)]),
+                },
+            ),
+            (d1, make(d1, 30)),
+        ]);
+
+        let hash_a = hash_signals(&signals_a);
+
+        // hash_signals 内部按日期/symbol 排序，插入顺序不影响结果
+        assert_eq!(hash_a, hash_signals(&signals_b));
+        assert_eq!(hash_a.len(), 64);
+        assert!(hash_a.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // 任一权重变化都必须被捕获
+        let changed = HashMap::from([
+            (d1, make(d1, 31)),
+            (
+                d2,
+                StrategySignal {
+                    date: d2,
+                    target_weights: HashMap::from([("600000.SH".to_string(), Decimal::ONE)]),
+                },
+            ),
+        ]);
+        assert_ne!(hash_a, hash_signals(&changed));
+
+        // 空信号 => SHA-256("") 官方向量
+        assert_eq!(
+            hash_signals(&HashMap::new()),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn hash_config_is_stable_and_detects_field_changes() {
+        let config = BacktestConfig::default();
+
+        let hash = hash_config(&config);
+
+        // 序列化确定性：同 config 重复 hash 一致
+        assert_eq!(hash, hash_config(&config));
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // 任一 config 字段静默变更都会改变 hash（audit 守卫目标）
+        let mut changed = config.clone();
+        changed.initial_capital = Decimal::new(2_000_000, 0);
+        assert_ne!(hash, hash_config(&changed));
+
+        let mut changed = config.clone();
+        changed.data_version_id = "other-dv".to_string();
+        assert_ne!(hash, hash_config(&changed));
+    }
+
+    #[test]
+    fn hash_data_version_matches_official_sha256_vectors() {
+        // SHA-256("") 与 SHA-256("abc") 是 NIST 官方测试向量，可作手算基准写死
+        assert_eq!(
+            hash_data_version(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            hash_data_version("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // 稳定性与区分度
+        assert_eq!(hash_data_version("abc"), hash_data_version("abc"));
+        assert_ne!(hash_data_version("abc"), hash_data_version("abd"));
+    }
+
+    #[test]
+    fn parse_db_perf_args_defaults_with_program_only() {
+        let config = parse_db_perf_args(["db-perf-baseline"])
+            .expect("program-only argv must parse to defaults");
+
+        let default = DbPerfBaselineConfig::default();
+        assert_eq!(config.database_url, default.database_url);
+        assert_eq!(config.trading_days, 40);
+        assert_eq!(config.symbols, 25);
+        assert_eq!(config.rebalance_every_n_days, 10);
+        assert_eq!(config.basket_size, 8);
+        assert_eq!(config.start_date, default.start_date);
+        assert_eq!(config.end_date, default.end_date);
+        assert_eq!(config.benchmark, "000300.SH");
+        assert_eq!(config.task_prefix, "perf-db-smoke");
+    }
+
+    #[test]
+    fn parse_db_perf_args_parses_every_flag() {
+        let config = parse_db_perf_args([
+            "db-perf-baseline",
+            "--database-url",
+            "postgres://user:pass@host:5432/quant",
+            "--days",
+            "5",
+            "--symbols",
+            "3",
+            "--rebalance-days",
+            "2",
+            "--basket-size",
+            "2",
+            "--start-date",
+            "20240101",
+            "--end-date",
+            "20240630",
+            "--benchmark",
+            "000905.SH",
+            "--task-prefix",
+            "perf-x",
+        ])
+        .expect("all flags must parse");
+
+        assert_eq!(config.database_url, "postgres://user:pass@host:5432/quant");
+        assert_eq!(config.trading_days, 5);
+        assert_eq!(config.symbols, 3);
+        assert_eq!(config.rebalance_every_n_days, 2);
+        assert_eq!(config.basket_size, 2);
+        assert_eq!(
+            config.start_date,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        );
+        assert_eq!(
+            config.end_date,
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap()
+        );
+        assert_eq!(config.benchmark, "000905.SH");
+        assert_eq!(config.task_prefix, "perf-x");
+    }
+
+    #[test]
+    fn parse_db_perf_args_help_flag_returns_usage_error() {
+        for help in ["--help", "-h"] {
+            let err = parse_db_perf_args(["db-perf-baseline", help]).unwrap_err();
+            assert!(
+                err.contains("Usage: db_perf_baseline"),
+                "help error must embed usage, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_db_perf_args_rejects_unknown_argument() {
+        let err = parse_db_perf_args(["db-perf-baseline", "--bogus"]).unwrap_err();
+        assert!(err.contains("unknown argument `--bogus`"));
+        assert!(err.contains("Usage: db_perf_baseline"));
+    }
+
+    #[test]
+    fn parse_db_perf_args_rejects_missing_and_invalid_values() {
+        // 缺值
+        let err = parse_db_perf_args(["db-perf-baseline", "--days"]).unwrap_err();
+        assert!(err.contains("missing value for `--days`"));
+
+        // 数值非法（非数字 / 负数均不是 usize）
+        let err = parse_db_perf_args(["db-perf-baseline", "--symbols", "abc"]).unwrap_err();
+        assert!(err.contains("invalid numeric value `abc` for `--symbols`"));
+        let err = parse_db_perf_args(["db-perf-baseline", "--basket-size", "-1"]).unwrap_err();
+        assert!(err.contains("invalid numeric value `-1` for `--basket-size`"));
+
+        // 日期格式非法：只接受 YYYYMMDD
+        let err =
+            parse_db_perf_args(["db-perf-baseline", "--start-date", "2024-01-01"]).unwrap_err();
+        assert!(
+            err.contains("invalid date `2024-01-01` for `--start-date`; expected YYYYMMDD"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_db_perf_args_normalizes_bounds_and_swaps_reversed_range() {
+        let config = parse_db_perf_args([
+            "db-perf-baseline",
+            "--days",
+            "1",
+            "--symbols",
+            "2",
+            "--rebalance-days",
+            "0",
+            "--basket-size",
+            "99",
+            "--start-date",
+            "20240630",
+            "--end-date",
+            "20240101",
+        ])
+        .expect("out-of-range values must be normalized, not rejected");
+
+        assert_eq!(config.trading_days, 2, "trading_days 下限钳到 2");
+        assert_eq!(config.symbols, 2);
+        assert_eq!(config.rebalance_every_n_days, 1, "rebalance 下限钳到 1");
+        assert_eq!(config.basket_size, 2, "basket_size 钳到 symbols 数");
+        assert_eq!(
+            config.start_date,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            "起止倒置时交换"
+        );
+        assert_eq!(
+            config.end_date,
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap()
+        );
+    }
+
+    #[test]
+    fn db_perf_usage_documents_all_flags_and_defaults() {
+        let usage = db_perf_usage();
+        for token in [
+            "Usage: db_perf_baseline",
+            "--database-url",
+            "--days",
+            "--symbols",
+            "--rebalance-days",
+            "--basket-size",
+            "--start-date",
+            "--end-date",
+            "--benchmark",
+            "--task-prefix",
+            "--start-date 20240102",
+            "--end-date 20241231",
+        ] {
+            assert!(usage.contains(token), "usage missing `{token}`:\n{usage}");
+        }
+    }
+
+    #[test]
+    fn generate_rebalance_signals_rotates_basket_on_schedule() {
+        let days: Vec<NaiveDate> = (2..8)
+            .map(|d| NaiveDate::from_ymd_opt(2024, 1, d).unwrap())
+            .collect();
+        let symbols: Vec<String> = ["A.SH", "B.SH", "C.SH"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // 0.95 / 2 = 0.475（basket_size=2）
+        let weight = Decimal::new(475, 3);
+
+        let signals = generate_rebalance_signals(&days, &symbols, 2, 2);
+
+        // step_by(2)：信号落在第 0/2/4 个交易日
+        assert_eq!(signals.len(), 3);
+        let weights_at = |idx: usize| -> HashMap<String, Decimal> {
+            signals
+                .get(&days[idx])
+                .unwrap_or_else(|| panic!("missing signal at trading day index {idx}"))
+                .target_weights
+                .clone()
+        };
+        // day_idx=0: offset=0 -> basket {A, B}
+        assert_eq!(
+            weights_at(0),
+            HashMap::from([("A.SH".to_string(), weight), ("B.SH".to_string(), weight)])
+        );
+        // day_idx=2: offset=2 % 3 -> basket {C, A}
+        assert_eq!(
+            weights_at(2),
+            HashMap::from([("C.SH".to_string(), weight), ("A.SH".to_string(), weight)])
+        );
+        // day_idx=4: offset=4 % 3 = 1 -> basket {B, C}
+        assert_eq!(
+            weights_at(4),
+            HashMap::from([("B.SH".to_string(), weight), ("C.SH".to_string(), weight)])
+        );
+    }
+
+    #[test]
+    fn generate_rebalance_signals_clamps_basket_and_respects_horizon() {
+        let days: Vec<NaiveDate> = (2..6)
+            .map(|d| NaiveDate::from_ymd_opt(2024, 1, d).unwrap())
+            .collect();
+        let symbols: Vec<String> = ["A.SH", "B.SH"].iter().map(|s| s.to_string()).collect();
+
+        // basket 超过标的数 -> 钳到 2；rebalance 间隔大于天数 -> 仅首日一个信号
+        let signals = generate_rebalance_signals(&days, &symbols, 10, 99);
+
+        assert_eq!(signals.len(), 1);
+        let signal = signals
+            .get(&days[0])
+            .expect("first trading day must carry a signal");
+        assert_eq!(signal.target_weights.len(), 2);
+        let weight = Decimal::new(475, 3); // 0.95 / 2
+        assert_eq!(signal.target_weights.get("A.SH"), Some(&weight));
+        assert_eq!(signal.target_weights.get("B.SH"), Some(&weight));
+
+        // 空交易日 -> 无信号
+        assert!(generate_rebalance_signals(&[], &symbols, 2, 2).is_empty());
+    }
 }
