@@ -16,6 +16,7 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 
 use crate::routes::rebalance::{mark_to_market, rebalance_account, PriceSource};
+use crate::routes::shared::{PaperAccountRepository, PgPaperAccountRepo};
 use crate::routes::strategy::ResolvedStrategy;
 use crate::routes::trading::update_current_nav;
 
@@ -145,25 +146,12 @@ pub async fn run_daily_simulation(
     }
     let init_cap_f: f64 = init_cap.to_string().parse().unwrap_or(1_000_000.0);
 
-    // 1. 账号重置（回放专用）
+    // 1. 账号重置（回放专用）——子表清理收敛为 repo 的 wipe_account_tables（防表清单漂移）
     if reset_account {
-        for table in &[
-            "paper_order",
-            "paper_fill",
-            "paper_position",
-            "paper_nav_snapshot",
-            "paper_replay",
-            "paper_margin_trade",
-        ] {
-            sqlx::query(&format!(
-                "DELETE FROM {} WHERE paper_account_id = $1",
-                table
-            ))
-            .bind(account_id)
-            .execute(db)
+        PgPaperAccountRepo::new(db)
+            .wipe_account_tables(account_id)
             .await
-            .map_err(|e| format!("clean {}: {}", table, e))?;
-        }
+            .map_err(|e| format!("clean tables: {}", e))?;
         sqlx::query(
             "UPDATE paper_account SET current_nav=$1, peak_nav=$1, cash=$1, max_drawdown_pct=0, margin_amount=0, total_trades=0 WHERE paper_account_id=$2",
         )

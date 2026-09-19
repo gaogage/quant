@@ -96,7 +96,7 @@ pub async fn select_positions(
 use crate::routes::shared::{
     compute_lw_mvo_weights, compute_vol_target_leverage, detect_regime_exposure,
     fetch_intraday_etf_prices, resolved_to_legacy_sc, send_quality_alert, MvoWeightCache,
-    StrategyConfig,
+    PaperAccountRepository, PgPaperAccountRepo, StrategyConfig,
 };
 use crate::routes::strategy::ResolvedStrategy;
 use crate::routes::trading::{execute_simulated_trade, try_auto_repay, update_current_nav};
@@ -219,13 +219,11 @@ pub async fn rebalance_account(
     let capital_f = if let Some(nav) = preloaded_nav {
         nav
     } else {
-        let current_nav: Decimal = sqlx::query_scalar(
-            "SELECT COALESCE(current_nav, initial_capital) FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_one(db)
-        .await
-        .map_err(|e| format!("nav query: {}", e))?;
+        let current_nav: Decimal = PgPaperAccountRepo::new(db)
+            .find_current_nav_or_capital(account_id)
+            .await
+            .map_err(|e| format!("nav query: {}", e))?
+            .ok_or_else(|| format!("nav query: 账号 {} 不存在", account_id))?;
         current_nav.to_string().parse::<f64>().unwrap_or(0.0)
     };
     if capital_f <= 0.0 {
@@ -842,14 +840,8 @@ pub async fn rebalance_account(
 
 /// 维保比例(维持担保比例) = (持仓市值 + cash) / margin。margin=0 返回 ∞(无融资不限制)。
 async fn maintenance_ratio(db: &PgPool, account_id: &str) -> f64 {
-    let row: Option<(rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal)> =
-        sqlx::query_as(
-            "SELECT (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id=$1),
-                    COALESCE(cash,0), COALESCE(margin_amount,0)
-             FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_optional(db)
+    let row: Option<(Decimal, Decimal, Decimal)> = PgPaperAccountRepo::new(db)
+        .find_maintenance_components(account_id)
         .await
         .ok()
         .flatten();
@@ -883,16 +875,11 @@ async fn force_liquidation(
         }
         // 计算需还款额:使 maint = total_assets / (margin - repay) = target_maint
         // repay = margin - total_assets / target_maint
-        let (mv, cash, margin): (rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal) =
-            sqlx::query_as(
-                "SELECT (SELECT COALESCE(SUM(market_value),0) FROM paper_position WHERE paper_account_id=$1),
-                        COALESCE(cash,0), COALESCE(margin_amount,0)
-                 FROM paper_account WHERE paper_account_id = $1",
-            )
-            .bind(account_id)
-            .fetch_one(db)
+        let (mv, cash, margin): (Decimal, Decimal, Decimal) = PgPaperAccountRepo::new(db)
+            .find_maintenance_components(account_id)
             .await
-            .map_err(|e| format!("liq query: {}", e))?;
+            .map_err(|e| format!("liq query: {}", e))?
+            .ok_or_else(|| format!("liq query: 账号 {} 不存在", account_id))?;
         let margin_f = margin.to_string().parse::<f64>().unwrap_or(0.0);
         let total_f = (mv + cash).to_string().parse::<f64>().unwrap_or(0.0);
         let need_repay = margin_f - total_f / target_maint;

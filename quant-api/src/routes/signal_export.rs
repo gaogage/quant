@@ -18,7 +18,8 @@
 use crate::routes::rebalance::{build_etf_allocations, compute_leverage_mult, select_positions};
 use crate::routes::shared::{
     compute_lw_mvo_weights, detect_regime_exposure, load_etf_premium_map, resolved_to_legacy_sc,
-    send_dingtalk_alert, MvoWeightCache, StrategyConfig,
+    send_dingtalk_alert, MvoWeightCache, PaperAccountRepository, PgPaperAccountRepo,
+    StrategyConfig,
 };
 use sha1::{Digest, Sha1};
 use sqlx::PgPool;
@@ -294,13 +295,11 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
 
     // 5. 信号 JSON(定版契约 §3.1: symbol .SS/.SZ, trade_date YYYYMMDD, checksum 全payload)
     let trade_date = next_trading_day(db, date).await?;
-    let nav_dec: rust_decimal::Decimal = sqlx::query_scalar(
-        "SELECT COALESCE(current_nav, initial_capital) FROM paper_account WHERE paper_account_id=$1",
-    )
-    .bind(account_id)
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("nav: {}", e))?;
+    let nav_dec: rust_decimal::Decimal = PgPaperAccountRepo::new(db)
+        .find_current_nav_or_capital(account_id)
+        .await
+        .map_err(|e| format!("nav: {}", e))?
+        .ok_or_else(|| format!("nav: 账号 {} 不存在", account_id))?;
     let nav: f64 = nav_dec.to_string().parse().unwrap_or(0.0);
 
     let mut signal = serde_json::json!({

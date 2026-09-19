@@ -19,6 +19,7 @@ use crate::routes::scheduler::{
     ensure_prediction_coverage, load_active_etf_symbols_union, load_first_active_strategy_config,
     sync_limit_with_retry,
 };
+use crate::routes::shared::{PaperAccountRepository, PgPaperAccountRepo};
 
 /// 22:00 日终数据同步：事件优先 → 当日行情 → 复权兜底 → composite → 日报 → 复权全量 → ML → 质量检查。
 pub async fn sync_eod_data(
@@ -551,13 +552,10 @@ pub async fn sync_eod_data(
     // 使日报 daily_return = 当日日终净资产 vs 昨日日终净资产的真实当日涨跌。
     // 14:45 写的 snapshot 会被 push_daily_performance_report 内的 upsert 覆盖为收盘口径。
     if is_trade {
-        let accounts: Vec<String> = sqlx::query_scalar(
-            "SELECT paper_account_id FROM paper_account \
-             WHERE status = 'active' AND account_type = 'simulated'",
-        )
-        .fetch_all(db)
-        .await
-        .unwrap_or_default();
+        let accounts: Vec<String> = PgPaperAccountRepo::new(db)
+            .find_active_simulated_ids()
+            .await
+            .unwrap_or_default();
         for aid in &accounts {
             if let Err(e) = crate::routes::rebalance::mark_to_market(
                 db,

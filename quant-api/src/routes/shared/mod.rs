@@ -19,6 +19,7 @@ mod etf_prices;
 mod mvo_weights;
 mod nav_snapshot;
 mod paper_account_repo;
+mod paper_position_repo;
 mod regime;
 mod strategy_config;
 mod trade_block;
@@ -31,6 +32,7 @@ pub use mvo_weights::MvoWeightCache;
 pub(crate) use mvo_weights::{compute_lw_mvo_weights, compute_vol_target_leverage};
 pub use nav_snapshot::{upsert_nav_snapshot, NavSnapshot};
 pub use paper_account_repo::{CreateAccountInput, PaperAccountRepository, PgPaperAccountRepo};
+pub use paper_position_repo::{PaperPositionRepository, PgPaperPositionRepo};
 pub use regime::{
     detect_regime_exposure, detect_regime_exposure_bwgv2, detect_regime_exposure_cached,
     Bwgv2Config,

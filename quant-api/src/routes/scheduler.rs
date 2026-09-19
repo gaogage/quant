@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 
 use crate::routes::shared::{
     compute_lw_mvo_weights, resolved_to_legacy_sc, send_dingtalk_alert, send_dingtalk_alert_titled,
-    send_quality_alert, MvoWeightCache, StrategyConfig,
+    send_quality_alert, MvoWeightCache, PaperAccountRepository, PgPaperAccountRepo, StrategyConfig,
 };
 use crate::routes::strategy::{AssetClass, ResolvedStrategy};
 
@@ -1213,13 +1213,10 @@ async fn run_tick(
             // Step 3b: T+1 补盯市。22:00 EOD 时 fund_daily 偶发无当日数据,
             // ETF 持仓的日终盯市被迫落在前日收盘。此处 ETF 日线已补齐,对 active 账户
             // 补 mark_to_market(上一交易日收盘) + NAV 重算。
-            let remak_accounts: Vec<String> = sqlx::query_scalar(
-                "SELECT paper_account_id FROM paper_account \
-                 WHERE status = 'active' AND account_type = 'simulated'",
-            )
-            .fetch_all(db)
-            .await
-            .unwrap_or_default();
+            let remak_accounts: Vec<String> = PgPaperAccountRepo::new(db)
+                .find_active_simulated_ids()
+                .await
+                .unwrap_or_default();
             for aid in &remak_accounts {
                 if let Err(e) = crate::routes::rebalance::mark_to_market(
                     db,
@@ -2295,19 +2292,16 @@ pub async fn generate_paper_signals_for_all(
     tushare: &TushareClient,
     skip_data_gate: bool,
 ) -> Result<(), String> {
-    let accounts = sqlx::query_as::<_, (String,)>(
-        "SELECT paper_account_id FROM paper_account
-         WHERE status = 'active' AND account_type = 'simulated'",
-    )
-    .fetch_all(db)
-    .await
-    .map_err(|e| format!("account query: {}", e))?;
+    let accounts = PgPaperAccountRepo::new(db)
+        .find_active_simulated_ids()
+        .await
+        .map_err(|e| format!("account query: {}", e))?;
 
     if accounts.is_empty() {
         return Ok(());
     }
 
-    for (account_id,) in &accounts {
+    for account_id in &accounts {
         // R2 类型门禁：load_account 按 leverage_enabled 分派 Cash/Margin，
         // Cash 账号编译期保证无 leverage_config（杜绝无杠杆账户误融资）。
         let loaded = match crate::routes::account::load_account(db, account_id).await {

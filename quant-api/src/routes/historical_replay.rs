@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::routes::mvo_engine::{compute_metrics, run_daily_simulation, DailyNav};
 use crate::routes::rebalance::PriceSource;
+use crate::routes::shared::{PaperAccountRepository, PgPaperAccountRepo};
 use crate::routes::sync::{check_paper_account_data_readiness, DataReadinessGate};
 use crate::AppState;
 
@@ -175,26 +176,20 @@ async fn run_historical_replay(
     // 算出（= SUM(market_value) + cash - margin），cash 是回放结束时的真实闲置资金。
     // 若强制 cash=0 会让 current_nav 与 (mv + cash - margin) 失衡——unlev 等保留现金的
     // 策略结束日本就有闲置资金（如 ETF 防御/未投满），清零后 NAV 恒等式被破坏。
-    sqlx::query(
-        "UPDATE paper_account SET
-            current_nav=$1,
-            peak_nav=$2,
-            max_drawdown_pct=$3,
-            total_trades=$4,
-            updated_at=NOW()
-         WHERE paper_account_id=$5",
-    )
-    .bind(Decimal::from_f64_retain(final_nav).unwrap_or(init_cap))
-    .bind(Decimal::from_f64_retain(peak).unwrap_or(init_cap))
     // max_drawdown_pct 语义=小数 0~1，不可 *100：实盘 update_current_nav 用 (peak-nav)/peak
     // 写小数；日报 report.rs/dingtalk 读字段后 *100 展示。曾 *100 致日报显示 989%(2026-08-13)。
     // 注：paper_replay 表(~L201)的 _pct 字段是百分数语义，与本表不同，勿照搬。
-    .bind(max_dd)
-    .bind(total_trades)
-    .bind(&account_id)
-    .execute(db)
-    .await
-    .ok();
+    // R5b 续批接线：与 paper.rs 两处回放收尾同款 update_nav（SQL 逐字相同）。
+    // NaN/inf 降级 cap_f64（原 Decimal::from_f64_retain().unwrap_or(init_cap) 的等价展开）。
+    let nav_val = if final_nav.is_finite() {
+        final_nav
+    } else {
+        cap_f64
+    };
+    let peak_val = if peak.is_finite() { peak } else { cap_f64 };
+    let _ = PgPaperAccountRepo::new(db)
+        .update_nav(&account_id, nav_val, peak_val, max_dd, total_trades as i32)
+        .await;
 
     // 8. 删除旧回放记录，确保每个账号只有一条回放
     sqlx::query("DELETE FROM paper_replay WHERE paper_account_id = $1")

@@ -15,7 +15,10 @@ use chrono::NaiveDate;
 use sqlx::PgPool;
 use tracing::{info, warn};
 
-use crate::routes::shared::{send_quality_alert, upsert_nav_snapshot, NavSnapshot};
+use crate::routes::shared::{
+    send_quality_alert, upsert_nav_snapshot, NavSnapshot, PaperAccountRepository,
+    PaperPositionRepository, PgPaperAccountRepo, PgPaperPositionRepo,
+};
 
 /// T+1 补盯市后的快照重算(不推钉钉)。
 ///
@@ -202,17 +205,12 @@ async fn report_for_accounts(
             0.0
         };
 
-        let pos_row: Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
-            "SELECT COUNT(*)::bigint,
-                    COALESCE(SUM(quantity * COALESCE(market_price, avg_cost)), 0),
-                    COALESCE((SELECT cash FROM paper_account WHERE paper_account_id = $1), 0)
-             FROM paper_position WHERE paper_account_id = $1 AND quantity > 0",
-        )
-        .bind(account_id)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
+        let pos_row: Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)> =
+            PgPaperPositionRepo::new(db)
+                .find_summary(account_id)
+                .await
+                .ok()
+                .map(|s| (s.position_count, s.market_value, s.cash));
         let (position_count, market_value, cash) =
             pos_row.unwrap_or((0, rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO));
 
@@ -243,15 +241,11 @@ async fn report_for_accounts(
         // P1 修复:对标基准从"纯 A 股选股曲线"改为"composite 多资产合成曲线"(消除结构性偏差),
         // 且 bt_ret 按账号 leverage_multiplier 放大(与实盘杠杆口径对齐)。composite 曲线缺失时
         // 回退旧的 A 股曲线逻辑(向后兼容)。
-        let acct_meta: Option<(Option<String>, f64)> = sqlx::query_as(
-            "SELECT strategy_version_id, COALESCE(leverage_multiplier, 1.0)::double precision \
-             FROM paper_account WHERE paper_account_id = $1",
-        )
-        .bind(account_id)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
+        let acct_meta: Option<(Option<String>, f64)> = PgPaperAccountRepo::new(db)
+            .find_strategy_and_leverage(account_id)
+            .await
+            .ok()
+            .flatten();
         let (strategy_version_id, leverage_multiplier) = acct_meta.unwrap_or((None, 1.0));
         let mut backtest_deviation: Option<f64> = None;
         // 绩效视角补充（2026-09-19 用户定版）：同 10 日窗口的实盘 vs 沪深300 超额——
@@ -560,17 +554,12 @@ pub async fn snapshot_positions_for_all_accounts(db: &PgPool, date: NaiveDate) {
             0.0
         };
 
-        let pos_row: Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
-            "SELECT COUNT(*)::bigint,
-                    COALESCE(SUM(quantity * COALESCE(market_price, avg_cost)), 0),
-                    COALESCE((SELECT cash FROM paper_account WHERE paper_account_id = $1), 0)
-             FROM paper_position WHERE paper_account_id = $1 AND quantity > 0",
-        )
-        .bind(account_id)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
+        let pos_row: Option<(i64, rust_decimal::Decimal, rust_decimal::Decimal)> =
+            PgPaperPositionRepo::new(db)
+                .find_summary(account_id)
+                .await
+                .ok()
+                .map(|s| (s.position_count, s.market_value, s.cash));
         let (position_count, market_value, cash) =
             pos_row.unwrap_or((0, rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO));
 

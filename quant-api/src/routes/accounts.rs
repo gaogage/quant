@@ -618,15 +618,11 @@ async fn query_backtest_comparison(
         return serde_json::Value::Null;
     };
 
-    let acct_meta: Option<(Option<String>, f64)> = sqlx::query_as(
-        "SELECT strategy_version_id, COALESCE(leverage_multiplier, 1.0)::double precision \
-         FROM paper_account WHERE paper_account_id = $1",
-    )
-    .bind(account_id)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
+    let acct_meta: Option<(Option<String>, f64)> = PgPaperAccountRepo::new(db)
+        .find_strategy_and_leverage(account_id)
+        .await
+        .ok()
+        .flatten();
     let Some((Some(sv_id), leverage_multiplier)) = acct_meta else {
         return serde_json::Value::Null;
     };
@@ -1027,18 +1023,10 @@ pub async fn reset_account(
         }
     };
 
-    // 清空关联数据
-    for table in &[
-        "paper_order",
-        "paper_fill",
-        "paper_position",
-        "paper_nav_snapshot",
-        "paper_replay",
-        "paper_margin_trade",
-    ] {
-        let sql = format!("DELETE FROM {} WHERE paper_account_id = $1", table);
-        let _ = sqlx::query(&sql).bind(&account_id).execute(&state.db).await;
-    }
+    // 清空关联数据（原逐表循环 DELETE，收敛为 repo 的 wipe_account_tables 防表清单漂移）
+    let _ = PgPaperAccountRepo::new(&state.db)
+        .wipe_account_tables(&account_id)
+        .await;
 
     // 重置账号状态
     let cap = req.initial_capital;
