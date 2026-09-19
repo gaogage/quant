@@ -32,8 +32,10 @@ checks = [
 failed = []
 for label, path, forbidden in checks:
     text = path.read_text(encoding="utf-8")
+    # AND 语义：全部串同时出现才判定为坏模式（2026-09-19 修复——原 OR 语义下
+    # "available_at"/"INSERT INTO xxx" 等合法单串必然命中，8 项全误报，脚本从未可用）。
     hits = [item for item in forbidden if item in text]
-    if hits:
+    if len(hits) == len(forbidden):
         failed.append((label, str(path.relative_to(ROOT)), hits))
 
 prototype_sql = ROOT / "sql/phase3_factor_value.sql"
