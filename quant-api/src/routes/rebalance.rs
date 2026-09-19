@@ -96,7 +96,8 @@ pub async fn select_positions(
 use crate::routes::shared::{
     compute_lw_mvo_weights, compute_vol_target_leverage, detect_regime_exposure,
     fetch_intraday_etf_prices, resolved_to_legacy_sc, send_quality_alert, MvoWeightCache,
-    PaperAccountRepository, PgPaperAccountRepo, StrategyConfig,
+    PaperAccountRepository, PaperPositionRepository, PgPaperAccountRepo, PgPaperPositionRepo,
+    StrategyConfig,
 };
 use crate::routes::strategy::ResolvedStrategy;
 use crate::routes::trading::{execute_simulated_trade, try_auto_repay, update_current_nav};
@@ -1356,25 +1357,17 @@ async fn apply_fill_common_buy(
 ) -> bool {
     // 持仓:移动加权 avg_cost + 标记 last_trade_date(T+1:当日买入次日才能卖)
     // SQL 失败不再静默吞错(let _ = 曾把错误全部吞掉,持仓静默不写入)。
-    if let Err(e) = sqlx::query(
-        "INSERT INTO paper_position (paper_position_id, paper_account_id, symbol, quantity, avg_cost, market_price, market_value, last_trade_date)
-         VALUES ($1, $2, $3, $4, $5, $5, $4*$5, $6)
-         ON CONFLICT (paper_account_id, symbol) DO UPDATE SET
-             avg_cost = (paper_position.avg_cost * paper_position.quantity + EXCLUDED.avg_cost * EXCLUDED.quantity)
-                        / (paper_position.quantity + EXCLUDED.quantity),
-             quantity = paper_position.quantity + EXCLUDED.quantity,
-             market_price = EXCLUDED.market_price,
-             market_value = (paper_position.quantity + EXCLUDED.quantity) * EXCLUDED.market_price,
-             last_trade_date = $6",
-    )
-    .bind(format!("pp-{}", short_id()))
-    .bind(account_id)
-    .bind(sym)
-    .bind(qty)
-    .bind(fill_price)
-    .bind(date)
-    .execute(db)
-    .await
+    // R5b 批次3:收敛为 PositionRepository::upsert_on_fill(SQL 逐字搬移)。
+    if let Err(e) = PgPaperPositionRepo::new(db)
+        .upsert_on_fill(
+            &format!("pp-{}", short_id()),
+            account_id,
+            sym,
+            qty,
+            fill_price,
+            date,
+        )
+        .await
     {
         warn!("[rebalance] 持仓写入失败 {} {}: {}", account_id, sym, e);
         return false;
@@ -1417,17 +1410,10 @@ async fn apply_fill_common_sell(
     let fill_amount = qty * fill_price; // 重算以匹配取整后的 qty
                                         // T+1:A股当日买入次日才能卖。last_trade_date == date 的持仓不可卖,跳过该笔。
                                         // last_trade_date IS NULL(历史数据未标记)兜底允许卖出,避免误拦正常持仓。
-    let t1_blocked: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM paper_position
-          WHERE paper_account_id=$1 AND symbol=$2 AND quantity>0
-            AND last_trade_date IS NOT NULL AND last_trade_date = $3)",
-    )
-    .bind(account_id)
-    .bind(sym)
-    .bind(date)
-    .fetch_one(db)
-    .await
-    .unwrap_or(false);
+    let t1_blocked: bool = PgPaperPositionRepo::new(db)
+        .exists_t1_blocked(account_id, sym, date)
+        .await
+        .unwrap_or(false);
     if t1_blocked {
         warn!(
             "[rebalance] T+1 跳过卖出: {} {} 当日买入(last_trade_date={})不可卖",
@@ -1435,28 +1421,17 @@ async fn apply_fill_common_sell(
         );
         return false;
     }
-    if let Err(e) = sqlx::query(
-        "UPDATE paper_position SET quantity = quantity - $3,
-             market_value = (quantity - $3) * market_price,
-             last_trade_date = $4
-         WHERE paper_account_id = $1 AND symbol = $2 AND quantity >= $3",
-    )
-    .bind(account_id)
-    .bind(sym)
-    .bind(qty)
-    .bind(date)
-    .execute(db)
-    .await
+    if let Err(e) = PgPaperPositionRepo::new(db)
+        .reduce_quantity(account_id, sym, qty, date)
+        .await
     {
         warn!("[rebalance] 卖出持仓更新失败 {} {}: {}", account_id, sym, e);
         return false;
     }
     // qty 归零的行删除(保持持仓表干净)
-    if let Err(e) =
-        sqlx::query("DELETE FROM paper_position WHERE paper_account_id = $1 AND quantity <= 0")
-            .bind(account_id)
-            .execute(db)
-            .await
+    if let Err(e) = PgPaperPositionRepo::new(db)
+        .delete_zero_quantity(account_id)
+        .await
     {
         warn!("[rebalance] 清零持仓删除失败 {}: {}", account_id, e);
     }

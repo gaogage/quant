@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::routes::shared::{PaperAccountRepository, PgPaperAccountRepo};
+use crate::routes::shared::{
+    PaperAccountRepository, PaperPositionRepository, PgPaperAccountRepo, PgPaperPositionRepo,
+};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -273,25 +275,16 @@ async fn generate_paper_signals_inner(
         // Upsert positions based on target weights
         for (symbol, target_w) in day_scores.iter().map(|s| (&s.1, weight)) {
             let position_id = format!("pp-{}", Uuid::new_v4());
-            sqlx::query(
-                "INSERT INTO paper_position
-                   (paper_position_id, paper_account_id, symbol, quantity, avg_cost,
-                    target_weight, last_trade_date, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, 0, $5, $6, now(), now())
-                 ON CONFLICT (paper_account_id, symbol)
-                 DO UPDATE SET target_weight = EXCLUDED.target_weight,
-                               last_trade_date = EXCLUDED.last_trade_date,
-                               updated_at = now()",
-            )
-            .bind(&position_id)
-            .bind(&paper_account_id)
-            .bind(symbol)
-            .bind(target_w) // quantity = weight (simplified)
-            .bind(target_w)
-            .bind(score_day)
-            .execute(db)
-            .await
-            .map_err(|e| format!("Failed to upsert position: {}", e))?;
+            PgPaperPositionRepo::new(db)
+                .upsert_signal_position(
+                    &position_id,
+                    &paper_account_id,
+                    symbol,
+                    target_w,
+                    score_day,
+                )
+                .await
+                .map_err(|e| format!("Failed to upsert position: {}", e))?;
         }
 
         // R5: 统一走 upsert_nav_snapshot（原裸 SQL 5 处重复之一，初始化快照）

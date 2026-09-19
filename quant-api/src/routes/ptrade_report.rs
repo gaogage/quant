@@ -11,6 +11,8 @@
 use sqlx::PgPool;
 use tracing::error;
 
+use crate::routes::shared::{PaperPositionRepository, PgPaperPositionRepo};
+
 const FETCH_SCRIPT: &str = include_str!("../../../scripts/ptrade_report_fetch.py");
 
 /// 定时任务入口(scheduler.rs "ptrade_report_fetch" 分支调用)。
@@ -178,9 +180,8 @@ async fn sync_mirror_account(
     // ── 持仓重建(幂等: DELETE+INSERT; symbol 规范化 .SS→.SH) ──
     let mut n_pos = 0i32;
     if let Some(positions) = pos_arr {
-        sqlx::query("DELETE FROM paper_position WHERE paper_account_id=$1")
-            .bind(&account_id)
-            .execute(db)
+        PgPaperPositionRepo::new(db)
+            .delete_all_positions(&account_id)
             .await
             .map_err(|e| format!("mirror del: {}", e))?;
         for p in positions {
@@ -194,20 +195,17 @@ async fn sync_mirror_account(
                 continue;
             }
             // avg_cost 用现价近似(回报无成本字段); 绩效口径以 NAV 为准
-            sqlx::query(
-                "INSERT INTO paper_position (paper_position_id, paper_account_id, symbol,
-                   quantity, avg_cost, market_price, market_value, created_at, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$5,$6,now(),now())",
-            )
-            .bind(format!("pp-{}", uuid::Uuid::new_v4()))
-            .bind(&account_id)
-            .bind(norm_sym(sym))
-            .bind(dec(qty))
-            .bind(dec(px))
-            .bind(dec(qty * px))
-            .execute(db)
-            .await
-            .map_err(|e| format!("mirror pos {}: {}", sym, e))?;
+            PgPaperPositionRepo::new(db)
+                .insert_mirror_position(
+                    &format!("pp-{}", uuid::Uuid::new_v4()),
+                    &account_id,
+                    &norm_sym(sym),
+                    dec(qty),
+                    dec(px),
+                    dec(qty * px),
+                )
+                .await
+                .map_err(|e| format!("mirror pos {}: {}", sym, e))?;
             n_pos += 1;
         }
     }
