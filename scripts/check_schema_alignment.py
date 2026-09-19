@@ -21,7 +21,7 @@ checks = [
     ),
     (
         "factor_value inserts must persist available_at",
-        ROOT / "quant-api/src/routes/factors.rs",
+        ROOT / "quant-api/src/routes/factors/backfill/sql.rs",
         [
             "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value)",
             "VALUES ($1,$2,$3,$4,$5,$6)",
