@@ -3303,4 +3303,160 @@ mod tests {
         // 无亏损交易：profit_factor 走 999 哨兵值
         assert_eq!(o.metrics.profit_factor, Decimal::new(999, 0));
     }
+
+    // ─── 数据完整性 / 流动性约束的防御分支 ────────────────────
+
+    #[test]
+    fn suspension_gap_price_jump_does_not_blacklist_symbol() {
+        let mut e = eng();
+
+        // day1: 建立 warm prev close 基准（A=10 元）
+        e.process_day(&market("2024-01-02", ("A", "10"), ("A", "10")), None);
+
+        // day2: A 停牌——close 里无报价, 仅记录停牌状态
+        let mut m2 = market("2024-01-03", ("A", "10"), ("A", "10"));
+        m2.open.remove("A");
+        m2.close.remove("A");
+        m2.pre_close.remove("A");
+        m2.amount.remove("A");
+        m2.up_limit.clear();
+        m2.down_limit.clear();
+        m2.suspended.insert("A".into());
+        e.process_day(&m2, None);
+
+        // day3: 复牌 25 元（相对停牌前 +150%）——停牌缺口不是复权数据异常, 不应拉黑
+        e.process_day(&market("2024-01-04", ("A", "25"), ("A", "10")), None);
+        assert!(
+            !e.adj_blacklisted.contains("A"),
+            "停牌缺口导致的价格跳变应豁免 adj_factor 黑名单"
+        );
+
+        // day4: 非停牌期再跳变（25→60, +140%）——检测器本身仍在工作, 应拉黑
+        e.process_day(&market("2024-01-05", ("A", "60"), ("A", "25")), None);
+        assert!(
+            e.adj_blacklisted.contains("A"),
+            "复牌后的第二次跳变（非停牌缺口）仍应进入黑名单"
+        );
+    }
+
+    #[test]
+    fn position_risk_sell_blocked_by_zero_liquidity_keeps_holding() {
+        // 止损触发但当日成交额为 0：参与率 cap 把卖单压到 0, 风控卖出被跳过、持仓保留
+        let c = BacktestConfig {
+            max_position_pct: d("1.01"),
+            risk_control: RiskControlConfig {
+                stop_loss_pct: Some(d("0.03")),
+                ..Default::default()
+            },
+            max_participation_rate: Some(d("0.10")),
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.50")),
+        );
+
+        // day2: 开盘 9.6（<= 止损线 10*0.97=9.7, 且 > 跌停价 9）触发止损；
+        // 但 amount=0（千元单位口径下的零成交额）→ cap 压零 → 卖单整体跳过
+        let mut m2 = market("2024-01-03", ("A", "9.6"), ("A", "10"));
+        m2.amount.insert("A".into(), Decimal::ZERO);
+        e.process_day(&m2, None);
+        let o = e.finalize();
+
+        assert!(
+            !o.trades
+                .iter()
+                .any(|t| matches!(t.side, crate::portfolio::TradeSide::Sell)),
+            "零成交额下参与率 cap 为 0, 止损卖单应被跳过"
+        );
+        assert!(
+            o.daily_positions
+                .iter()
+                .any(|p| p.symbol == "A" && p.quantity > Decimal::zero()),
+            "卖单被跳过后持仓应保留在每日持仓快照中"
+        );
+        assert!(
+            o.violations
+                .iter()
+                .any(|v| v.constraint_name == "participation_rate"
+                    && v.severity == "hard"
+                    && v.actual_value == d("480000")),
+            "应有 participation_rate 硬约束违规记录（期望卖出金额 50,000 股 × 9.6 = 480,000）"
+        );
+    }
+
+    #[test]
+    fn signal_symbol_without_market_price_is_skipped_from_targets_and_trades() {
+        // 信号含 B 但当日行情完全无 B 的报价（非停牌）：无价格 → 无法定价,
+        // 既不记录 target 也不产生交易；A 正常成交
+        let mut e = eng();
+        let m = market("2024-01-02", ("A", "10"), ("A", "10"));
+        let sig = StrategySignal {
+            date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            target_weights: HashMap::from([("A".into(), d("0.50")), ("B".into(), d("0.40"))]),
+        };
+        e.process_day(&m, Some(&sig));
+        let o = e.finalize();
+
+        assert!(
+            !o.targets.iter().any(|t| t.symbol == "B"),
+            "无报价的信号标的不应记录 target"
+        );
+        assert!(
+            !o.trades.iter().any(|t| t.symbol == "B"),
+            "无报价的信号标的不应产生交易"
+        );
+        assert!(
+            o.targets
+                .iter()
+                .any(|t| t.symbol == "A" && t.target_weight == d("0.50")),
+            "有报价的 A 应正常记录 target"
+        );
+        assert!(
+            o.trades
+                .iter()
+                .any(|t| t.symbol == "A" && t.quantity > Decimal::zero()),
+            "有报价的 A 应正常买入"
+        );
+    }
+
+    #[test]
+    fn zero_daily_target_move_limit_disables_twap_cap() {
+        // 防御：execution_daily_target_move_limit_pct=Some(0) 视为未启用——
+        // TWAP 首日切片不被封顶。手算：Twap5d 首片 = 100 万 × 0.95 / 5 = 19 万
+        let config = BacktestConfig {
+            max_position_pct: d("1.01"),
+            execution_schedule_profile: ExecutionScheduleProfile::Twap5dV1,
+            execution_daily_target_move_limit_pct: Some(Decimal::ZERO),
+            fee_config: zero_fee_config(),
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(config);
+
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "9.9")),
+            Some(&signal("A", "0.95")),
+        );
+
+        assert_eq!(e.portfolio.trades.len(), 1);
+        // 用股数断言（engine 侧 qty 计算不含滑点）：19 万 / 10 元 = 19,000 股整手；
+        // 若 cap 生效（对照测试 limit=0.05）首片会被压到 5 万市值 ≈ 5,000 股以下
+        assert_eq!(
+            e.portfolio.trades[0].quantity,
+            d("19000"),
+            "limit=0 应禁用单日权重移动 cap, TWAP 首片足额执行"
+        );
+        assert!(
+            e.portfolio.trades[0].amount > d("189000"),
+            "首片名义金额应约 19 万（含微量冲击滑点）, 实得 {}",
+            e.portfolio.trades[0].amount
+        );
+        assert!(
+            e.pending_execution_schedule.is_some(),
+            "TWAP 日程应继续挂起"
+        );
+    }
 }

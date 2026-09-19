@@ -877,7 +877,8 @@ pub struct RegimeSignalRule {
 }
 
 impl RegimeSignalRule {
-    fn apply_to(&self, base: &SignalConfig) -> SignalConfig {
+    /// pub(crate)：同 crate 测试（signal_generator/tests.rs）需直接构造规则断言应用结果。
+    pub(crate) fn apply_to(&self, base: &SignalConfig) -> SignalConfig {
         let mut config = base.clone();
         if let Some(combo_name) = self.combo_name.as_ref() {
             config.combo_name = combo_name.clone();
