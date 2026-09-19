@@ -228,7 +228,7 @@ mod tests {
         let result = standardize(&output, StandardizeMethod::ZScore);
         let vals: Vec<f64> = result.values.iter().map(|v| v.value).collect();
         // mean=3.0, std≈1.581 → z-scores: [-1.265, -0.632, 0, 0.632, 1.265]
-        let expected = vec![-1.2649, -0.6325, 0.0, 0.6325, 1.2649];
+        let expected = [-1.2649, -0.6325, 0.0, 0.6325, 1.2649];
         for (a, e) in vals.iter().zip(expected.iter()) {
             assert!((a - e).abs() < 0.01, "got {}, expected {}", a, e);
         }

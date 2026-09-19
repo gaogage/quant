@@ -104,14 +104,12 @@ impl VolatilityFactor {
                 }
             }
 
-            for i in self.period..bars.len() {
-                let start = i - self.period;
-                let end = i;
-                if end > log_returns.len() {
-                    break;
-                }
-
-                let slice = &log_returns[start..end];
+            // 窗口与 bar 按 k=i-period 对齐 zip：windows 第 k 个对应原 log_returns[i-period..i]，
+            // bars 段第 k 个对应原 bars[i]；原 end>len 的 break 即 zip 短板截断，严格等价。
+            for (slice, bar) in log_returns
+                .windows(self.period)
+                .zip(bars.get(self.period..).unwrap_or(&[]))
+            {
                 let n = slice.len() as f64;
                 if n < 2.0 {
                     continue;
@@ -125,7 +123,7 @@ impl VolatilityFactor {
 
                 values.push(FactorValue {
                     symbol: symbol.clone(),
-                    date: bars[i].trade_date,
+                    date: bar.trade_date,
                     value: annual_vol,
                     available_at: None,
                 });
@@ -184,14 +182,11 @@ impl DownsideVolatilityFactor {
                 })
                 .collect();
 
-            for i in self.period..bars.len() {
-                let start = i - self.period;
-                let end = i;
-                if end > returns.len() {
-                    break;
-                }
-
-                let window = &returns[start..end];
+            // 同 vol 因子的窗口-bar zip 对齐（k=i-period），原 break 即短板截断，严格等价。
+            for (window, bar) in returns
+                .windows(self.period)
+                .zip(bars.get(self.period..).unwrap_or(&[]))
+            {
                 if window.is_empty() {
                     continue;
                 }
@@ -203,7 +198,7 @@ impl DownsideVolatilityFactor {
 
                 values.push(FactorValue {
                     symbol: symbol.clone(),
-                    date: bars[i].trade_date,
+                    date: bar.trade_date,
                     value: downside_vol,
                     available_at: None,
                 });
@@ -338,8 +333,7 @@ impl RSIFactor {
             }
 
             // Wilder smoothing for subsequent periods
-            for i in self.period..changes.len() {
-                let (change, date) = changes[i];
+            for &(change, date) in &changes[self.period..] {
                 let gain = change.max(0.0);
                 let loss = (-change).max(0.0);
 
@@ -706,12 +700,14 @@ impl SkewnessFactor {
                 })
                 .collect();
 
-            for i in self.period..bars.len() {
-                let ri = i - 1; // return index
-                if ri < self.period || ri >= returns.len() {
-                    continue;
-                }
-                let window_ret = &returns[ri - self.period..ri];
+            // 原循环有效迭代为 i ∈ [period+1, min(N-1, M)]（i=period 时 ri<period 恒
+            // continue）：窗口起点 k=i-1-period ↔ windows 第 k 个，bar=bars[i] ↔
+            // bars 段(period+1..) 第 k 个；take 截掉原被 ri>=len continue 的尾窗口，严格等价。
+            for (window_ret, bar) in returns
+                .windows(self.period)
+                .take(returns.len().saturating_sub(self.period))
+                .zip(bars.get(self.period + 1..).unwrap_or(&[]))
+            {
                 let n = window_ret.len() as f64;
                 if n < 3.0 {
                     continue;
@@ -725,7 +721,7 @@ impl SkewnessFactor {
 
                 values.push(FactorValue {
                     symbol: symbol.clone(),
-                    date: bars[i].trade_date,
+                    date: bar.trade_date,
                     value: skew.clamp(-5.0, 5.0),
                     available_at: None,
                 });

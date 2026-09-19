@@ -298,8 +298,8 @@ mod tests {
         let output = make_output(values);
         let mut size_proxy: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
         let date = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap();
-        for i in 0..n {
-            size_proxy.insert(LEAK[i].to_string(), vec![(date, 100.0 + i as f64 * 10.0)]);
+        for (i, leak) in LEAK.iter().take(n).enumerate() {
+            size_proxy.insert(leak.to_string(), vec![(date, 100.0 + i as f64 * 10.0)]);
         }
         let config = NeutralizeConfig {
             industries: HashMap::new(),

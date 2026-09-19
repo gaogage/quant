@@ -37,21 +37,25 @@ pub struct BatchResult {
     pub standardized: bool,
 }
 
+/// Bar 加载回调：按 symbol 列表与日期区间加载日线。
+pub type BarLoaderFn = Arc<
+    dyn Fn(&[String], NaiveDate, NaiveDate) -> Result<HashMap<String, Vec<DailyBar>>, String>
+        + Send
+        + Sync,
+>;
+
+/// 分块持久化回调：落库一批因子值并返回写入行数。
+pub type SaveChunkFn = Arc<
+    dyn Fn(&str, &str, &[(String, NaiveDate, f64, bool)]) -> Result<usize, String> + Send + Sync,
+>;
+
 /// Compute and persist factor values for a list of symbols in chunks.
 ///
 /// The `save_fn` callback is called per chunk to persist values.
 pub async fn batch_compute_factors(
     config: BatchConfig,
-    bar_loader: Arc<
-        dyn Fn(&[String], NaiveDate, NaiveDate) -> Result<HashMap<String, Vec<DailyBar>>, String>
-            + Send
-            + Sync,
-    >,
-    save_fn: Arc<
-        dyn Fn(&str, &str, &[(String, NaiveDate, f64, bool)]) -> Result<usize, String>
-            + Send
-            + Sync,
-    >,
+    bar_loader: BarLoaderFn,
+    save_fn: SaveChunkFn,
 ) -> BatchResult {
     let mut total_values = 0usize;
     let mut inserted = 0usize;

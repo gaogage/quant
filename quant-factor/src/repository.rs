@@ -145,7 +145,7 @@ pub async fn combine_and_persist(
 
     for fw in weights {
         let rows: std::result::Result<Vec<_>, sqlx::Error> =
-            if start_date.is_some() && end_date.is_some() {
+            if let (Some(start), Some(end)) = (start_date, end_date) {
                 sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
                     "SELECT symbol, trade_date, COALESCE(normalized_value, raw_value)
                  FROM factor_value
@@ -154,8 +154,8 @@ pub async fn combine_and_persist(
                 )
                 .bind(&fw.factor_code)
                 .bind(&fw.factor_version)
-                .bind(start_date.unwrap())
-                .bind(end_date.unwrap())
+                .bind(start)
+                .bind(end)
                 .fetch_all(pool)
                 .await
             } else {

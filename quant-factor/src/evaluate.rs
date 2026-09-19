@@ -103,19 +103,20 @@ pub fn evaluate(
 
     let total = sorted.len();
     let chunk_size = total / n_quantiles;
-    let mut quantile_returns = vec![0.0; n_quantiles];
 
-    for q in 0..n_quantiles {
-        let start = q * chunk_size;
-        let end = if q == n_quantiles - 1 {
-            total
-        } else {
-            (q + 1) * chunk_size
-        };
-        let slice = &sorted[start..end];
-        let rets: Vec<f64> = slice.iter().map(|(_, _, _, r)| *r).collect();
-        quantile_returns[q] = mean_of(&rets);
-    }
+    let quantile_returns: Vec<f64> = (0..n_quantiles)
+        .map(|q| {
+            let start = q * chunk_size;
+            let end = if q == n_quantiles - 1 {
+                total
+            } else {
+                (q + 1) * chunk_size
+            };
+            let slice = &sorted[start..end];
+            let rets: Vec<f64> = slice.iter().map(|(_, _, _, r)| *r).collect();
+            mean_of(&rets)
+        })
+        .collect();
 
     let quantile_spread =
         quantile_returns.last().unwrap_or(&0.0) - quantile_returns.first().unwrap_or(&0.0);
