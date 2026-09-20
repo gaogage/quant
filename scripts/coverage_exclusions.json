@@ -1,0 +1,23 @@
+{
+  "_meta": "B 类静态豁免清单（口径豁免定版 2026-09-20）。每条须附理由；行段来自第六批控制流不可达分析（commit 4c16ee8 报告）与 #[ignore] 测试自身。",
+  "types.rs": [
+    {"lines": "300-345", "reason": "ignored 测试函数自身（#[ignore=\"DB 集成测试\"] 的 try_from_raw 测试体，永不执行计入分母属口径噪音）"}
+  ],
+  "signal_generator/pit_alpha.rs": [
+    {"lines": "2821-2825", "reason": "RiskBudget/StressFill/MinVariance 恒使 uses_risk_matrix=true，view 兜底为控制流不可达防御死代码（第六批分析）"},
+    {"lines": "2837-2842", "reason": "同上 view 兜底不可达"},
+    {"lines": "2856-2867", "reason": "同上 view 兜底不可达"},
+    {"lines": "2881-2886", "reason": "同上 view 兜底不可达"},
+    {"lines": "4923", "reason": "total_risk<=0 不可达：volatility 有 0.20 fallback、penalty 有 1.0 下限，恒正"},
+    {"lines": "6137-6141", "reason": "store 的 SQL Err 分支：需 load 成功而 store 失败的分裂连接状态，单 PgPool 无法构造"},
+    {"lines": "6155-6159", "reason": "同上 SQL Err 分支不可构造"},
+    {"lines": "1310", "reason": "profile 家族最小 15% 无 0 档 max_turnover，clear 分支不可触发"}
+  ],
+  "engine.rs": [
+    {"lines": "1626", "reason": "while 循环条件保证 bought_qty 非零，零除防御不可达"},
+    {"lines": "1631", "reason": "同上零除防御不可达"},
+    {"lines": "1636", "reason": "同上零除防御不可达"},
+    {"lines": "1641", "reason": "同上零除防御不可达"},
+    {"lines": "1363", "reason": "exposure<1 时必先命中 sharpe/volatility/drawdown 三分支之一，risk_scaled 兜底不可达"}
+  ]
+}

@@ -2483,7 +2483,12 @@ mod tests {
     }
 
     /// 连接本地 quant 库（先例：quant-factor/src/repository.rs 的 tests 模式）。
-    async fn db_test_pool() -> PgPool {
+    /// runner 的 DB 写表测试（full_flow/dup/cache/empty_signals）共享九张生产表，
+/// 并行执行时曾出现 task 行被外部删除导致 FK 23503（根源未定位，疑似 PG
+/// 连接池竞争下的时序问题）——静态互斥串行化，稳定压倒并行速度。
+static DB_RUN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn db_test_pool() -> PgPool {
         PgPool::connect("postgres://gaocheng@localhost/quant")
             .await
             .expect("connect local quant db")
@@ -2751,6 +2756,7 @@ mod tests {
     /// 09-07（周一）调权 60/40 → 09-08 开盘执行（NextOpen 时序）。
     #[tokio::test]
     async fn db_run_full_flow_persists_all_detail_tables() {
+        let _db_run_guard = DB_RUN_TEST_LOCK.lock().await;
         let pool = db_test_pool().await;
         cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_full_flow").await;
 
@@ -2915,6 +2921,7 @@ mod tests {
     /// （run 内部无显式 config 校验分支，数据库唯一约束回传是实际的 Err 路径。）
     #[tokio::test]
     async fn db_run_duplicate_task_id_returns_error() {
+        let _db_run_guard = DB_RUN_TEST_LOCK.lock().await;
         let pool = db_test_pool().await;
         cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_dup").await;
 
@@ -2961,8 +2968,12 @@ mod tests {
     /// 且两次回测结果完全一致。
     #[tokio::test]
     async fn db_run_with_cache_reuses_market_data_across_trials() {
+        let _db_run_guard = DB_RUN_TEST_LOCK.lock().await;
         let pool = db_test_pool().await;
+        // 前置清理 a+b：若上一轮 panic 跳过结尾清理，cache_b 残留行会与本轮互扰
+        // （12:40 轮实证残留→12:57 轮 FK 偶发的唯一环境差异）。
         cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_cache_a").await;
+        cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_cache_b").await;
 
         let config = BacktestConfig {
             initial_capital: Decimal::new(1_000_000, 0),
@@ -3171,6 +3182,7 @@ mod tests {
     /// 落库后 equity 点数 = 窗口交易日数且零成交。
     #[tokio::test]
     async fn db_run_with_cache_empty_signals_finishes_as_cash_curve() {
+        let _db_run_guard = DB_RUN_TEST_LOCK.lock().await;
         let pool = db_test_pool().await;
         cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_empty_signals").await;
 
