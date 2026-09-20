@@ -786,4 +786,154 @@ mod tests {
             "159980 在 2020 已发行"
         );
     }
+
+    // ── 以下为非 ignored 常跑测试（Application 层覆盖率专项 2026-09-20）──
+    //
+    // sync_strategy_equity_curve / sync_active_strategies_equity_curves 会向
+    // localhost:8080 发起 run-factor 回测任务（真实触发长任务），不直调。
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    #[tokio::test]
+    async fn is_etf_listed_on_uses_market_stock_list_date_when_present() {
+        let db = test_db().await;
+        // 518880 market_stock.list_date = 2013-07-29（主路径）
+        let d = |y, m, dd| chrono::NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        assert!(is_etf_listed_on(&db, "518880.SH", d(2014, 1, 2)).await);
+        assert!(!is_etf_listed_on(&db, "518880.SH", d(2013, 7, 28)).await);
+    }
+
+    #[tokio::test]
+    async fn is_etf_listed_on_falls_back_to_first_bar_date() {
+        let db = test_db().await;
+        // 159980 无 market_stock 行（list_date NULL）→ fallback bar_adj 首日 2019-12-24
+        let d = |y, m, dd| chrono::NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        assert!(
+            !is_etf_listed_on(&db, "159980.SZ", d(2014, 1, 2)).await,
+            "159980 在 2014 未发行（fallback 首行情日推断）"
+        );
+        assert!(is_etf_listed_on(&db, "159980.SZ", d(2020, 1, 1)).await);
+    }
+
+    #[tokio::test]
+    async fn is_etf_listed_on_unknown_symbol_is_false() {
+        let db = test_db().await;
+        assert!(
+            !is_etf_listed_on(&db, "zzz_test_no_such_etf", chrono::Utc::now().date_naive()).await
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_active_strategies_matches_distinct_active_accounts() {
+        let db = test_db().await;
+        let got = collect_active_strategies(&db).await;
+        // 与同谓词 SQL 动态对照（数据演进时自动同步，不做硬编码快照）
+        let expected: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT strategy_version_id FROM paper_account \
+             WHERE status = 'active' AND strategy_version_id IS NOT NULL",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap_or_default();
+        let mut got_sorted = got.clone();
+        got_sorted.sort();
+        let mut expected_sorted = expected;
+        expected_sorted.sort();
+        assert_eq!(got_sorted, expected_sorted, "应等于 active 账户策略去重集");
+        assert!(!got_sorted.is_empty(), "active 账户不应为空");
+    }
+
+    #[tokio::test]
+    async fn detect_combo_sharing_unknown_strategy_returns_self_only() {
+        let db = test_db().await;
+        let sharing = detect_combo_sharing(&db, "zzz_test_no_such_strategy").await;
+        assert_eq!(sharing, vec!["zzz_test_no_such_strategy".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn detect_combo_sharing_groups_strategies_on_same_combo() {
+        let db = test_db().await;
+        let sharing = detect_combo_sharing(&db, "v24").await;
+        assert!(sharing.contains(&"v24".to_string()), "含自身");
+        // 与 SQL 同谓词对照：所有 active a_share 子行同 combo 的 composite
+        let expected: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT parent_strategy_id FROM strategy_config \
+             WHERE asset_class = 'a_share' AND status = 'active' \
+               AND combo_name = (SELECT combo_name FROM strategy_config \
+                                 WHERE parent_strategy_id = 'v24' \
+                                   AND asset_class = 'a_share' AND status = 'active' LIMIT 1)",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap_or_default();
+        let mut got = sharing.clone();
+        got.sort();
+        let mut exp = expected;
+        exp.sort();
+        assert_eq!(got, exp, "共享组应与 combo 反查一致");
+    }
+
+    #[tokio::test]
+    async fn audit_equity_curve_readiness_reports_active_composite() {
+        let db = test_db().await;
+        let report = audit_equity_curve_readiness(&db, "v24")
+            .await
+            .expect("v24 readiness audit ok");
+        assert_eq!(report.strategy_id, "v24");
+        let task_id = report.equity_curve_task_id.expect("v24 应有曲线 task");
+        assert!(!task_id.is_empty());
+        assert!(
+            report.equity_curve_coverage.trade_day_count > 0,
+            "v24 曲线应有历史数据"
+        );
+        assert!(report.ready, "存量曲线完整应 ready");
+        assert_eq!(report.etf_price_coverage.total_etfs, 7);
+        assert!(
+            report.etf_price_coverage.listed_etfs
+                >= report.etf_price_coverage.total_etfs.saturating_sub(1),
+            "7 只 MVO ETF 基本都已上市"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_equity_curve_readiness_unknown_strategy_errors() {
+        let db = test_db().await;
+        let err = audit_equity_curve_readiness(&db, "zzz_test_no_such_strategy")
+            .await
+            .expect_err("未知策略应报错");
+        assert!(
+            err.contains("not found") || err.contains("load"),
+            "实际: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_composite_equity_curve_rejects_unknown_and_non_composite() {
+        let db = test_db().await;
+        let unknown = sync_composite_equity_curve(&db, "zzz_test_no_such_strategy")
+            .await
+            .expect_err("未知策略应报错");
+        assert!(unknown.contains("not found"), "实际: {unknown}");
+
+        // v24-a_share 是 active 的 asset 子行（非 composite）→ 显式拒绝，只读无写入
+        let non_composite = sync_composite_equity_curve(&db, "v24-a_share")
+            .await
+            .expect_err("asset 策略应拒绝合成");
+        assert!(
+            non_composite.contains("非 composite"),
+            "实际: {non_composite}"
+        );
+    }
+
+    /// 建表 DDL 幂等（CREATE IF NOT EXISTS，表已存在时无副作用）。
+    #[tokio::test]
+    async fn ensure_composite_curve_table_is_idempotent() {
+        let db = test_db().await;
+        ensure_composite_curve_table(&db).await.expect("first ok");
+        ensure_composite_curve_table(&db).await.expect("second ok");
+    }
 }

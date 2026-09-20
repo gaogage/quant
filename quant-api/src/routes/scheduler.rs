@@ -404,9 +404,249 @@ mod tests {
         assert_eq!(pre_trade_factor_combo(&strategy), "full_pit_icir_37f");
     }
 
-    // ── daily_to_monthly_returns 测试 ──
+    #[test]
+    fn pre_trade_factor_combo_empty_falls_back_to_canonical() {
+        let strategy = StrategyConfig {
+            combo_name: "  ".to_string(),
+            ..test_strategy_config()
+        };
+        assert_eq!(pre_trade_factor_combo(&strategy), "full_pit_icir_37f");
+    }
 
-    // ── detect_regime_exposure_cached 测试 ──
+    #[test]
+    fn scheduled_task_time_minutes_rejects_invalid_shapes_and_ranges() {
+        // 字段数 4/8 均拒绝
+        assert!(scheduled_task_time_minutes("30 16 * *").is_err());
+        assert!(scheduled_task_time_minutes("0 30 16 * * 1-5 2026 extra").is_err());
+        // 分/时非数字
+        assert!(scheduled_task_time_minutes("x 9 * * 1-5").is_err());
+        assert!(scheduled_task_time_minutes("30 y * * 1-5").is_err());
+        // 超范围
+        assert!(scheduled_task_time_minutes("60 9 * * 1-5").is_err());
+        assert!(scheduled_task_time_minutes("0 24 * * 1-5").is_err());
+        // 7 字段（含年份）可解析
+        assert_eq!(
+            scheduled_task_time_minutes("0 30 16 * * 1-5 2026").unwrap(),
+            16 * 60 + 30
+        );
+    }
+
+    #[test]
+    fn normalize_cron_expr_passes_through_non_five_field_expressions() {
+        // 非 5 字段表达式原样返回（仅空白规范化）
+        assert_eq!(normalize_cron_expr("30 16 * *"), "30 16 * *");
+        assert_eq!(normalize_cron_expr("0  30   16 * * 1-5"), "0 30 16 * * 1-5");
+    }
+
+    #[test]
+    fn market_level_freshness_dataset_and_task_slug_mappings() {
+        assert_eq!(
+            market_level_freshness_dataset("market_margin_regime"),
+            Some("margin")
+        );
+        assert_eq!(
+            market_level_freshness_dataset("market_moneyflow_hsgt_regime"),
+            Some("moneyflow_hsgt")
+        );
+        assert_eq!(market_level_freshness_dataset("industry_prosperity"), None);
+
+        assert_eq!(
+            market_level_freshness_task_slug("market_margin_regime"),
+            Some("margin")
+        );
+        assert_eq!(
+            market_level_freshness_task_slug("market_moneyflow_hsgt_regime"),
+            Some("hsgt")
+        );
+        assert_eq!(market_level_freshness_task_slug("unknown_source"), None);
+    }
+
+    #[test]
+    fn market_level_freshness_sources_parses_filters_and_defaults() {
+        // 无 sources → 默认两源
+        let defaults = market_level_freshness_sources(&serde_json::json!({}));
+        assert_eq!(
+            defaults,
+            vec![
+                "market_margin_regime".to_string(),
+                "market_moneyflow_hsgt_regime".to_string(),
+            ]
+        );
+        // 空数组 → 同样回退默认
+        assert_eq!(
+            market_level_freshness_sources(&serde_json::json!({"sources": []})),
+            defaults
+        );
+        // 非字符串/空串/trim 混合过滤
+        let parsed = market_level_freshness_sources(&serde_json::json!({
+            "sources": ["  market_margin_regime ", "", 42, "market_moneyflow_hsgt_regime"]
+        }));
+        assert_eq!(
+            parsed,
+            vec![
+                "market_margin_regime".to_string(),
+                "market_moneyflow_hsgt_regime".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn market_level_freshness_payload_without_latest_starts_from_today() {
+        let payload = market_level_freshness_sync_payload(
+            "market_margin_regime",
+            None,
+            NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+        )
+        .expect("payload");
+        assert_eq!(payload["start_date"], "20260620");
+        assert_eq!(payload["end_date"], "20260620");
+    }
+
+    // ── 连库只读（Application 层覆盖率专项 2026-09-20）──
+    // 仅覆盖纯查询分支；run_tick/run_scheduled_tasks/validate_pre_trade_data/
+    // sync_limit_with_retry 等会触发真实同步或调度循环，不直调。
+
+    async fn test_db() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    #[tokio::test]
+    async fn is_trading_day_distinguishes_open_and_closed_dates() {
+        let db = test_db().await;
+        let d = |m: u32, dd: u32| NaiveDate::from_ymd_opt(2026, m, dd).unwrap();
+        assert_eq!(is_trading_day(&db, d(9, 18)).await, Ok(true), "周五开市");
+        assert_eq!(is_trading_day(&db, d(9, 19)).await, Ok(false), "周六休市");
+        assert_eq!(is_trading_day(&db, d(9, 20)).await, Ok(false), "周日休市");
+    }
+
+    #[tokio::test]
+    async fn check_data_freshness_classifies_fresh_stale_and_missing() {
+        let db = test_db().await;
+        let d = |m: u32, dd: u32| NaiveDate::from_ymd_opt(2026, m, dd).unwrap();
+        // 518880 数据到 2026-09-18；09-19（周六）视角 gap=0 → 新鲜（历史 gap 不随时间变）
+        assert_eq!(
+            check_data_freshness(&db, "518880.SH", d(9, 19), 1).await,
+            None,
+            "数据齐备应为 None"
+        );
+        // 「最后行情日 + 14 天」视角 → 必然落后多日（动态构造，数据增长不失效）
+        let last_bar: Option<NaiveDate> = sqlx::query_scalar(
+            "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol = '518880.SH'",
+        )
+        .fetch_one(&db)
+        .await
+        .ok()
+        .flatten();
+        let horizon = last_bar.unwrap_or_else(|| d(9, 18)) + chrono::Duration::days(14);
+        let stale = check_data_freshness(&db, "518880.SH", horizon, 1)
+            .await
+            .expect("应报告落后");
+        assert!(stale > 1, "落后交易日数应 > 1: {stale}");
+        // 完全无数据的 symbol → 999 哨兵
+        assert_eq!(
+            check_data_freshness(&db, "zzz_test_no_such_symbol", d(9, 19), 1).await,
+            Some(999)
+        );
+    }
+
+    #[tokio::test]
+    async fn check_factor_freshness_fresh_combo_and_unknown_combo() {
+        let db = test_db().await;
+        let d = |m: u32, dd: u32| NaiveDate::from_ymd_opt(2026, m, dd).unwrap();
+        // v24 active combo 数据已覆盖到最近交易日 → 新鲜
+        assert_eq!(
+            check_factor_freshness(&db, "full_pit_icir_indneutral_val_v1", d(9, 19), 5).await,
+            None
+        );
+        // 未知 combo → 999 哨兵
+        assert_eq!(
+            check_factor_freshness(&db, "zzz_test_no_such_combo", d(9, 19), 5).await,
+            Some(999)
+        );
+    }
+
+    #[tokio::test]
+    async fn check_task_dependency_order_finds_no_missing_required_tasks() {
+        let db = test_db().await;
+        let issues = check_task_dependency_order(&db).await;
+        assert!(
+            !issues.iter().any(|i| i.contains("缺少必要定时任务")),
+            "生产配置三件套应齐全: {issues:?}"
+        );
+        // 当前 factor_backfill_daily 09:05 不早于 T+1 完成（9:10 判定阈值 9:00）
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.contains("factor_backfill_daily") && i.contains("早于")),
+            "factor_backfill 排序应合规: {issues:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_latest_data_version_returns_nonempty_version() {
+        let db = test_db().await;
+        let version = get_latest_data_version(&db).await;
+        assert!(!version.is_empty(), "EOD 数据版本不应为空");
+    }
+
+    #[tokio::test]
+    async fn latest_market_level_trade_date_reads_known_sources_only() {
+        let db = test_db().await;
+        let margin = latest_market_level_trade_date(&db, "market_margin_regime")
+            .await
+            .expect("margin 表有数据");
+        assert!(
+            margin >= NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            "margin 最新交易日过旧: {margin:?}"
+        );
+        let hsgt = latest_market_level_trade_date(&db, "market_moneyflow_hsgt_regime").await;
+        assert!(hsgt.is_some(), "hsgt 表应有数据");
+        assert_eq!(
+            latest_market_level_trade_date(&db, "zzz_test_unknown_source").await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn check_prediction_available_uses_latest_ready_predictions() {
+        let db = test_db().await;
+        // 动态取 ready 预测集覆盖的最新交易日（数据只增不减）
+        let latest: Option<NaiveDate> = sqlx::query_scalar(
+            "SELECT MAX(mp.trade_date) FROM model_prediction mp \
+             JOIN prediction_set ps ON ps.prediction_set_id = mp.prediction_set_id \
+               AND ps.status = 'ready'",
+        )
+        .fetch_one(&db)
+        .await
+        .ok()
+        .flatten();
+        let latest = latest.unwrap_or_else(|| NaiveDate::from_ymd_opt(2026, 6, 15).unwrap());
+        assert!(
+            check_prediction_available(&db, latest).await,
+            "ready 集最新交易日应有预测行 ({latest})"
+        );
+        // 远未来（超出任何 ML 预测视野）无预测
+        assert!(
+            !check_prediction_available(&db, NaiveDate::from_ymd_opt(2030, 1, 1).unwrap()).await
+        );
+    }
+
+    #[tokio::test]
+    async fn get_current_wfa_params_resolves_within_window_and_defaults_outside() {
+        let db = test_db().await;
+        // wfa_strategy_params 覆盖 2019-01-31 ~ 2026-01-28，窗口内命中最高分参数
+        let inside = get_current_wfa_params(&db, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap())
+            .await
+            .expect("窗口内查询 ok");
+        assert!(!inside.is_null(), "窗口内应返回参数: {inside}");
+        // 窗口外 → Value::default() 即 Null
+        let outside = get_current_wfa_params(&db, NaiveDate::from_ymd_opt(2018, 1, 1).unwrap())
+            .await
+            .expect("窗口外查询 ok");
+        assert!(outside.is_null(), "窗口外应回退 Null: {outside}");
+    }
 }
 /// 不再依赖单一策略（v19）的 etf_symbols，确保多策略并行时所有策略 ETF 都被同步。
 // R6: 策略配置查询函数已迁到 strategy_query.rs，此处 re-export 转发保持调用方零改动。

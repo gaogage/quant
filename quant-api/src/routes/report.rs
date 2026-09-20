@@ -906,4 +906,109 @@ mod daily_report_tests {
             assert!(cum_ret.is_some(), "{} cumulative_return 应已计算", acct_id);
         }
     }
+
+    // ── 以下为非 ignored 常跑测试（Application 层覆盖率专项 2026-09-20）──
+    //
+    // push_daily_performance_report / resend / push_dingtalk_* 族会触发
+    // backfill_adj_factor_for_date(Tushare 兜底) 与钉钉推送，不在直调范围；
+    // 此处只覆盖私有查询函数 fetch_today_trades 与 refresh_eod_snapshot 的
+    // 「全账户快照完整 → 空集」安全路径。
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 动态找一个「active 账户 + 有成交」的日期（数据只增不减，断言稳健）。
+    async fn an_account_day_with_filled_orders(db: &sqlx::PgPool) -> (String, chrono::NaiveDate) {
+        let row: Option<(String, chrono::NaiveDate)> = sqlx::query_as(
+            "SELECT po.paper_account_id, DATE(po.created_at)
+             FROM paper_order po
+             JOIN paper_account pa ON pa.paper_account_id = po.paper_account_id
+             WHERE po.status = 'filled'
+               AND pa.status = 'active' AND pa.account_type = 'simulated'
+             ORDER BY po.created_at DESC LIMIT 1",
+        )
+        .fetch_optional(db)
+        .await
+        .expect("query filled orders");
+        row.expect("active 账户应存在历史成交（空库时此守卫失败提醒数据缺失）")
+    }
+
+    #[tokio::test]
+    async fn fetch_today_trades_returns_filled_rows_with_sides() {
+        let db = test_db().await;
+        let (account_id, date) = an_account_day_with_filled_orders(&db).await;
+
+        let trades = fetch_today_trades(&db, &account_id, date)
+            .await
+            .expect("fetch_today_trades ok");
+        assert!(!trades.is_empty(), "{account_id} 在 {date} 应有成交明细");
+        for t in &trades {
+            assert!(!t.symbol.is_empty());
+            assert!(
+                t.side == "buy" || t.side == "sell",
+                "side 只能是 buy/sell: {}",
+                t.side
+            );
+            assert!(t.quantity > 0.0, "成交数量应 > 0");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_today_trades_empty_for_day_without_orders() {
+        let db = test_db().await;
+        let (account_id, _) = an_account_day_with_filled_orders(&db).await;
+        // 2020-01-01 远早于任何模拟账户下单（v24 系列 2026 年上线）
+        let trades = fetch_today_trades(
+            &db,
+            &account_id,
+            chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+        )
+        .await
+        .expect("fetch_today_trades ok");
+        assert!(trades.is_empty(), "无成交日应返回空明细");
+    }
+
+    /// 已完整的快照日（所有 active simulated 账户 daily_return 非空）：
+    /// refresh_eod_snapshot 命中账户集为空，不产生任何写入。
+    /// 用「调用前后快照指纹不变」+「命中数为 0」双守卫防数据漂移误写。
+    #[tokio::test]
+    async fn refresh_eod_snapshot_is_noop_when_day_already_complete() {
+        let db = test_db().await;
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
+
+        // 守卫：该日无「缺失或 daily_return IS NULL」的 active 账户（与函数内谓词一致）
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_account pa
+             LEFT JOIN paper_nav_snapshot s
+                    ON s.paper_account_id = pa.paper_account_id AND s.snapshot_date = $1
+             WHERE pa.status = 'active' AND pa.account_type = 'simulated'
+               AND (s.paper_account_id IS NULL OR s.daily_return IS NULL)",
+        )
+        .bind(date)
+        .fetch_one(&db)
+        .await
+        .unwrap_or(-1);
+        assert_eq!(pending, 0, "守卫失败：{date} 存在待补账户，换完整日期再测");
+
+        async fn day_fingerprint(db: &sqlx::PgPool, date: NaiveDate) -> String {
+            sqlx::query_scalar::<_, String>(
+                "SELECT COUNT(*)::text || ':' || COALESCE(MAX(nav::text),'') || ':' \
+                 || COUNT(daily_return)::text
+                 FROM paper_nav_snapshot WHERE snapshot_date = $1",
+            )
+            .bind(date)
+            .fetch_one(db)
+            .await
+            .unwrap_or_default()
+        }
+        let before = day_fingerprint(&db, date).await;
+
+        refresh_eod_snapshot(&db, date).await; // 空集路径：不 panic、不写入
+
+        let after = day_fingerprint(&db, date).await;
+        assert_eq!(before, after, "完整日的快照不得被重写");
+    }
 }

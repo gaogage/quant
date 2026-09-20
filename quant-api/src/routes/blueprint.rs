@@ -811,4 +811,208 @@ mod tests {
         assert_eq!(bad["passed"], json!(false));
         assert_eq!(bad["progress_pct"], json!(50.0));
     }
+
+    // ── 以下为 Application 层覆盖率专项 2026-09-20 补充 ──
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    #[test]
+    fn roadmap_phase_progress_spans_p0_to_p6() {
+        let phases = roadmap_phase_progress();
+        assert_eq!(phases.len(), 7);
+        let ids: Vec<&str> = phases
+            .iter()
+            .map(|p| p["id"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(ids, vec!["P0", "P1", "P2", "P3", "P4", "P5", "P6"]);
+        assert!(phases
+            .iter()
+            .all(|p| p["progress_pct"].as_f64().unwrap_or(-1.0) >= 0.0));
+    }
+
+    #[test]
+    fn weighted_phase_progress_averages_and_handles_empty() {
+        assert_eq!(weighted_phase_progress(&[]), 0.0);
+        let phases = vec![
+            json!({"progress_pct": 100.0}),
+            json!({"progress_pct": 50.0}),
+        ];
+        assert_eq!(weighted_phase_progress(&phases), 75.0);
+        // 非法 progress 按 0 参与均值
+        let bad = vec![json!({"progress_pct": 100.0}), json!({})];
+        assert_eq!(weighted_phase_progress(&bad), 50.0);
+    }
+
+    #[test]
+    fn clamp_progress_bounds_nan_negative_and_overflow() {
+        assert_eq!(clamp_progress(f64::NAN), 0.0);
+        assert_eq!(clamp_progress(-5.0), 0.0);
+        assert_eq!(clamp_progress(150.0), 100.0);
+        assert_eq!(clamp_progress(66.6), 66.6);
+    }
+
+    #[test]
+    fn round2_and_round4_precision() {
+        assert_eq!(round2(0.125), 0.13); // 0.125*100=12.5 → round half away from zero
+        assert_eq!(round2(1.005), 1.0); // f64 表示 1.005 略小于真值，round 到 1.00
+        assert_eq!(round4(1.23456), 1.2346);
+        assert_eq!(round4(-1.23456), -1.2346);
+    }
+
+    #[test]
+    fn value_f64_missing_key_is_negative_infinity() {
+        assert_eq!(
+            value_f64(&json!({}), "annual_return_pct"),
+            f64::NEG_INFINITY
+        );
+        assert_eq!(
+            value_f64(&json!({"x": "not-a-number"}), "x"),
+            f64::NEG_INFINITY
+        );
+        assert_eq!(value_f64(&json!({"x": 3.5}), "x"), 3.5);
+    }
+
+    #[test]
+    fn push_blockers_skips_passed_gate_and_lists_blocking_metrics() {
+        let mut blockers = Vec::new();
+        let passed_gate = json!({"hard_gate_passed": true, "blocking_metrics": []});
+        push_blockers(&mut blockers, &passed_gate, "professional");
+        assert!(blockers.is_empty(), "已过门禁不产生 blocker");
+
+        let failed_gate = json!({
+            "hard_gate_passed": false,
+            "blocking_metrics": [
+                {"key": "annual_return_pct", "name": "年化收益", "reason": "below_gate",
+                 "current": 10.0, "target": 15.0}
+            ]
+        });
+        push_blockers(&mut blockers, &failed_gate, "elite");
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0]["scope"], json!("elite"));
+        assert_eq!(blockers[0]["metric"], json!("annual_return_pct"));
+    }
+
+    #[test]
+    fn metric_min_inclusive_boundary_and_missing_current() {
+        let inclusive_hit = metric_min("sharpe_ratio", "Sharpe", Some(1.0), 1.0, "", true);
+        assert_eq!(inclusive_hit["passed"], json!(true));
+        let exclusive_miss = metric_min("sharpe_ratio", "Sharpe", Some(1.0), 1.0, "", false);
+        assert_eq!(exclusive_miss["passed"], json!(false), "严格大于语义");
+
+        let missing = metric_min("profit_factor", "PF", None, 1.5, "", false);
+        assert_eq!(missing["passed"], json!(false));
+        assert_eq!(missing["missing"], json!(true));
+        assert_eq!(missing["progress_pct"], json!(0.0));
+
+        // target=0 时正值直接记满进度（防除零）
+        let zero_target = metric_min("excess", "超额", Some(0.3), 0.0, "%", true);
+        assert_eq!(zero_target["progress_pct"], json!(100.0));
+    }
+
+    #[test]
+    fn gate_report_with_empty_metrics_is_degenerate() {
+        let report = gate_report("empty", vec![]);
+        assert_eq!(
+            report["hard_gate_passed"],
+            json!(true),
+            "空指标 vacuous pass"
+        );
+        assert_eq!(report["evidence_completeness_pct"], json!(0.0));
+        assert_eq!(report["available_metric_progress_pct"], json!(0.0));
+    }
+
+    #[test]
+    fn format_bytes_matches_cleanup_conventions() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1024 * 1024), "1.00 MB");
+        assert_eq!(format_bytes(1024_i64.pow(4)), "1.00 TB");
+    }
+
+    // ── 连库只读 ──
+
+    #[tokio::test]
+    async fn build_blueprint_progress_assembles_full_report() {
+        let db = test_db().await;
+        let report = build_blueprint_progress(&db).await.expect("progress ok");
+        assert!(report["as_of"].is_string());
+        assert!(report["canonical"]["strategies"].is_array());
+        assert!(report["targets"]["professional_observation"]["annual_return_pct"].is_number());
+        assert!(report["targets"]["professional_elite"]["sharpe_ratio"].is_number());
+        for key in [
+            "overall_progress_pct",
+            "system_build_progress_pct",
+            "professional_metric_progress_pct",
+            "elite_metric_progress_pct",
+        ] {
+            let v = report["progress"][key].as_f64().expect(key);
+            assert!((0.0..=100.0).contains(&v), "{key}={v} 超出 [0,100]");
+        }
+        assert!(report["professional"]["metrics"].is_array());
+        assert!(report["elite"]["metrics"].is_array());
+        assert_eq!(report["roadmap_phases"].as_array().unwrap().len(), 7);
+        assert!(report["storage"]["pressure_level"].is_string());
+        assert!(report["task_state"]["data_sync_task"].is_object());
+        assert!(report["blockers"].is_array());
+        assert!(!report["next_actions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_active_strategies_includes_active_composites() {
+        let db = test_db().await;
+        let strategies = load_active_strategies(&db).await.expect("load ok");
+        assert!(!strategies.is_empty(), "应存在 active composite 策略");
+        assert!(strategies.iter().any(|s| s["strategy_id"] == json!("v24")));
+        for s in &strategies {
+            assert!(s["strategy_id"].is_string());
+            assert!(s["status"] == json!("active"));
+        }
+    }
+
+    #[tokio::test]
+    async fn load_active_simulated_accounts_returns_sim_accounts_with_ids() {
+        let db = test_db().await;
+        let accounts = load_active_simulated_accounts(&db).await.expect("load ok");
+        assert!(!accounts.is_empty(), "应存在 active simulated 账户");
+        for a in &accounts {
+            assert!(a["paper_account_id"].is_string());
+            assert_eq!(a["status"], json!("active"));
+            assert_eq!(a["account_type"], json!("simulated"));
+        }
+    }
+
+    #[tokio::test]
+    async fn load_storage_summary_reports_pressure_and_top_tables() {
+        let db = test_db().await;
+        let storage = load_storage_summary(&db).await.expect("storage ok");
+        let level = storage["pressure_level"].as_str().unwrap_or_default();
+        assert!(
+            ["red", "yellow", "green"].contains(&level),
+            "压力级别非法: {level}"
+        );
+        let tables = storage["top_tables"].as_array().unwrap();
+        assert!(!tables.is_empty(), "top tables 不应为空");
+        // 清洁/保护拆分与 top 总量一致
+        let total: i64 = storage["top_tables_total_size_bytes"]
+            .as_i64()
+            .unwrap_or(-1);
+        let cleanable: i64 = storage["top_cleanable_size_bytes"].as_i64().unwrap_or(-1);
+        let protected: i64 = storage["top_protected_size_bytes"].as_i64().unwrap_or(-1);
+        assert!(total >= 0 && cleanable >= 0 && protected >= 0);
+        assert_eq!(total, cleanable + protected, "cleanable+protected=total");
+    }
+
+    #[tokio::test]
+    async fn status_counts_aggregates_by_status_for_sync_tasks() {
+        let db = test_db().await;
+        let counts = status_counts(&db, "data_sync_task")
+            .await
+            .expect("counts ok");
+        let obj = counts.as_object().expect("object map");
+        assert!(!obj.is_empty(), "data_sync_task 应有状态聚合");
+        assert!(obj.values().all(|v| v.as_i64().unwrap_or(-1) >= 0));
+    }
 }

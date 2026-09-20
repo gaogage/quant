@@ -1538,3 +1538,172 @@ pub async fn factor_health(
     }))
     .into_response()
 }
+
+// ── 测试（Application 层覆盖率专项 2026-09-20）──
+//
+// 只测私有纯函数与只读辅助查询；sync_status/repair_sync/rebuild_full_universe/
+// manual_rebalance 等 handler 主体涉及真实任务触发，不在单测范围。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    // ── 纯函数 ──
+
+    #[test]
+    fn admin_default_mvo_etfs_lists_seven_symbols() {
+        let etfs = admin_default_mvo_etfs();
+        assert_eq!(etfs.len(), 7);
+        assert!(etfs.contains(&"518880.SH".to_string()));
+        assert!(etfs.contains(&"501018.SH".to_string()));
+    }
+
+    #[test]
+    fn admin_parse_etf_symbols_defaults_on_missing_or_empty() {
+        // None → 默认 7 只
+        assert_eq!(admin_parse_etf_symbols(None).len(), 7);
+        // 空数组 → 默认 7 只
+        assert_eq!(
+            admin_parse_etf_symbols(Some(serde_json::json!([]))).len(),
+            7
+        );
+        // 正常数组：trim + 非字符串过滤 + 空串过滤
+        let parsed = admin_parse_etf_symbols(Some(serde_json::json!([
+            " 518880.SH ",
+            42,
+            "",
+            "511010.SH"
+        ])));
+        assert_eq!(
+            parsed,
+            vec!["518880.SH".to_string(), "511010.SH".to_string()]
+        );
+        // 非数组 JSON → 默认
+        assert_eq!(
+            admin_parse_etf_symbols(Some(serde_json::json!("518880.SH"))).len(),
+            7
+        );
+    }
+
+    #[test]
+    fn admin_parse_date_accepts_compact_and_iso_and_rejects_garbage() {
+        assert_eq!(
+            admin_parse_date("20260918").unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 18).unwrap()
+        );
+        assert_eq!(
+            admin_parse_date(" 2026-09-18 ").unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 18).unwrap()
+        );
+        let err = admin_parse_date("2026/09/18").expect_err("斜杠格式应拒绝");
+        assert!(err.contains("日期格式无效"), "实际: {err}");
+    }
+
+    #[test]
+    fn admin_yyyymmdd_and_gap_semantics() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
+        assert_eq!(admin_yyyymmdd(d), "20260918");
+        let base = chrono::NaiveDate::from_ymd_opt(2026, 9, 20).unwrap();
+        assert_eq!(admin_gap(base, Some(d)), 2);
+        // 无数据 → 999 哨兵（看板红显）
+        assert_eq!(admin_gap(base, None), 999);
+    }
+
+    #[test]
+    fn admin_status_item_shape_with_and_without_extra() {
+        let with_extra = admin_status_item("A股日线", 2, 1, true, Some("最新 2026-09-18".into()));
+        assert_eq!(with_extra["name"], json!("A股日线"));
+        assert_eq!(with_extra["max_gap_days"], json!(2));
+        assert_eq!(with_extra["current_gap_days"], json!(1));
+        assert_eq!(with_extra["healthy"], json!(true));
+        assert_eq!(with_extra["repairable"], json!(true));
+        assert!(with_extra["extra"].is_string());
+
+        let bare = admin_status_item("CSI300", 2, 5, false, None);
+        assert!(bare.get("extra").is_none(), "无 extra 时不输出该键");
+        assert_eq!(bare["healthy"], json!(false));
+    }
+
+    // ── 只读辅助查询（真实库）──
+
+    #[tokio::test]
+    async fn admin_latest_market_date_reflects_bar_or_index_data() {
+        let db = test_db().await;
+        let latest = admin_latest_market_date(&db).await;
+        // 行情数据只增不减：以已核实的存量下界做稳健断言
+        assert!(
+            latest >= chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+            "最新行情日过旧: {latest}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_first_open_trade_date_skips_closed_days() {
+        let db = test_db().await;
+        let d = |y, m, dd| chrono::NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        // 2026-09-14~09-18 全周开市 → 首日 09-14
+        assert_eq!(
+            admin_first_open_trade_date(&db, d(2026, 9, 14), d(2026, 9, 18)).await,
+            Some(d(2026, 9, 14))
+        );
+        // 起点 09-13（周日）→ 顺延至 09-14
+        assert_eq!(
+            admin_first_open_trade_date(&db, d(2026, 9, 13), d(2026, 9, 16)).await,
+            Some(d(2026, 9, 14))
+        );
+        // 纯周末区间 → None
+        assert_eq!(
+            admin_first_open_trade_date(&db, d(2026, 9, 19), d(2026, 9, 20)).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn load_admin_strategy_config_unknown_id_falls_back_to_defaults() {
+        let db = test_db().await;
+        let cfg = load_admin_strategy_config(&db, "zzz_test_no_such_strategy").await;
+        assert_eq!(cfg.strategy_id, "zzz_test_no_such_strategy");
+        assert_eq!(cfg.combo_name, "");
+        assert_eq!(cfg.equity_curve_task_id, "");
+        assert!(cfg.prediction_set_id.is_none());
+        assert_eq!(cfg.etf_symbols.len(), 7, "未知策略回退默认 MVO ETF");
+    }
+
+    #[tokio::test]
+    async fn load_admin_strategy_config_active_v24_resolves_real_values() {
+        let db = test_db().await;
+        let cfg = load_admin_strategy_config(&db, "v24").await;
+        assert!(!cfg.combo_name.is_empty(), "v24 应有 combo");
+        assert!(!cfg.equity_curve_task_id.is_empty(), "v24 应有曲线 task");
+        assert_eq!(cfg.etf_symbols.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn load_first_active_admin_strategy_config_picks_composite() {
+        let db = test_db().await;
+        let cfg = load_first_active_admin_strategy_config(&db).await;
+        // 当前库存在 active composite（v24 系），看板代表必须非空
+        assert!(!cfg.strategy_id.is_empty(), "应有 active composite 策略");
+        assert!(!cfg.combo_name.is_empty());
+        assert_eq!(cfg.etf_symbols.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn admin_event_completion_last_date_reads_suspension_source() {
+        let db = test_db().await;
+        let last =
+            admin_event_completion_last_date(&db, "market_stock_suspension", "suspension_daily")
+                .await;
+        assert!(
+            last >= Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+            "停牌源表应有近期数据: {last:?}"
+        );
+    }
+}

@@ -1907,3 +1907,388 @@ async fn check_account_deps(
     }
     out
 }
+
+// ── 测试（Application 层覆盖率专项 2026-09-20）──
+//
+// account_data_health handler 主体（State/Json 薄壳 + 批量遍历）不直调；
+// 覆盖私有依赖检查器与 check_paper_account_data_readiness 主链。
+// 写路径仅用 zzz_test_api_cov_ 前缀键（paper_account / audit_event），自造自清理。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    fn health_cfg(signal_source: &str, blend: f64) -> StrategyHealthConfig {
+        StrategyHealthConfig {
+            combo_name: "full_pit_icir_indneutral_val_v1".into(),
+            equity_curve_task_id: "fbt-8abe604e-33fe-48ec-a905-3ea322185d5d".into(),
+            prediction_set_id: None,
+            etf_symbols: DEFAULT_MVO_ETFS.iter().map(|s| s.to_string()).collect(),
+            signal_source: signal_source.into(),
+            prediction_blend_weight: blend,
+        }
+    }
+
+    /// 精确清理单个 zzz 账户及其审计/快照残留（并行安全：各测试持有独立账号键，
+    /// 先清残留保证 INSERT 幂等，结尾自清理不留垃圾）。
+    async fn cleanup_account(db: &sqlx::PgPool, account_id: &str) {
+        let _ = sqlx::query(
+            "DELETE FROM audit_event WHERE entity_id = $1 AND event_type LIKE 'data_readiness%'",
+        )
+        .bind(account_id)
+        .execute(db)
+        .await;
+        let _ = sqlx::query("DELETE FROM paper_nav_snapshot WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(db)
+            .await;
+    }
+
+    // ── 纯函数 ──
+
+    #[test]
+    fn strategy_needs_prediction_matrix() {
+        // 非预测信号源一律不需要
+        assert!(!strategy_needs_prediction(&health_cfg("factor_combo", 0.5)));
+        assert!(!strategy_needs_prediction(&health_cfg("factor", 0.5)));
+        // prediction：恒需要（与 blend 无关）
+        assert!(strategy_needs_prediction(&health_cfg("prediction", 0.0)));
+        // prediction_blend：仅当 blend 权重 > 0 才需要
+        assert!(strategy_needs_prediction(&health_cfg(
+            "prediction_blend",
+            0.25
+        )));
+        assert!(!strategy_needs_prediction(&health_cfg(
+            "prediction_blend",
+            0.0
+        )));
+    }
+
+    // ── 只读查询 ──
+
+    #[tokio::test]
+    async fn latest_market_date_tracks_bar_or_index_data() {
+        let db = test_db().await;
+        let latest = latest_market_date(&db).await;
+        assert!(
+            latest >= NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+            "最新行情日过旧: {latest}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_live_prediction_set_skips_non_prediction_strategies() {
+        let db = test_db().await;
+        let cfg = health_cfg("factor_combo", 0.25);
+        assert_eq!(
+            resolve_live_prediction_set(&db, &cfg, NaiveDate::from_ymd_opt(2026, 9, 18).unwrap())
+                .await,
+            None,
+            "factor_combo 信号源无需预测集"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_live_prediction_set_explicit_id_short_circuits() {
+        let db = test_db().await;
+        // 策略显式配置了预测集 → 直接返回，不做库内自动选择
+        let mut cfg = health_cfg("prediction_blend", 0.3);
+        cfg.prediction_set_id = Some("zzz_test_api_cov_psid".into());
+        assert_eq!(
+            resolve_live_prediction_set(&db, &cfg, NaiveDate::from_ymd_opt(2026, 6, 15).unwrap())
+                .await,
+            Some("zzz_test_api_cov_psid".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_live_prediction_set_auto_selects_latest_ready_pit_set() {
+        let db = test_db().await;
+        let cfg = health_cfg("prediction_blend", 0.3);
+        let date = NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+        let got = resolve_live_prediction_set(&db, &cfg, date).await;
+        // 与函数同谓词 SQL 对照（避免硬编码预测集快照）
+        let expected: Option<String> = sqlx::query_scalar(
+            "SELECT ps.prediction_set_id FROM prediction_set ps \
+             WHERE ps.status = 'ready' AND ps.training_end_date IS NOT NULL \
+               AND ps.training_end_date < $1 AND ps.start_date <= $1 AND ps.end_date >= $1 \
+             ORDER BY ps.training_end_date DESC, ps.created_at DESC LIMIT 1",
+        )
+        .bind(date)
+        .fetch_optional(&db)
+        .await
+        .ok()
+        .flatten();
+        assert_eq!(got, expected, "自动选择应命中最新 PIT 合规预测集");
+    }
+
+    #[tokio::test]
+    async fn expected_open_day_count_counts_calendar_days() {
+        let db = test_db().await;
+        let d = |m: u32, dd: u32| NaiveDate::from_ymd_opt(2026, m, dd).unwrap();
+        // 2026-09-14 ~ 09-18 完整交易周
+        assert_eq!(expected_open_day_count(&db, d(9, 14), d(9, 18)).await, 5);
+        // 纯周末区间：日历 0 → fallback 指数日线（周末无 bar）→ 0
+        assert_eq!(expected_open_day_count(&db, d(9, 19), d(9, 20)).await, 0);
+    }
+
+    #[tokio::test]
+    async fn event_completion_latest_source_reads_suspension_upstream() {
+        let db = test_db().await;
+        let (date, _source, rows) =
+            event_completion_latest_source(&db, "market_stock_suspension", "suspension_daily")
+                .await;
+        let date = date.expect("停牌源应有数据");
+        assert!(
+            date >= NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            "停牌最新完成日过旧: {date}"
+        );
+        assert!(rows >= 0);
+    }
+
+    #[tokio::test]
+    async fn event_day_counts_zero_for_unknown_task_type() {
+        let db = test_db().await;
+        let d = |m: u32, dd: u32| NaiveDate::from_ymd_opt(2026, m, dd).unwrap();
+        assert_eq!(
+            event_completed_day_count(&db, "zzz_test_api_cov_type", d(1, 1), d(9, 18)).await,
+            0
+        );
+        assert_eq!(
+            event_verified_day_count(&db, "zzz_test_api_cov_type", d(1, 1), d(9, 18)).await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn rolling_pit_ic_quarter_coverage_counts_recent_quarters() {
+        let db = test_db().await;
+        let (total, covered, first_missing, last_missing) = rolling_pit_ic_quarter_coverage(
+            &db,
+            1,
+            NaiveDate::from_ymd_opt(2025, 9, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+        )
+        .await;
+        assert!(total >= 4, "近一年应至少 4 个季度: {total}");
+        assert!(covered >= 1, "滚动 PIT IC 应有覆盖: {covered}");
+        assert!(covered <= total);
+        let _ = (first_missing, last_missing);
+    }
+
+    #[tokio::test]
+    async fn check_account_deps_freshness_mode_emits_config_item_first() {
+        let db = test_db().await;
+        // v24 真实依赖形态（factor_combo 信号，无 ML 分支）
+        let checks = check_account_deps(
+            &db,
+            "zzz_test_api_cov_acct",
+            "zzz_test_api_cov_strategy",
+            &health_cfg("factor_combo", 0.0),
+            None,
+            true,
+            true,
+        )
+        .await;
+        assert!(!checks.is_empty(), "新鲜度模式应产出检查项");
+        assert_eq!(checks[0]["item"], json!("策略配置"));
+        assert_eq!(checks[0]["level"], json!("green"));
+        assert!(checks[0]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("combo="));
+    }
+
+    #[tokio::test]
+    async fn check_account_deps_range_mode_includes_coverage_items() {
+        let db = test_db().await;
+        let d = |m: u32, dd: u32| NaiveDate::from_ymd_opt(2026, m, dd).unwrap();
+        let checks = check_account_deps(
+            &db,
+            "zzz_test_api_cov_acct",
+            "zzz_test_api_cov_strategy",
+            &health_cfg("factor_combo", 0.0),
+            Some((d(9, 14), d(9, 18))),
+            true,
+            true,
+        )
+        .await;
+        let items: Vec<&str> = checks
+            .iter()
+            .map(|c| c["item"].as_str().unwrap_or_default())
+            .collect();
+        assert!(items.contains(&"策略配置"), "应有策略配置项: {items:?}");
+        assert!(
+            items.contains(&"A股日线区间覆盖"),
+            "区间模式应有日线覆盖项: {items:?}"
+        );
+        // 每项都有红黄绿级别
+        assert!(
+            checks
+                .iter()
+                .all(|c| ["red", "yellow", "green"]
+                    .contains(&c["level"].as_str().unwrap_or_default()))
+        );
+    }
+
+    // ── 数据门禁主链 ──
+
+    #[tokio::test]
+    async fn check_paper_account_data_readiness_rejects_unknown_account() {
+        let db = test_db().await;
+        let err = check_paper_account_data_readiness(
+            &db,
+            "zzz_test_api_cov_missing",
+            None,
+            DataReadinessGate::BlockRequiredRed,
+            "test_op",
+        )
+        .await
+        .expect_err("未知账号应拒绝");
+        assert!(err.contains("账号不存在或未激活"), "实际: {err}");
+    }
+
+    /// zzz 账户未挂策略：在写审计前短路返回（不产生 audit_event 行）。
+    #[tokio::test]
+    async fn check_paper_account_data_readiness_rejects_account_without_strategy() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api_cov_no_strategy";
+        cleanup_account(&db, account_id).await;
+        sqlx::query(
+            "INSERT INTO paper_account \
+                 (paper_account_id, name, initial_capital, cash, status, account_type, \
+                  strategy_version_id, signal_source, user_id) \
+             VALUES ($1, $1, 1000000, 100000, 'active', 'simulated', NULL, 'factor', NULL)",
+        )
+        .bind(account_id)
+        .execute(&db)
+        .await
+        .expect("insert zzz account");
+
+        let err = check_paper_account_data_readiness(
+            &db,
+            account_id,
+            None,
+            DataReadinessGate::BlockRequiredRed,
+            "test_op",
+        )
+        .await
+        .expect_err("未挂策略应拒绝");
+        assert!(err.contains("未配置 strategy_version_id"), "实际: {err}");
+
+        // 短路路径不写审计
+        let audits: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_event WHERE entity_id = $1")
+                .bind(account_id)
+                .fetch_one(&db)
+                .await
+                .unwrap_or(0);
+        assert_eq!(audits, 0, "未挂策略短路不得写 audit_event");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    /// zzz 账户挂不存在策略：走完整门禁链 → 策略配置 red → 门禁失败 + 审计落库。
+    /// 这是门禁「失败也留痕」契约的核心用例。
+    #[tokio::test]
+    async fn check_paper_account_data_readiness_blocks_and_audits_unknown_strategy() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api_cov_ghost_strategy";
+        cleanup_account(&db, account_id).await;
+        sqlx::query(
+            "INSERT INTO paper_account \
+                 (paper_account_id, name, initial_capital, cash, status, account_type, \
+                  strategy_version_id, signal_source, user_id) \
+             VALUES ($1, $1, 1000000, 100000, 'active', 'simulated', \
+                     'zzz_test_api_cov_strategy', 'factor', NULL)",
+        )
+        .bind(account_id)
+        .execute(&db)
+        .await
+        .expect("insert zzz account");
+
+        let err = check_paper_account_data_readiness(
+            &db,
+            account_id,
+            None,
+            DataReadinessGate::BlockRequiredRed,
+            "test_op",
+        )
+        .await
+        .expect_err("幽灵策略应触发门禁失败");
+        assert!(err.contains("数据门禁失败"), "实际: {err}");
+        assert!(err.contains("策略配置"), "blocking 明细应含策略配置: {err}");
+
+        // 失败路径必须留审计痕（event_type=data_readiness.failed）
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event \
+             WHERE entity_id = $1 AND event_type = 'data_readiness.failed'",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .unwrap_or(0);
+        assert_eq!(audits, 1, "失败门禁应恰好写一条审计");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    /// 严格门禁（BlockRequiredYellow）：yellow 项也拦截。
+    #[tokio::test]
+    async fn check_paper_account_data_readiness_strict_gate_reports_in_error() {
+        let db = test_db().await;
+        // 复用幽灵策略场景的账号构造，验证 gate 参数进入报告字段
+        let account_id = "zzz_test_api_cov_strict";
+        cleanup_account(&db, account_id).await;
+        sqlx::query(
+            "INSERT INTO paper_account \
+                 (paper_account_id, name, initial_capital, cash, status, account_type, \
+                  strategy_version_id, signal_source, user_id) \
+             VALUES ($1, $1, 1000000, 100000, 'active', 'simulated', \
+                     'zzz_test_api_cov_strategy', 'factor', NULL)",
+        )
+        .bind(account_id)
+        .execute(&db)
+        .await
+        .expect("insert zzz account");
+
+        let err = check_paper_account_data_readiness(
+            &db,
+            account_id,
+            None,
+            DataReadinessGate::BlockRequiredYellow,
+            "test_op_strict",
+        )
+        .await
+        .expect_err("幽灵策略在严格门禁下同样失败");
+        assert!(
+            err.contains("test_op_strict"),
+            "消息应携带 operation: {err}"
+        );
+
+        let summary: String = sqlx::query_scalar(
+            "SELECT summary FROM audit_event \
+             WHERE entity_id = $1 AND event_type = 'data_readiness.failed' LIMIT 1",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .unwrap_or_default();
+        assert!(
+            summary.contains("test_op_strict"),
+            "审计摘要含操作名: {summary}"
+        );
+
+        cleanup_account(&db, account_id).await;
+    }
+}

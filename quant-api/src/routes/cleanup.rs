@@ -949,3 +949,368 @@ async fn get_expired_stats(db: &sqlx::PgPool) -> Result<Value, String> {
         "policy": "is_kept=false + status=completed + 超过7天 → 自动清理",
     }))
 }
+
+// ── 测试（Application 层覆盖率专项 2026-09-20）──────────
+//
+// 安全策略：只读统计/纯函数全量测；run_cleanup 仅测 dry_run、空动作拒绝、
+// zzz 不存在键（count==0 保护 + DELETE 0 行）三条安全路径。
+// 绝不调 clean_expired_backtests 非 zzz 场景（会真实批量删除过期回测）。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 连本机测试库（真实数据，只读断言为主）。
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    fn empty_request() -> CleanupRequest {
+        CleanupRequest {
+            clean_all_cache: false,
+            cache_keys: vec![],
+            backtest_task_ids: vec![],
+            prediction_set_ids: vec![],
+            combo_names: vec![],
+            dry_run: false,
+            force: false,
+            auto_cleanup_expired: false,
+        }
+    }
+
+    // ── 纯函数 ──
+
+    #[test]
+    fn format_bytes_covers_zero_units_and_clamps_at_tb() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023.00 B");
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.00 MB");
+        assert_eq!(format_bytes(1024_i64.pow(3)), "1.00 GB");
+        assert_eq!(format_bytes(1024_i64.pow(4)), "1.00 TB");
+        // PB 级不再进位（units 数组止步 TB）
+        assert_eq!(format_bytes(3 * 1024_i64.pow(5)), "3072.00 TB");
+    }
+
+    #[test]
+    fn classify_table_covers_all_category_branches() {
+        assert_eq!(
+            classify_table("market_feature_cache_value"),
+            ("cache", true)
+        );
+        assert_eq!(classify_table("backtest_task"), ("backtest", true));
+        assert_eq!(classify_table("portfolio_exposure"), ("backtest", true));
+        assert_eq!(classify_table("model_prediction"), ("prediction", true));
+        assert_eq!(classify_table("multi_factor_value"), ("factor_combo", true));
+        assert_eq!(
+            classify_table("multi_factor_weight"),
+            ("factor_combo", true)
+        );
+        // 不可清理
+        assert_eq!(
+            classify_table("market_stock_daily_bar"),
+            ("market_data", false)
+        );
+        assert_eq!(classify_table("factor_definition"), ("factor_meta", false));
+        assert_eq!(classify_table("factor_value"), ("factor_value", false));
+        assert_eq!(classify_table("paper_account"), ("paper", false));
+        assert_eq!(classify_table("prediction_set"), ("experiment", false));
+        assert_eq!(classify_table("training_dataset"), ("experiment", false));
+        assert_eq!(classify_table("experiment_run"), ("experiment", false));
+        assert_eq!(classify_table("optimization_trial"), ("experiment", false));
+        assert_eq!(classify_table("scheduled_task_config"), ("other", false));
+    }
+
+    #[test]
+    fn build_categories_aggregates_sizes_and_rows_per_category() {
+        let rows = vec![
+            TableSize {
+                table_name: "market_feature_cache_value".into(),
+                size_bytes: 1000,
+                size_pretty: "1000 B".into(),
+                row_count: 10,
+            },
+            TableSize {
+                table_name: "market_feature_cache_symbol".into(),
+                size_bytes: 200,
+                size_pretty: "200 B".into(),
+                row_count: 2,
+            },
+            TableSize {
+                table_name: "market_stock_daily_bar".into(),
+                size_bytes: 5000,
+                size_pretty: "5000 B".into(),
+                row_count: 50,
+            },
+        ];
+        let cats = build_categories(&rows);
+        assert_eq!(cats.len(), 10, "固定 10 个类别全部出现");
+        let cache = cats.iter().find(|c| c.category == "cache").unwrap();
+        assert_eq!(cache.table_count, 2);
+        assert_eq!(cache.total_size_bytes, 1200);
+        assert_eq!(cache.row_count, 12);
+        assert!(cache.cleanable);
+        let market = cats.iter().find(|c| c.category == "market_data").unwrap();
+        assert_eq!(market.table_count, 1);
+        assert_eq!(market.total_size_bytes, 5000);
+        assert!(!market.cleanable);
+        // 无命中类别也保留占位（table_count=0）
+        let paper = cats.iter().find(|c| c.category == "paper").unwrap();
+        assert_eq!(paper.table_count, 0);
+        assert_eq!(paper.total_size_bytes, 0);
+    }
+
+    // ── 只读统计（真实库）──
+
+    #[tokio::test]
+    async fn get_cleanup_stats_reports_categories_and_table_details() {
+        let db = test_db().await;
+        let stats = get_cleanup_stats(&db).await.expect("stats ok");
+        assert!(
+            stats["total_size_bytes"].as_i64().unwrap_or(0) > 0,
+            "库非空"
+        );
+        let categories = stats["categories"].as_array().expect("categories");
+        assert_eq!(categories.len(), 10);
+        assert!(
+            categories.iter().all(|c| c["category"].is_string()),
+            "每类别有名称"
+        );
+        let tables = stats["tables"].as_array().expect("tables");
+        assert!(!tables.is_empty());
+        for t in tables {
+            assert!(t["table"].is_string());
+            assert!(t["category"].is_string());
+            assert!(t["cleanable"].is_boolean());
+        }
+    }
+
+    #[tokio::test]
+    async fn get_cache_sizes_report_nonnegative_and_unknown_key_zero() {
+        let db = test_db().await;
+        let total = get_cache_total_size(&db).await.expect("total size");
+        assert!(total >= 0);
+        let unknown = get_cache_key_size(&db, "zzz_test_cleanup_no_such_key")
+            .await
+            .expect("key size");
+        assert_eq!(unknown, 0, "不存在 cache_key 估算为 0");
+    }
+
+    #[tokio::test]
+    async fn get_expired_stats_reports_three_counters() {
+        let db = test_db().await;
+        let stats = get_expired_stats(&db).await.expect("expired stats");
+        for key in ["expired_cleanable", "kept", "active_not_expired"] {
+            assert!(
+                stats[key].as_i64().is_some(),
+                "应含非负计数字段 {key}: {}",
+                stats
+            );
+        }
+    }
+
+    // ── 预览（只读）──
+
+    #[tokio::test]
+    async fn preview_cleanup_empty_request_yields_no_actions() {
+        let db = test_db().await;
+        let out = preview_cleanup(&db, &empty_request())
+            .await
+            .expect("preview");
+        assert_eq!(out["total_actions"], json!(0));
+        assert_eq!(out["total_estimated_size_bytes"].as_i64().unwrap_or(-1), 0);
+    }
+
+    #[tokio::test]
+    async fn preview_cleanup_with_zzz_keys_estimates_zero() {
+        let db = test_db().await;
+        let mut req = empty_request();
+        req.cache_keys = vec!["zzz_test_cleanup_key".into()];
+        req.backtest_task_ids = vec!["zzz_test_cleanup_task".into()];
+        req.prediction_set_ids = vec!["zzz_test_cleanup_psid".into()];
+        req.combo_names = vec!["zzz_test_cleanup_combo".into()];
+        let out = preview_cleanup(&db, &req).await.expect("preview");
+        assert_eq!(out["total_actions"], json!(4));
+        assert_eq!(out["total_estimated_size_bytes"], json!(0));
+        let actions = out["actions"].as_array().unwrap();
+        let kinds: Vec<&str> = actions
+            .iter()
+            .map(|a| a["action"].as_str().unwrap_or_default())
+            .collect();
+        for expect in [
+            "DELETE_CACHE_KEY",
+            "DELETE_BACKTEST_TASK",
+            "DELETE_MODEL_PREDICTIONS",
+            "DELETE_COMBO",
+        ] {
+            assert!(kinds.contains(&expect), "缺动作 {expect}: {kinds:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_cleanup_auto_expired_reports_count_without_deleting() {
+        let db = test_db().await;
+        let mut req = empty_request();
+        req.auto_cleanup_expired = true;
+        let out = preview_cleanup(&db, &req).await.expect("preview");
+        let actions = out["actions"].as_array().unwrap();
+        let action = actions
+            .iter()
+            .find(|a| a["action"] == "AUTO_CLEANUP_EXPIRED")
+            .expect("auto cleanup preview action");
+        assert!(action["expired_task_count"].as_i64().is_some());
+        // 只读预览：backtest_task 总行数不受影响（由后续 zzz 执行路径单独验证保护）
+    }
+
+    // ── 执行清理（仅安全路径）──
+
+    #[tokio::test]
+    async fn run_cleanup_rejects_request_without_actions() {
+        let db = test_db().await;
+        let err = run_cleanup(&db, &empty_request())
+            .await
+            .expect_err("空动作应拒绝");
+        assert!(err.contains("至少需要指定一种清理操作"), "实际: {err}");
+    }
+
+    #[tokio::test]
+    async fn run_cleanup_dry_run_returns_preview_without_deleting() {
+        let db = test_db().await;
+        let mut req = empty_request();
+        req.dry_run = true;
+        req.cache_keys = vec!["zzz_test_cleanup_key".into()];
+        let out = run_cleanup(&db, &req).await.expect("dry run ok");
+        assert_eq!(out["total_actions"], json!(1));
+        assert_eq!(
+            out["actions"].as_array().unwrap()[0]["action"],
+            "DELETE_CACHE_KEY"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_cleanup_with_nonexistent_zzz_keys_deletes_nothing() {
+        let db = test_db().await;
+        let mut req = empty_request();
+        req.cache_keys = vec!["zzz_test_cleanup_key".into()];
+        req.backtest_task_ids = vec!["zzz_test_cleanup_task".into()];
+        req.prediction_set_ids = vec!["zzz_test_cleanup_psid".into()];
+        req.combo_names = vec!["zzz_test_cleanup_combo".into()];
+        let out = run_cleanup(&db, &req).await.expect("cleanup ok");
+        assert_eq!(out["total_freed_bytes"], json!(0));
+        let actions = out["actions"].as_array().unwrap();
+        let by_action = |name: &str| {
+            actions
+                .iter()
+                .find(|a| a["action"] == name)
+                .unwrap_or_else(|| panic!("缺动作 {name}"))
+        };
+        // count==0 保护：预测/组合先计数为 0 直接返回，不执行 DELETE
+        assert_eq!(
+            by_action("DELETE_MODEL_PREDICTIONS")["status"],
+            json!("success")
+        );
+        assert_eq!(
+            by_action("DELETE_MODEL_PREDICTIONS")["deleted_rows"],
+            json!(0)
+        );
+        assert_eq!(by_action("DELETE_COMBO")["status"], json!("success"));
+        assert_eq!(by_action("DELETE_COMBO")["deleted_rows"], json!(0));
+        // cache_key 不存在 → DELETE 0 行仍记 success
+        assert_eq!(by_action("DELETE_CACHE_KEY")["status"], json!("success"));
+        // 未知回测任务（非 force）→ 显式报错不静默
+        assert_eq!(by_action("DELETE_BACKTEST_TASK")["status"], json!("error"));
+        assert!(
+            by_action("DELETE_BACKTEST_TASK")["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("不存在"),
+            "未知任务应报不存在: {}",
+            by_action("DELETE_BACKTEST_TASK")["error"]
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_backtest_task_refuses_kept_task_without_force() {
+        let db = test_db().await;
+        let tid = "zzz_test_cleanup_kept_task";
+        // 幂等防御：先清上次 panic 可能的残留，保证 INSERT 不撞唯一键
+        sqlx::query("DELETE FROM backtest_task WHERE task_id = $1")
+            .bind(tid)
+            .execute(&db)
+            .await
+            .expect("pre-clean zzz task");
+        // 造 is_kept=true 的 zzz 任务行（自造自清理，绝不触碰真实任务）
+        sqlx::query(
+            r#"INSERT INTO backtest_task
+                 (task_id, strategy_version_id, data_version_id, benchmark_symbol, symbols,
+                  start_date, end_date, initial_capital, rebalance_frequency,
+                  cost_model, slippage_model, execution_rules, parameters,
+                  status, progress, mode, is_kept)
+               VALUES ($1, 'zzz_test', 'zzz_test', '000300.SH', ARRAY[]::text[],
+                  '2026-01-05', '2026-01-09', 1000000, '10',
+                  '{}', '{}', '{}', '{}', 'completed', 100, 'backtest', true)"#,
+        )
+        .bind(tid)
+        .execute(&db)
+        .await
+        .expect("insert zzz kept task");
+
+        // force=false → is_kept 保护分支拒绝，且不删除任何行
+        let err = clean_backtest_task(&db, tid, false)
+            .await
+            .expect_err("kept task 应拒绝");
+        assert!(err.contains("is_kept=true"), "实际: {err}");
+        let still: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM backtest_task WHERE task_id = $1")
+                .bind(tid)
+                .fetch_one(&db)
+                .await
+                .unwrap_or(0);
+        assert_eq!(still, 1, "保护分支不得删除行");
+
+        // 精确键清理
+        sqlx::query("DELETE FROM backtest_task WHERE task_id = $1")
+            .bind(tid)
+            .execute(&db)
+            .await
+            .expect("cleanup zzz task");
+    }
+
+    #[tokio::test]
+    async fn count_and_estimate_helpers_report_zero_for_unknown_ids() {
+        let db = test_db().await;
+        let rows = count_backtest_rows(&db, "zzz_test_cleanup_task")
+            .await
+            .expect("count rows");
+        assert!(rows.as_object().unwrap().values().all(|v| v == &json!(0)));
+
+        let est = estimate_backtest_size(&db, "zzz_test_cleanup_task")
+            .await
+            .expect("estimate");
+        assert_eq!(est, 0);
+
+        assert_eq!(
+            count_prediction_rows(&db, "zzz_test_cleanup_psid")
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            count_combo_rows(&db, "zzz_test_cleanup_combo")
+                .await
+                .unwrap(),
+            0
+        );
+
+        // count==0 保护：不执行 DELETE 直接 Ok(0)
+        assert_eq!(
+            clean_model_predictions(&db, "zzz_test_cleanup_psid")
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(clean_combo(&db, "zzz_test_cleanup_combo").await.unwrap(), 0);
+    }
+}
