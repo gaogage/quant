@@ -12927,3 +12927,1086 @@ fn prediction_signals_bear_regime_cuts_gross_exposure() {
         "牛市不应收缩总敞口，实际 {bull_gross}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// DB 连库集成（只读为主，写路径自清理）
+//
+// 连本地 PostgreSQL：postgres://gaocheng@localhost/quant（与真实生产数据共库）。
+// 只读测试用真实 combo/symbol/指数数据（数据依据见各测试注释，均经 psql 预先核实）；
+// 写路径（market_feature_cache_* 持久缓存六表）一律 zzz_test_ 前缀
+// data_version_id / symbol + 前置清理 + 结尾清理，绝不触碰生产缓存行。
+// ─────────────────────────────────────────────────────────────────────
+
+/// 构造 NaiveDate 的简写。
+fn dbd(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
+}
+
+/// 连接本地 quant 库（先例：quant-factor/src/repository.rs 的 tests 模式）。
+async fn db_test_pool() -> PgPool {
+    PgPool::connect("postgres://gaocheng@localhost/quant")
+        .await
+        .expect("connect local quant db")
+}
+
+/// 清理 zzz_test_* data_version_id 关联的全部持久市场特征缓存行（6 张表）。
+async fn cleanup_zzz_test_market_feature_cache(pool: &PgPool, dv: &str) {
+    for table in [
+        "market_feature_cache_value",
+        "market_feature_cache_symbol",
+        "market_feature_cache_return_risk_matrix_row",
+        "market_feature_cache_return_risk_stats_row",
+        "market_feature_cache_return_risk_pairwise_row",
+    ] {
+        let sql = format!(
+            "DELETE FROM {table} WHERE cache_key IN \
+             (SELECT cache_key FROM market_feature_cache_manifest \
+              WHERE data_version_id = $1)"
+        );
+        sqlx::query(&sql)
+            .bind(dv)
+            .execute(pool)
+            .await
+            .expect("cleanup zzz_test cache rows");
+    }
+    sqlx::query("DELETE FROM market_feature_cache_manifest WHERE data_version_id = $1")
+        .bind(dv)
+        .execute(pool)
+        .await
+        .expect("cleanup zzz_test manifest rows");
+}
+
+/// 数据依据（psql 2026-09-20 核实）：
+/// `SELECT combo_name, version, MIN(trade_date), MAX(trade_date), COUNT(*) FROM multi_factor_value
+///  WHERE combo_name='full_pit_icir_37f_h20_fund_v2' GROUP BY 1,2`
+/// → 1.0.0 / 2025-09-05 ~ 2026-09-18 / 1,415,520 行；2026-09-11 与 2026-09-18 均有评分数据。
+#[tokio::test]
+async fn db_load_combo_scores_for_dates_cached_returns_real_persisted_scores() {
+    let pool = db_test_pool().await;
+    let score_days = [dbd(2026, 9, 11), dbd(2026, 9, 18)];
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        score_candidate_pool_size: Some(50),
+        ..Default::default()
+    };
+
+    let mut cache = SignalDataCache::default();
+    let before = cache.stats();
+    let scores = load_combo_scores_for_dates_cached(&pool, &mut cache, &config, &score_days)
+        .await
+        .expect("load persisted combo scores from real combo");
+    let after = cache.stats();
+
+    // 覆盖私有 load_persisted_combo_scores_for_dates_cached 的 DB 查询路径：
+    // 两个 score day 都应返回非空评分，且按候选池上限截断到 50 行以内。
+    for day in score_days {
+        let day_rows = scores
+            .get(&day)
+            .unwrap_or_else(|| panic!("score day {day} should have persisted scores"));
+        assert!(!day_rows.is_empty());
+        assert!(day_rows.len() <= 50);
+        assert!(day_rows.iter().all(|(_, score)| score.is_finite()));
+    }
+    // 首次加载：每个 score day 一次内存缓存 miss。
+    assert_eq!(after.combo_score_misses - before.combo_score_misses, 2);
+    assert_eq!(after.combo_score_hits - before.combo_score_hits, 0);
+
+    // 二次调用（同一缓存）：全部命中内存缓存，不再触发 DB miss。
+    let before_second = cache.stats();
+    let scores_again = load_combo_scores_for_dates_cached(&pool, &mut cache, &config, &score_days)
+        .await
+        .expect("reload combo scores from memory cache");
+    let after_second = cache.stats();
+    assert_eq!(
+        after_second.combo_score_hits - before_second.combo_score_hits,
+        2
+    );
+    assert_eq!(
+        after_second.combo_score_misses - before_second.combo_score_misses,
+        0
+    );
+    // 缓存命中结果与首次覆盖同一 score day 集合。
+    assert_eq!(scores_again.len(), scores.len());
+}
+
+/// 数据依据（psql 2026-09-20 核实）：
+/// - `phase7_quality_recovery_acceleration_v1` 在 multi_factor_value 无落库行（派生 alpha，运行时计算）；
+/// - 派生源 `phase7_financial_quality_v1` / 1.0.0：2026-03-09 ~ 2026-09-18 / 689,310 行，
+///   2026-09-11 与 2026-09-18 两日合计 10,212 行。
+/// derived_pit_alpha_spec：source=phase7_financial_quality_v1，current 0.40 / change 0.60。
+#[tokio::test]
+async fn db_load_combo_scores_for_dates_cached_derives_pit_quality_recovery_from_source() {
+    let pool = db_test_pool().await;
+    let score_days = [dbd(2026, 9, 11), dbd(2026, 9, 18)];
+    let config = SignalConfig {
+        combo_name: "phase7_quality_recovery_acceleration_v1".into(),
+        version: "1.0.0".into(),
+        score_candidate_pool_size: Some(50),
+        ..Default::default()
+    };
+
+    let mut cache = SignalDataCache::default();
+    let scores = load_combo_scores_for_dates_cached(&pool, &mut cache, &config, &score_days)
+        .await
+        .expect("derive PIT quality recovery scores from real source combo");
+
+    // 覆盖私有 load_derived_pit_combo_scores_for_dates_cached：
+    // 首 score day（2026-09-11）无前一日源评分，不产生派生分；
+    // 次 score day（2026-09-18）以 09-11 为 previous 派生，应返回非空且受候选池截断。
+    assert!(
+        !scores.contains_key(&dbd(2026, 9, 11)),
+        "first score day has no previous source scores, no derived scores expected"
+    );
+    let derived_rows = scores
+        .get(&dbd(2026, 9, 18))
+        .expect("second score day should carry derived scores");
+    assert!(!derived_rows.is_empty());
+    assert!(derived_rows.len() <= 50);
+    assert!(derived_rows.iter().all(|(_, score)| score.is_finite()));
+}
+
+/// 数据依据：multi_factor_value 最早 combo 数据从 2025-09-05 起（full_pit_icir_37f_h20_fund_v2），
+/// 1990-01-02 窗口必然无任何 combo 评分。
+#[tokio::test]
+async fn db_load_combo_scores_for_dates_cached_empty_window_returns_error() {
+    let pool = db_test_pool().await;
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        ..Default::default()
+    };
+
+    let mut cache = SignalDataCache::default();
+    let err = load_combo_scores_for_dates_cached(&pool, &mut cache, &config, &[dbd(1990, 1, 2)])
+        .await
+        .expect_err("no combo scores in 1990 window");
+    assert!(
+        err.contains("No combo scores found"),
+        "unexpected error message: {err}"
+    );
+}
+
+/// 数据依据（psql 2026-09-20 核实）：
+/// `SELECT symbol, ROUND(AVG(amount)) FROM market_stock_daily_bar_adj
+///  WHERE symbol IN ('600519.SH','000001.SZ') AND trade_date >= '2026-01-01' GROUP BY 1`
+/// → 600519.SH ≈ 5,902,877（amount 列单位：千元，即日均约 59 亿元）。
+/// 阈值取 1 亿元/日（100_000_000 CNY = 100_000 千元）：600519.SH 保留，虚构 symbol 被滤。
+#[tokio::test]
+async fn db_apply_factor_liquidity_filter_keeps_liquid_real_symbols() {
+    let pool = db_test_pool().await;
+    let mut scores = FactorScoresByDate::from([
+        (
+            dbd(2026, 9, 11),
+            vec![
+                ("600519.SH".to_string(), 1.0),
+                ("ZZZTEST.NOEXIST".to_string(), 0.5),
+            ],
+        ),
+        (
+            dbd(2026, 9, 18),
+            vec![
+                ("600519.SH".to_string(), 1.0),
+                ("ZZZTEST.NOEXIST".to_string(), 0.5),
+            ],
+        ),
+    ]);
+    let config = SignalConfig {
+        min_daily_amount_cny: Some(100_000_000.0),
+        ..Default::default()
+    };
+
+    let mut cache = SignalDataCache::default();
+    apply_factor_liquidity_filter(
+        &pool,
+        &mut cache,
+        &mut scores,
+        &config,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+    )
+    .await
+    .expect("apply factor liquidity filter against real amounts");
+
+    for day in [dbd(2026, 9, 11), dbd(2026, 9, 18)] {
+        let day_rows = &scores[&day];
+        assert_eq!(day_rows.len(), 1, "illiquid symbol must be filtered out");
+        assert_eq!(day_rows[0].0, "600519.SH");
+    }
+}
+
+/// 数据依据同上（apply_prediction_liquidity_filter 直查 market_stock_daily_bar_adj.amount，
+/// 600519.SH 日均约 59 亿元 > 1 亿元阈值；虚构 symbol 无行情行被滤）。
+#[tokio::test]
+async fn db_apply_prediction_liquidity_filter_keeps_liquid_real_symbols() {
+    let pool = db_test_pool().await;
+    let mut scores: ScoresByDate = HashMap::from([
+        (
+            dbd(2026, 9, 11),
+            vec![
+                ("600519.SH".to_string(), 1.0, Some(1)),
+                ("ZZZTEST.NOEXIST".to_string(), 0.5, Some(2)),
+            ],
+        ),
+        (
+            dbd(2026, 9, 18),
+            vec![
+                ("600519.SH".to_string(), 1.0, Some(1)),
+                ("ZZZTEST.NOEXIST".to_string(), 0.5, Some(2)),
+            ],
+        ),
+    ]);
+    let config = PredictionSignalConfig {
+        min_daily_amount_cny: Some(100_000_000.0),
+        ..Default::default()
+    };
+
+    apply_prediction_liquidity_filter(
+        &pool,
+        &mut scores,
+        &config,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+    )
+    .await
+    .expect("apply prediction liquidity filter against real amounts");
+
+    for day in [dbd(2026, 9, 11), dbd(2026, 9, 18)] {
+        let day_rows = &scores[&day];
+        assert_eq!(day_rows.len(), 1, "illiquid symbol must be filtered out");
+        assert_eq!(day_rows[0].0, "600519.SH");
+    }
+}
+
+/// 数据依据（psql 2026-09-20 核实）：
+/// `SELECT MIN(trade_date), MAX(trade_date) FROM market_trade_calendar
+///  WHERE exchange='SSE' AND is_open` → 1990-12-19 ~ 2026-12-31。
+/// 2026-01-03 为周六（非交易日），2026-01-05 为周一（交易日）。
+#[tokio::test]
+async fn db_load_open_trading_days_returns_sorted_sse_calendar() {
+    let pool = db_test_pool().await;
+    let days = load_open_trading_days(&pool, dbd(2026, 1, 1), dbd(2026, 1, 31))
+        .await
+        .expect("load SSE trading calendar");
+
+    assert!(!days.is_empty());
+    assert!(
+        days.windows(2).all(|pair| pair[0] < pair[1]),
+        "ascending order"
+    );
+    assert!(days
+        .iter()
+        .all(|day| *day >= dbd(2026, 1, 1) && *day <= dbd(2026, 1, 31)));
+    assert!(days.contains(&dbd(2026, 1, 5)), "Monday 2026-01-05 is open");
+    assert!(
+        !days.contains(&dbd(2026, 1, 3)),
+        "Saturday 2026-01-03 is closed"
+    );
+}
+
+#[tokio::test]
+async fn db_load_open_trading_days_cached_hits_memory_cache_on_second_call() {
+    let pool = db_test_pool().await;
+    let mut cache = SignalDataCache::default();
+
+    let before = cache.stats();
+    let first = load_open_trading_days_cached(&pool, &mut cache, dbd(2026, 1, 1), dbd(2026, 1, 31))
+        .await
+        .expect("first load from DB");
+    let mid = cache.stats();
+    assert_eq!(mid.trading_day_misses - before.trading_day_misses, 1);
+    assert!(!first.is_empty());
+
+    let second =
+        load_open_trading_days_cached(&pool, &mut cache, dbd(2026, 1, 1), dbd(2026, 1, 31))
+            .await
+            .expect("second load from cache");
+    let after = cache.stats();
+    assert_eq!(after.trading_day_hits - mid.trading_day_hits, 1);
+    assert_eq!(after.trading_day_misses - mid.trading_day_misses, 0);
+    assert_eq!(second.as_ref(), first.as_ref());
+}
+
+/// 数据依据（psql 2026-09-20 核实）：
+/// `SELECT symbol, MIN(trade_date), MAX(trade_date), COUNT(*) FROM market_stock_daily_bar
+///  WHERE symbol IN ('600519.SH','000001.SZ') GROUP BY 1`
+/// → 两 symbol 均覆盖 2006-01-04 ~ 2026-09-18（pct_change 列为小数形式，如 -0.011589）。
+#[tokio::test]
+async fn db_load_symbol_return_history_returns_real_daily_returns() {
+    let pool = db_test_pool().await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let start = dbd(2026, 8, 1);
+    let end = dbd(2026, 9, 18);
+    let lookback_days = 20;
+
+    let history = load_symbol_return_history(&pool, &symbols, start, end, lookback_days)
+        .await
+        .expect("load real symbol return history");
+
+    // 查询窗口起点 = start - lookback*3 日历天（return_history_query_start）：
+    // 2026-08-01 - 20*3 = 2026-06-02，返回含回看窗口历史。
+    let query_start = dbd(2026, 6, 2);
+    for symbol in &symbols {
+        let rows = history
+            .get(symbol)
+            .unwrap_or_else(|| panic!("{symbol} should have return history"));
+        assert!(
+            rows.len() > 10,
+            "{symbol} expected >10 rows, got {}",
+            rows.len()
+        );
+        assert!(
+            rows.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "ascending dates"
+        );
+        assert!(rows
+            .iter()
+            .all(|(date, _)| *date >= query_start && *date <= end));
+        assert!(rows.iter().all(|(_, value)| value.is_finite()));
+    }
+}
+
+/// 写路径（自清理）：data_version_id 用 zzz_test_ 前缀，往返 store/load 后 DELETE 清理。
+/// 同时覆盖私有 load_symbol_return_history_cached（首调用经内存缓存 miss 路径）。
+#[tokio::test]
+async fn db_load_symbol_return_history_persistent_cached_round_trips_zzz_test_key() {
+    let pool = db_test_pool().await;
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_sym_hist_dv").await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let data_version_id = "zzz_test_sym_hist_dv";
+
+    // 首次：持久缓存 miss → 从行情表加载 → 写入持久缓存。
+    let mut cache = SignalDataCache::default();
+    let before = cache.stats();
+    let history = load_symbol_return_history_persistent_cached(
+        &pool,
+        &mut cache,
+        data_version_id,
+        &symbols,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("first load writes persistent cache");
+    let after = cache.stats();
+    assert!(history.get("600519.SH").is_some_and(|rows| rows.len() > 10));
+    assert!(history.get("000001.SZ").is_some_and(|rows| rows.len() > 10));
+    assert_eq!(
+        after.persistent_return_history_misses - before.persistent_return_history_misses,
+        1
+    );
+    assert_eq!(
+        after.persistent_return_history_writes - before.persistent_return_history_writes,
+        1
+    );
+
+    // 二次（全新内存缓存）：命中持久缓存，不再写。
+    let mut cache2 = SignalDataCache::default();
+    let before2 = cache2.stats();
+    let history2 = load_symbol_return_history_persistent_cached(
+        &pool,
+        &mut cache2,
+        data_version_id,
+        &symbols,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("second load hits persistent cache");
+    let after2 = cache2.stats();
+    assert_eq!(
+        after2.persistent_return_history_hits - before2.persistent_return_history_hits,
+        1
+    );
+    assert_eq!(
+        after2.persistent_return_history_writes - before2.persistent_return_history_writes,
+        0
+    );
+    assert_eq!(
+        history2.get("600519.SH").map(Vec::len),
+        history.get("600519.SH").map(Vec::len)
+    );
+
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_sym_hist_dv").await;
+
+    // 清理后再读：持久缓存 miss，优雅回退行情表路径。
+    let mut cache3 = SignalDataCache::default();
+    let history3 = load_symbol_return_history_persistent_cached(
+        &pool,
+        &mut cache3,
+        data_version_id,
+        &symbols,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("third load falls back to source table after cleanup");
+    assert!(history3
+        .get("600519.SH")
+        .is_some_and(|rows| rows.len() > 10));
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_sym_hist_dv").await;
+}
+
+/// 数据依据（psql 2026-09-20 核实）：
+/// `SELECT symbol, MIN(trade_date), MAX(trade_date), COUNT(*) FROM market_index_daily_bar
+///  WHERE symbol='000300.SH' GROUP BY 1` → 2009-01-05 ~ 2026-09-18 / 4,304 行。
+#[tokio::test]
+async fn db_load_benchmark_return_history_cached_returns_real_index_returns() {
+    let pool = db_test_pool().await;
+    let mut cache = SignalDataCache::default();
+
+    let before = cache.stats();
+    let returns = load_benchmark_return_history_cached(
+        &pool,
+        &mut cache,
+        "000300.SH",
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("load real benchmark return history");
+    let mid = cache.stats();
+
+    // 覆盖私有 load_benchmark_return_history：query_start = start - lookback*3 天。
+    assert!(!returns.is_empty());
+    assert!(returns
+        .iter()
+        .all(|(date, _)| *date >= dbd(2026, 6, 2) && *date <= dbd(2026, 9, 18)));
+    assert!(
+        returns.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "ascending dates"
+    );
+    assert!(returns.iter().all(|(_, value)| value.is_finite()));
+    assert_eq!(
+        mid.benchmark_return_misses - before.benchmark_return_misses,
+        1
+    );
+
+    let _ = load_benchmark_return_history_cached(
+        &pool,
+        &mut cache,
+        "000300.SH",
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("second load from memory cache");
+    let after = cache.stats();
+    assert_eq!(after.benchmark_return_hits - mid.benchmark_return_hits, 1);
+    assert_eq!(
+        after.benchmark_return_misses - mid.benchmark_return_misses,
+        0
+    );
+}
+
+/// 覆盖私有 load_average_amounts（经 pub(crate) 的 cached 包装调用）。
+/// 数据依据：600519.SH 2026 年日均成交额约 5.9e6 千元（见 liquidity filter 测试注释）。
+#[tokio::test]
+async fn db_load_average_amounts_cached_returns_real_average_amounts() {
+    let pool = db_test_pool().await;
+    let symbols = vec!["600519.SH".to_string(), "ZZZTEST.NOEXIST".to_string()];
+    let mut cache = SignalDataCache::default();
+
+    let amounts = load_average_amounts_cached(
+        &pool,
+        &mut cache,
+        &symbols,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+    )
+    .await
+    .expect("load real average amounts");
+    let maotai = amounts
+        .get("600519.SH")
+        .expect("600519.SH has average amount");
+    assert!(*maotai > 0.0 && maotai.is_finite());
+    assert!(!amounts.contains_key("ZZZTEST.NOEXIST"));
+
+    // 二次调用：两个 symbol 键全部命中内存缓存（含空结果键）。
+    let before = cache.stats();
+    let _ = load_average_amounts_cached(
+        &pool,
+        &mut cache,
+        &symbols,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+    )
+    .await
+    .expect("second load from memory cache");
+    let after = cache.stats();
+    assert_eq!(
+        after.average_amount_symbol_hits - before.average_amount_symbol_hits,
+        2
+    );
+    assert_eq!(
+        after.average_amount_symbol_misses - before.average_amount_symbol_misses,
+        0
+    );
+}
+
+/// 写路径（自清理）：覆盖私有 load_average_amount_history（首调用回退源表）与持久缓存往返。
+#[tokio::test]
+async fn db_load_average_amount_history_persistent_cached_round_trips_zzz_test_key() {
+    let pool = db_test_pool().await;
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_amt_hist_dv").await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let data_version_id = "zzz_test_amt_hist_dv";
+
+    let mut cache = SignalDataCache::default();
+    let before = cache.stats();
+    let history = load_average_amount_history_persistent_cached(
+        &pool,
+        &mut cache,
+        data_version_id,
+        &symbols,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("first load writes persistent amount history");
+    let after = cache.stats();
+    assert!(history.get("600519.SH").is_some_and(|rows| rows.len() > 10));
+    assert!(history.get("000001.SZ").is_some_and(|rows| rows.len() > 10));
+    assert_eq!(
+        after.persistent_average_amount_history_writes
+            - before.persistent_average_amount_history_writes,
+        1
+    );
+
+    let mut cache2 = SignalDataCache::default();
+    let before2 = cache2.stats();
+    let history2 = load_average_amount_history_persistent_cached(
+        &pool,
+        &mut cache2,
+        data_version_id,
+        &symbols,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("second load hits persistent amount history");
+    let after2 = cache2.stats();
+    assert_eq!(
+        after2.persistent_average_amount_history_hits
+            - before2.persistent_average_amount_history_hits,
+        1
+    );
+    assert_eq!(
+        history2.get("600519.SH").map(Vec::len),
+        history.get("600519.SH").map(Vec::len)
+    );
+
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_amt_hist_dv").await;
+}
+
+/// 覆盖私有 load_industry_classifications / load_industry_classifications_cached
+/// （经 pub(crate) 的 load_portfolio_industry_inputs_cached，需 max_industry_weight_pct 激活）。
+/// 数据依据（psql 2026-09-20 核实）：
+/// `SELECT symbol, industry FROM market_stock WHERE symbol IN ('600519.SH','000001.SZ')`
+/// → 600519.SH=白酒 / 000001.SZ=银行。
+#[tokio::test]
+async fn db_load_industry_classifications_via_portfolio_inputs_cached() {
+    let pool = db_test_pool().await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let config = PortfolioConstructionConfig {
+        max_industry_weight_pct: Some(0.10),
+        ..Default::default()
+    };
+    let mut cache = SignalDataCache::default();
+
+    let industries = load_portfolio_industry_inputs_cached(&pool, &mut cache, &symbols, &config)
+        .await
+        .expect("load real industry classifications");
+    let mid = cache.stats();
+    assert_eq!(
+        industries.get("600519.SH").map(String::as_str),
+        Some("白酒")
+    );
+    assert_eq!(
+        industries.get("000001.SZ").map(String::as_str),
+        Some("银行")
+    );
+    assert_eq!(mid.industry_classification_misses, 1);
+
+    let _ = load_portfolio_industry_inputs_cached(&pool, &mut cache, &symbols, &config)
+        .await
+        .expect("second load from memory cache");
+    let after = cache.stats();
+    assert_eq!(
+        after.industry_classification_hits - mid.industry_classification_hits,
+        1
+    );
+}
+
+/// 写路径（自清理）：覆盖私有 load_persistent_return_risk_feature_matrix_cache /
+/// store_persistent_return_risk_feature_matrix_cache 的完整往返；
+/// 首调用同时覆盖私有 load_symbol_return_history_cached（data_version_id=Some 时
+/// 经 persistent 路径加载 return history）。
+#[tokio::test]
+async fn db_load_return_risk_feature_matrix_persistent_cached_round_trips_zzz_test_key() {
+    let pool = db_test_pool().await;
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_rr_matrix_dv").await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let score_days = [dbd(2026, 9, 11), dbd(2026, 9, 18)];
+    let data_version_id = "zzz_test_rr_matrix_dv";
+
+    // 首次：持久缓存 miss → 从行情表构建矩阵 → 写入持久缓存。
+    let mut cache = SignalDataCache::default();
+    let before = cache.stats();
+    let matrix = load_return_risk_feature_matrix_persistent_cached(
+        &pool,
+        &mut cache,
+        Some(data_version_id),
+        &symbols,
+        dbd(2026, 9, 11),
+        dbd(2026, 9, 18),
+        &score_days,
+        20,
+        None,
+    )
+    .await
+    .expect("first load builds and persists return-risk matrix");
+    let after = cache.stats();
+    assert!(matrix.row_count() >= 2, "expected >=2 (day,symbol) rows");
+    assert!(matrix.return_value_count() > 0);
+    assert_eq!(
+        after.persistent_return_risk_feature_matrix_writes
+            - before.persistent_return_risk_feature_matrix_writes,
+        1
+    );
+    assert_eq!(
+        after.persistent_return_risk_feature_matrix_rows_written
+            - before.persistent_return_risk_feature_matrix_rows_written,
+        matrix.row_count()
+    );
+
+    // 二次（全新内存缓存）：命中持久缓存，负载行数一致。
+    let mut cache2 = SignalDataCache::default();
+    let before2 = cache2.stats();
+    let matrix2 = load_return_risk_feature_matrix_persistent_cached(
+        &pool,
+        &mut cache2,
+        Some(data_version_id),
+        &symbols,
+        dbd(2026, 9, 11),
+        dbd(2026, 9, 18),
+        &score_days,
+        20,
+        None,
+    )
+    .await
+    .expect("second load hits persistent return-risk matrix cache");
+    let after2 = cache2.stats();
+    assert_eq!(matrix2.row_count(), matrix.row_count());
+    assert_eq!(
+        after2.persistent_return_risk_feature_matrix_hits
+            - before2.persistent_return_risk_feature_matrix_hits,
+        1
+    );
+    assert_eq!(
+        after2.persistent_return_risk_feature_matrix_rows_loaded
+            - before2.persistent_return_risk_feature_matrix_rows_loaded,
+        matrix.row_count()
+    );
+
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_rr_matrix_dv").await;
+}
+
+/// 覆盖私有 load_return_risk_stats_feature_matrix_persistent_cached 的
+/// data_version_id=None 路径（不做持久缓存 IO，纯内存构建）。
+/// lookbacks 来自 RiskBudget 组合方法（risk_budget_lookback_days=60）。
+#[tokio::test]
+async fn db_load_portfolio_return_risk_stats_matrices_cached_builds_from_real_returns() {
+    let pool = db_test_pool().await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let score_days = [dbd(2026, 9, 11), dbd(2026, 9, 18)];
+
+    let return_history =
+        load_symbol_return_history(&pool, &symbols, dbd(2026, 9, 11), dbd(2026, 9, 18), 60)
+            .await
+            .expect("load real return history for stats matrix");
+    assert_eq!(return_history.len(), 2);
+
+    let signal_config = SignalConfig {
+        top_n: 2,
+        portfolio_method: PortfolioConstructionMethod::RiskBudget,
+        ..Default::default()
+    };
+    let portfolio_config = PortfolioConstructionConfig::from(&signal_config);
+    let scores_by_date = FactorScoresByDate::from([
+        (
+            dbd(2026, 9, 11),
+            vec![
+                ("600519.SH".to_string(), 1.0),
+                ("000001.SZ".to_string(), 0.5),
+            ],
+        ),
+        (
+            dbd(2026, 9, 18),
+            vec![
+                ("600519.SH".to_string(), 1.0),
+                ("000001.SZ".to_string(), 0.5),
+            ],
+        ),
+    ]);
+
+    let mut cache = SignalDataCache::default();
+    let matrices = load_portfolio_return_risk_stats_feature_matrices_cached(
+        &pool,
+        &mut cache,
+        None,
+        &symbols,
+        dbd(2026, 9, 11),
+        dbd(2026, 9, 18),
+        &score_days,
+        &portfolio_config,
+        &return_history,
+        &scores_by_date,
+        &signal_config,
+    )
+    .await
+    .expect("build stats feature matrices from real returns");
+
+    assert_eq!(matrices.len(), 1, "RiskBudget yields single lookback 60");
+    let matrix = matrices
+        .get(&60)
+        .expect("lookback-60 stats matrix must exist");
+    assert!(matrix.row_count() >= 2, "expected >=2 stats rows");
+    assert!(matrix.pair_row_count() >= 1, "expected >=1 pairwise row");
+    // None dv：不做持久缓存读写。
+    let stats = cache.stats();
+    assert_eq!(stats.persistent_return_risk_stats_feature_matrix_writes, 0);
+    assert_eq!(stats.persistent_return_risk_stats_feature_matrix_hits, 0);
+}
+
+/// 写路径（自清理）：覆盖私有 load_persistent_return_risk_stats_feature_matrix_cache /
+/// store_persistent_return_risk_stats_feature_matrix_cache 的完整往返
+/// （stats_row + pairwise_row 两张持久缓存表）。
+#[tokio::test]
+async fn db_load_portfolio_return_risk_stats_matrices_persistent_round_trips_zzz_test_key() {
+    let pool = db_test_pool().await;
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_rr_stats_dv").await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let score_days = [dbd(2026, 9, 11), dbd(2026, 9, 18)];
+    let data_version_id = "zzz_test_rr_stats_dv";
+
+    let return_history =
+        load_symbol_return_history(&pool, &symbols, dbd(2026, 9, 11), dbd(2026, 9, 18), 60)
+            .await
+            .expect("load real return history");
+    let signal_config = SignalConfig {
+        top_n: 2,
+        portfolio_method: PortfolioConstructionMethod::RiskBudget,
+        ..Default::default()
+    };
+    let portfolio_config = PortfolioConstructionConfig::from(&signal_config);
+    let scores_by_date = FactorScoresByDate::from([
+        (
+            dbd(2026, 9, 11),
+            vec![
+                ("600519.SH".to_string(), 1.0),
+                ("000001.SZ".to_string(), 0.5),
+            ],
+        ),
+        (
+            dbd(2026, 9, 18),
+            vec![
+                ("600519.SH".to_string(), 1.0),
+                ("000001.SZ".to_string(), 0.5),
+            ],
+        ),
+    ]);
+
+    // 首次：持久缓存 miss → 纯内存构建 → 写入 stats_row / pairwise_row 持久缓存。
+    let mut cache = SignalDataCache::default();
+    let before = cache.stats();
+    let matrices = load_portfolio_return_risk_stats_feature_matrices_cached(
+        &pool,
+        &mut cache,
+        Some(data_version_id),
+        &symbols,
+        dbd(2026, 9, 11),
+        dbd(2026, 9, 18),
+        &score_days,
+        &portfolio_config,
+        &return_history,
+        &scores_by_date,
+        &signal_config,
+    )
+    .await
+    .expect("first load builds and persists stats matrices");
+    let after = cache.stats();
+    let matrix = matrices.get(&60).expect("lookback-60 stats matrix");
+    let expected_rows = matrix.row_count();
+    let expected_pair_rows = matrix.pair_row_count();
+    assert!(expected_rows >= 2);
+    assert!(expected_pair_rows >= 1);
+    assert_eq!(
+        after.persistent_return_risk_stats_feature_matrix_writes
+            - before.persistent_return_risk_stats_feature_matrix_writes,
+        1
+    );
+    assert_eq!(
+        after.persistent_return_risk_stats_feature_matrix_stats_rows_written
+            - before.persistent_return_risk_stats_feature_matrix_stats_rows_written,
+        expected_rows
+    );
+    assert_eq!(
+        after.persistent_return_risk_stats_feature_matrix_pair_rows_written
+            - before.persistent_return_risk_stats_feature_matrix_pair_rows_written,
+        expected_pair_rows
+    );
+
+    // 二次（全新内存缓存）：命中持久缓存，负载行数一致。
+    let mut cache2 = SignalDataCache::default();
+    let before2 = cache2.stats();
+    let matrices2 = load_portfolio_return_risk_stats_feature_matrices_cached(
+        &pool,
+        &mut cache2,
+        Some(data_version_id),
+        &symbols,
+        dbd(2026, 9, 11),
+        dbd(2026, 9, 18),
+        &score_days,
+        &portfolio_config,
+        &return_history,
+        &scores_by_date,
+        &signal_config,
+    )
+    .await
+    .expect("second load hits persistent stats matrix cache");
+    let after2 = cache2.stats();
+    let matrix2 = matrices2.get(&60).expect("lookback-60 stats matrix reload");
+    assert_eq!(matrix2.row_count(), expected_rows);
+    assert_eq!(matrix2.pair_row_count(), expected_pair_rows);
+    assert_eq!(
+        after2.persistent_return_risk_stats_feature_matrix_hits
+            - before2.persistent_return_risk_stats_feature_matrix_hits,
+        1
+    );
+    assert_eq!(
+        after2.persistent_return_risk_stats_feature_matrix_stats_rows_loaded
+            - before2.persistent_return_risk_stats_feature_matrix_stats_rows_loaded,
+        expected_rows
+    );
+    assert_eq!(
+        after2.persistent_return_risk_stats_feature_matrix_pair_rows_loaded
+            - before2.persistent_return_risk_stats_feature_matrix_pair_rows_loaded,
+        expected_pair_rows
+    );
+
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_rr_stats_dv").await;
+}
+
+/// 写路径（自清理）：store → load 往返 + 清理后 miss。
+/// manifest universe 用 zzz_test_ 前缀 symbol 集（不引用真实行情，纯往返验证）。
+/// 同时间接覆盖私有 insert_persistent_market_feature_value_chunk（store 内部分块写入）。
+#[tokio::test]
+async fn db_store_and_load_persistent_market_feature_cache_round_trip() {
+    let pool = db_test_pool().await;
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_mf_store_dv").await;
+    let symbols = vec![
+        "zzz_test_a_600519".to_string(),
+        "zzz_test_b_000001".to_string(),
+    ];
+    let key = PersistentMarketFeatureCacheKey::new(
+        PersistentMarketFeatureKind::ReturnHistory,
+        "zzz_test_mf_store_dv",
+        dbd(2026, 1, 1),
+        dbd(2026, 1, 10),
+        5,
+        &symbols,
+    );
+    let history = HashMap::from([
+        (
+            "zzz_test_a_600519".to_string(),
+            vec![(dbd(2026, 1, 5), 0.01), (dbd(2026, 1, 6), 0.02)],
+        ),
+        (
+            "zzz_test_b_000001".to_string(),
+            vec![(dbd(2026, 1, 5), -0.01)],
+        ),
+    ]);
+
+    let stored = store_persistent_market_feature_cache(&pool, &key, &symbols, &history)
+        .await
+        .expect("store persistent market feature cache");
+    assert!(stored, "cache tables exist, store must succeed");
+
+    let loaded = load_persistent_market_feature_cache(&pool, &key, &symbols)
+        .await
+        .expect("load persistent market feature cache after store")
+        .expect("manifest is ready and universe matches");
+    assert_eq!(
+        loaded.get("zzz_test_a_600519").map(Vec::len),
+        Some(2),
+        "round-trip must preserve row count"
+    );
+    assert_eq!(
+        loaded.get("zzz_test_a_600519"),
+        history.get("zzz_test_a_600519"),
+        "round-trip must preserve values"
+    );
+    assert_eq!(
+        loaded.get("zzz_test_b_000001"),
+        history.get("zzz_test_b_000001")
+    );
+
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_mf_store_dv").await;
+
+    let after_cleanup = load_persistent_market_feature_cache(&pool, &key, &symbols)
+        .await
+        .expect("load after cleanup");
+    assert!(
+        after_cleanup.is_none(),
+        "cleaned manifest must yield Ok(None)"
+    );
+}
+
+/// 42P01 = undefined_table：查询不存在的表触发真缺表错误（只读，无副作用）；
+/// SELECT 1/0 触发 22012（division_by_zero），应判非缺表。
+/// sqlx::Error 的 DatabaseError 无法离线构造，故用真实 Postgres 错误驱动两个分支。
+#[tokio::test]
+async fn db_is_missing_persistent_market_feature_cache_table_detects_42p01() {
+    let pool = db_test_pool().await;
+
+    let missing_table_error = sqlx::query("SELECT 1 FROM zzz_test_missing_cache_table_xyz")
+        .execute(&pool)
+        .await
+        .expect_err("querying a missing table must fail with 42P01");
+    assert!(is_missing_persistent_market_feature_cache_table(
+        &missing_table_error
+    ));
+
+    let other_db_error = sqlx::query("SELECT 1/0")
+        .execute(&pool)
+        .await
+        .expect_err("division by zero must fail with 22012");
+    assert!(!is_missing_persistent_market_feature_cache_table(
+        &other_db_error
+    ));
+}
+
+/// 写路径（自清理）：小规模真实参数（2 个高流动性 symbol × 1.5 个月窗口）。
+/// score_days 为空 + RawMatrix → 预热走 return_history / amount_history 持久缓存路径。
+#[tokio::test]
+async fn db_prewarm_market_feature_cache_persists_and_reuses_zzz_test_key() {
+    let pool = db_test_pool().await;
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_prewarm_dv").await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let data_version_id = "zzz_test_prewarm_dv";
+
+    let mut cache = SignalDataCache::default();
+    let report = prewarm_market_feature_cache(
+        &pool,
+        &mut cache,
+        data_version_id,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 10),
+        dbd(2026, 9, 11),
+        dbd(2026, 9, 18),
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+        5,
+        &symbols,
+        &[],
+        ReturnRiskFeatureCacheMode::RawMatrix,
+    )
+    .await
+    .expect("prewarm market feature cache with small real window");
+
+    assert_eq!(report.symbol_count, 2);
+    assert_eq!(report.lookback_days, 5);
+    assert!(report.cache_delta.persistent_return_history_writes >= 1);
+    assert!(report.cache_delta.persistent_average_amount_history_writes >= 1);
+
+    // 全新内存缓存二次预热：命中已写入的持久缓存。
+    let mut cache2 = SignalDataCache::default();
+    let before2 = cache2.stats();
+    let report2 = prewarm_market_feature_cache(
+        &pool,
+        &mut cache2,
+        data_version_id,
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 10),
+        dbd(2026, 9, 11),
+        dbd(2026, 9, 18),
+        dbd(2026, 8, 1),
+        dbd(2026, 9, 18),
+        5,
+        &symbols,
+        &[],
+        ReturnRiskFeatureCacheMode::RawMatrix,
+    )
+    .await
+    .expect("second prewarm hits persistent cache");
+    let after2 = cache2.stats();
+    assert_eq!(report2.symbol_count, 2);
+    assert!(
+        after2.persistent_return_history_hits - before2.persistent_return_history_hits >= 1,
+        "second prewarm must hit persisted return history"
+    );
+    assert!(
+        after2.persistent_average_amount_history_hits
+            - before2.persistent_average_amount_history_hits
+            >= 1,
+        "second prewarm must hit persisted amount history"
+    );
+
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_prewarm_dv").await;
+}
+
+/// 写路径（自清理）：真实 combo + 候选池截断（score_candidate_pool_size=20），
+/// 覆盖私有 load_factor_signal_feature_prewarm_candidate（经 pub 入口逐 spec 调用）。
+/// 数据依据：full_pit_icir_37f_h20_fund_v2 / 1.0.0（见首个 combo 测试注释），
+/// 2026-07-01 ~ 2026-09-18 约 56 个交易日，rebalance_freq_days=20 → ≥2 个 score day。
+#[tokio::test]
+async fn db_prewarm_factor_signal_batch_feature_cache_with_real_combo() {
+    let pool = db_test_pool().await;
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_batch_dv").await;
+
+    let spec = FactorSignalFeaturePrewarmSpec {
+        data_version_id: "zzz_test_batch_dv".to_string(),
+        train_start: dbd(2026, 7, 1),
+        train_end: dbd(2026, 8, 31),
+        test_start: dbd(2026, 9, 1),
+        test_end: dbd(2026, 9, 18),
+        feature_start: dbd(2026, 7, 1),
+        feature_end: dbd(2026, 9, 18),
+        config: SignalConfig {
+            combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+            version: "1.0.0".into(),
+            score_candidate_pool_size: Some(20),
+            ..Default::default()
+        },
+        regime_policy: None,
+        return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode::RawMatrix,
+    };
+
+    let mut cache = SignalDataCache::default();
+    let report = prewarm_factor_signal_batch_feature_cache(&pool, &mut cache, &[spec])
+        .await
+        .expect("prewarm factor signal batch feature cache with real combo");
+
+    assert_eq!(report.requested_specs, 1);
+    assert_eq!(
+        report.candidate_specs, 1,
+        "real combo must yield candidates"
+    );
+    assert_eq!(report.skipped_empty_specs, 0);
+    assert_eq!(report.unique_feature_groups, 1);
+    assert!(
+        report.total_symbol_count > 0,
+        "candidates must carry symbols"
+    );
+    assert!(!report.groups.is_empty());
+
+    cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_batch_dv").await;
+}

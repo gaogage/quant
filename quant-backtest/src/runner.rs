@@ -2472,4 +2472,225 @@ mod tests {
         };
         assert!(backtest_task_parameters(&config).is_object());
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // DB 连库集成（只读；连本地 postgres://gaocheng@localhost/quant，真实生产数据）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// 构造 NaiveDate 的简写。
+    fn dbd(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
+    }
+
+    /// 连接本地 quant 库（先例：quant-factor/src/repository.rs 的 tests 模式）。
+    async fn db_test_pool() -> PgPool {
+        PgPool::connect("postgres://gaocheng@localhost/quant")
+            .await
+            .expect("connect local quant db")
+    }
+
+    /// 数据依据（psql 2026-09-20 核实）：
+    /// `SELECT MIN(trade_date), MAX(trade_date) FROM market_trade_calendar
+    ///  WHERE exchange='SSE' AND is_open` → 1990-12-19 ~ 2026-12-31。
+    /// 2026-01-03 为周六（非交易日），2026-01-05 为周一（交易日）。
+    #[tokio::test]
+    async fn db_load_trading_days_returns_sse_calendar_and_cache_hits() {
+        let runner = BacktestRunner::new(db_test_pool().await);
+
+        let days = runner
+            .load_trading_days(dbd(2026, 1, 1), dbd(2026, 1, 31))
+            .await
+            .expect("load SSE trading calendar");
+        assert!(!days.is_empty());
+        assert!(
+            days.windows(2).all(|pair| pair[0] < pair[1]),
+            "ascending order"
+        );
+        assert!(days
+            .iter()
+            .all(|day| *day >= dbd(2026, 1, 1) && *day <= dbd(2026, 1, 31)));
+        assert!(days.contains(&dbd(2026, 1, 5)), "Monday 2026-01-05 is open");
+        assert!(
+            !days.contains(&dbd(2026, 1, 3)),
+            "Saturday 2026-01-03 is closed"
+        );
+
+        // cached 版本：首调用 miss，二次调用命中内存缓存。
+        let mut cache = BacktestDataCache::default();
+        let first = runner
+            .load_trading_days_cached(&mut cache, dbd(2026, 1, 1), dbd(2026, 1, 31))
+            .await
+            .expect("first cached load from DB");
+        let mid = cache.stats();
+        assert_eq!(mid.trading_day_misses, 1);
+        assert_eq!(first, days);
+
+        let second = runner
+            .load_trading_days_cached(&mut cache, dbd(2026, 1, 1), dbd(2026, 1, 31))
+            .await
+            .expect("second cached load from memory");
+        let after = cache.stats();
+        assert_eq!(after.trading_day_hits, mid.trading_day_hits + 1);
+        assert_eq!(after.trading_day_misses, mid.trading_day_misses);
+        assert_eq!(second, days);
+    }
+
+    /// 数据依据（psql 2026-09-20 核实）：
+    /// `SELECT symbol, MIN(trade_date), MAX(trade_date), COUNT(*) FROM market_index_daily_bar
+    ///  WHERE symbol='000300.SH' GROUP BY 1` → 2009-01-05 ~ 2026-09-18 / 4,304 行。
+    #[tokio::test]
+    async fn db_load_benchmark_data_returns_real_index_bars_and_cache_hits() {
+        let runner = BacktestRunner::new(db_test_pool().await);
+
+        let data = runner
+            .load_benchmark_data("000300.SH", dbd(2026, 9, 1), dbd(2026, 9, 18))
+            .await
+            .expect("load real benchmark bars");
+        assert!(!data.is_empty());
+        assert!(data
+            .keys()
+            .all(|day| *day >= dbd(2026, 9, 1) && *day <= dbd(2026, 9, 18)));
+        assert!(data.contains_key(&dbd(2026, 9, 18)));
+        for (close, pre_close) in data.values() {
+            assert!(*close > Decimal::zero());
+            assert!(*pre_close > Decimal::zero());
+        }
+
+        // cached 版本：首调用 miss，二次调用命中内存缓存。
+        let mut cache = BacktestDataCache::default();
+        let first = runner
+            .load_benchmark_data_cached(&mut cache, "000300.SH", dbd(2026, 9, 1), dbd(2026, 9, 18))
+            .await
+            .expect("first cached benchmark load from DB");
+        let mid = cache.stats();
+        assert_eq!(mid.benchmark_data_misses, 1);
+        assert_eq!(first.len(), data.len());
+
+        let second = runner
+            .load_benchmark_data_cached(&mut cache, "000300.SH", dbd(2026, 9, 1), dbd(2026, 9, 18))
+            .await
+            .expect("second cached benchmark load from memory");
+        let after = cache.stats();
+        assert_eq!(after.benchmark_data_hits, mid.benchmark_data_hits + 1);
+        assert_eq!(after.benchmark_data_misses, mid.benchmark_data_misses);
+        assert_eq!(second.len(), data.len());
+    }
+
+    /// 数据依据（psql 2026-09-20 核实）：
+    /// `SELECT symbol, MIN(trade_date), MAX(trade_date), COUNT(*) FROM market_stock_daily_bar_adj
+    ///  WHERE symbol IN ('600519.SH','000001.SZ') GROUP BY 1`
+    /// → 两 symbol 均覆盖 2006-01-04 ~ 2026-09-18（600519.SH 4,772 行）。
+    #[tokio::test]
+    async fn db_load_daily_bars_returns_real_stock_bars_and_cache_hits() {
+        let runner = BacktestRunner::new(db_test_pool().await);
+        let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+
+        let bars = runner
+            .load_daily_bars(
+                "zzz_test_runner_dv",
+                &symbols,
+                dbd(2026, 9, 1),
+                dbd(2026, 9, 18),
+            )
+            .await
+            .expect("load real stock daily bars");
+        assert!(!bars.is_empty());
+        let last_day = bars
+            .keys()
+            .max()
+            .expect("daily bars must span at least one day");
+        assert_eq!(*last_day, dbd(2026, 9, 18));
+        let last_day_bars = &bars[last_day];
+        assert!(last_day_bars.contains_key("600519.SH"));
+        assert!(last_day_bars.contains_key("000001.SZ"));
+        for (open, close, pre_close, amount) in last_day_bars.values() {
+            assert!(*open > Decimal::zero());
+            assert!(*close > Decimal::zero());
+            assert!(*pre_close > Decimal::zero());
+            assert!(*amount >= Decimal::zero());
+        }
+
+        // cached 版本：data_version_id 仅作内存缓存键（无 DB 写），首调用 2 symbol miss，
+        // 二次调用 2 symbol 命中。
+        let mut cache = BacktestDataCache::default();
+        let first = runner
+            .load_daily_bars_cached(
+                &mut cache,
+                "zzz_test_runner_dv",
+                &symbols,
+                dbd(2026, 9, 1),
+                dbd(2026, 9, 18),
+            )
+            .await
+            .expect("first cached daily bars load from DB");
+        let mid = cache.stats();
+        assert_eq!(mid.daily_bar_symbol_misses, 2);
+        assert_eq!(first.len(), bars.len());
+
+        let second = runner
+            .load_daily_bars_cached(
+                &mut cache,
+                "zzz_test_runner_dv",
+                &symbols,
+                dbd(2026, 9, 1),
+                dbd(2026, 9, 18),
+            )
+            .await
+            .expect("second cached daily bars load from memory");
+        let after = cache.stats();
+        assert_eq!(after.daily_bar_symbol_hits, mid.daily_bar_symbol_hits + 2);
+        assert_eq!(after.daily_bar_symbol_misses, mid.daily_bar_symbol_misses);
+        assert_eq!(second.len(), bars.len());
+    }
+
+    /// 数据依据（psql 2026-09-20 核实）：
+    /// `SELECT symbol, exchange, market, is_st FROM market_stock
+    ///  WHERE symbol IN ('600519.SH','000001.SZ')`
+    /// → 600519.SH: SSE/主板/非ST；000001.SZ: SZSE/主板/非ST。
+    #[tokio::test]
+    async fn db_load_trading_profiles_returns_real_profiles_and_cache_hits() {
+        let runner = BacktestRunner::new(db_test_pool().await);
+        let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+
+        let profiles = runner
+            .load_trading_profiles(&symbols)
+            .await
+            .expect("load real trading profiles");
+        let maotai = profiles
+            .get("600519.SH")
+            .expect("600519.SH trading profile");
+        assert_eq!(maotai.exchange.as_deref(), Some("SSE"));
+        assert_eq!(maotai.market.as_deref(), Some("主板"));
+        assert!(!maotai.is_st);
+        let pingan = profiles
+            .get("000001.SZ")
+            .expect("000001.SZ trading profile");
+        assert_eq!(pingan.exchange.as_deref(), Some("SZSE"));
+        assert!(!pingan.is_st);
+
+        // cached 版本：首调用 2 symbol miss，二次调用 2 symbol 命中。
+        let mut cache = BacktestDataCache::default();
+        let first = runner
+            .load_trading_profiles_cached(&mut cache, &symbols)
+            .await
+            .expect("first cached trading profiles load from DB");
+        let mid = cache.stats();
+        assert_eq!(mid.trading_profile_symbol_misses, 2);
+        assert_eq!(first.len(), 2);
+
+        let second = runner
+            .load_trading_profiles_cached(&mut cache, &symbols)
+            .await
+            .expect("second cached trading profiles load from memory");
+        let after = cache.stats();
+        assert_eq!(
+            after.trading_profile_symbol_hits,
+            mid.trading_profile_symbol_hits + 2
+        );
+        assert_eq!(
+            after.trading_profile_symbol_misses,
+            mid.trading_profile_symbol_misses
+        );
+        assert_eq!(second.len(), 2);
+    }
 }
