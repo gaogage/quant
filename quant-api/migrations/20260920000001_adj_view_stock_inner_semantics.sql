@@ -1,14 +1,19 @@
--- 后复权视图(2026-09-17 P1-2 定版; 2026-09-20 任务71 stock 语义收紧):
---   OHLC×因子 + pct_change 总回报口径; pct_change = 复权序列日收益(与 close 同空间),
---   raw 表保留原始价格涨跌。
+-- 任务71: market_stock_daily_bar_adj 视图 stock 语义收紧(2026-09-20)
 --
--- stock 完备性门禁(2026-09-20, 任务71):
---   股票(instrument_type='stock')缺 adj_factor 的行**直接消失**, 不再 COALESCE(1.0)
---   静默混入未复权 raw 价——宁可缺行不可错价(复权是绩效评估基石, 缺失由
---   account_health 复权因子检查逐股 100% 门禁抓取)。
---   ETF/指数分支维持放行: 指数(不在 market_stock)无复权概念, adj 缺失为语义正确;
---   ETF 仅策略池有 adj 体系(独立检查项覆盖), 非策略池 ETF 走 COALESCE(1.0)=raw。
---   股票数据完备时(bar⊆adj), 本视图输出与旧版 LEFT JOIN 逐位一致(audit hash 守卫)。
+-- 背景: 2026-07-24~08-04 复权因子缺口 7 个交易日(199~742 只/日), 视图对缺 adj 行
+-- COALESCE(adj_factor,1.0) 静默返回未复权 raw 价——错误价格混入因子/MVO/回测序列,
+-- 且无任何告警(比例阈值 90% 又漏报 3 天)。用户定版: 复权是绩效评估基石,
+-- 宁可缺行不可错价, 100% 完备。
+--
+-- 改动: LEFT JOIN market_stock 判定 instrument_type——
+--   stock: 缺 adj 的行从视图消失(WHERE a.symbol IS NOT NULL 对 stock 强制生效)
+--   etf:   维持放行(仅策略池有 adj 体系, 独立检查项覆盖)
+--   指数(不在 market_stock): 维持放行(无复权概念, 语义正确)
+--
+-- 前置(已验证): stock 2014+ bar⊆adj=0(缺口 15 行已补); adj_factor 全表零 NULL;
+--   market_stock.symbol 唯一。数据完备时本视图与旧版输出逐位一致。
+-- 执行后须过: 视图行数/价格锚点与改前一致 + audit hash 2/2 不变。
+
 CREATE OR REPLACE VIEW market_stock_daily_bar_adj AS
 SELECT b.symbol,
        b.trade_date,

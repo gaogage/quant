@@ -760,72 +760,59 @@ async fn check_account_deps(
                 None,
             ));
 
-            let (
-                a_adj_expected_days,
-                a_adj_days,
-                a_adj_min_expected,
-                a_adj_min_symbols,
-                a_adj_weak_days,
-            ): (i64, i64, i64, i64, i64) = sqlx::query_as(
-                "WITH calendar AS (
+            // 复权因子逐股完备性检查（2026-09-20 任务71 定版，用户纪律：复权是绩效
+            // 评估基石，必须 100% 准确且完整——比例阈值废弃（90% 曾漏报 3 个缺口日，
+            // 90.8%~96.2% 卡阈值上方，缺 199~477 只/日未告警）。
+            // 判据：区间内每个交易日，股票(instrument_type='stock')有行情(bar)而无
+            // 复权因子的行数必须为 0。ETF 仅策略池有 adj 体系（独立检查项覆盖）、
+            // 指数（不在 market_stock）无复权概念——均不纳入，避免结构性误报。
+            let (a_adj_expected_days, a_adj_days, a_adj_miss_rows): (i64, i64, i64) =
+                sqlx::query_as(
+                    "WITH calendar AS (
                SELECT DISTINCT trade_date
                FROM market_trade_calendar
                WHERE is_open = true AND trade_date >= $1 AND trade_date <= $2
              ),
-             expected AS (
-               SELECT c.trade_date, COUNT(DISTINCT s.symbol)::int8 AS expected_symbols
-               FROM calendar c
-               JOIN market_stock s
-                 ON s.symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
-                AND s.list_date IS NOT NULL
-                AND s.list_date <= c.trade_date
-                AND (s.delist_date IS NULL OR s.delist_date >= c.trade_date)
-               GROUP BY c.trade_date
+             covered AS (
+               SELECT DISTINCT a.trade_date
+               FROM market_adjustment_factor a
+               JOIN calendar c ON c.trade_date = a.trade_date
+               WHERE a.symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
              ),
-             actual AS (
-               SELECT trade_date, COUNT(DISTINCT symbol)::int8 AS actual_symbols
-               FROM market_adjustment_factor
-               WHERE symbol ~ '^[036][0-9]{5}\\.(SH|SZ)$'
-                 AND trade_date >= $1 AND trade_date <= $2
-               GROUP BY trade_date
+             missing AS (
+               SELECT COUNT(*)::int8 AS miss_rows
+               FROM market_stock_daily_bar b
+               JOIN market_stock s
+                 ON s.symbol::text = b.symbol::text AND s.instrument_type = 'stock'
+               LEFT JOIN market_adjustment_factor a
+                 ON a.symbol::text = b.symbol::text AND a.trade_date = b.trade_date
+               WHERE b.trade_date >= $1 AND b.trade_date <= $2 AND a.symbol IS NULL
              )
-             SELECT COUNT(e.trade_date)::int8,
-                    COUNT(a.trade_date)::int8,
-                    COALESCE(MIN(e.expected_symbols), 0)::int8,
-                    COALESCE(MIN(a.actual_symbols), 0)::int8,
-                    COUNT(*) FILTER (
-                      WHERE COALESCE(a.actual_symbols, 0) * 100 < e.expected_symbols * 90
-                    )::int8
-             FROM expected e
-             LEFT JOIN actual a USING(trade_date)",
-            )
-            .bind(start)
-            .bind(end)
-            .fetch_one(db)
-            .await
-            .unwrap_or((0, 0, 0, 0, 0));
-            let a_adj_level =
-                if a_adj_days < a_adj_expected_days || a_adj_expected_days < expected_days {
-                    "red"
-                } else if a_adj_weak_days > 0 {
-                    "yellow"
-                } else {
-                    "green"
-                };
+             SELECT (SELECT COUNT(*) FROM calendar)::int8,
+                    (SELECT COUNT(*) FROM covered)::int8,
+                    (SELECT miss_rows FROM missing)::int8",
+                )
+                .bind(start)
+                .bind(end)
+                .fetch_one(db)
+                .await
+                .unwrap_or((0, 0, 0));
+            let a_adj_level = if a_adj_days < a_adj_expected_days
+                || a_adj_expected_days < expected_days
+                || a_adj_miss_rows > 0
+            {
+                "red"
+            } else {
+                "green"
+            };
             out.push(check_item(
                 acct,
                 sid,
                 "A股复权因子区间覆盖",
                 a_adj_level,
                 format!(
-                    "{}~{} 期望{}个交易日，覆盖{}天；按上市/退市口径单日最少{}/{}只，低于90%天数{}",
-                    start,
-                    end,
-                    expected_days,
-                    a_adj_days,
-                    a_adj_min_symbols,
-                    a_adj_min_expected,
-                    a_adj_weak_days
+                    "{}~{} 期望{}个交易日，覆盖{}天；stock 逐股完备性：有行情无复权因子 {} 行（要求 0）",
+                    start, end, expected_days, a_adj_days, a_adj_miss_rows
                 ),
                 Some("/api/v1/quant/data/sync/adj-factor/background"),
                 Some(json!({
