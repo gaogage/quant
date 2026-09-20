@@ -960,11 +960,14 @@ mod daily_report_tests {
     async fn fetch_today_trades_empty_for_day_without_orders() {
         let db = test_db().await;
         let (account_id, _) = an_account_day_with_filled_orders(&db).await;
-        // 2020-01-01 远早于任何模拟账户下单（v24 系列 2026 年上线）
+        // 2019-06-15 早于全部历史单（最早为 SH 2020-01-02 回放单）。注意勿选
+        // 2020-01-01：历史回放单 created_at=业务日 SH 零点（=UTC 前日 16:00），
+        // sqlx session 时区 UTC 下 DATE() 比 psql（Asia/Shanghai）少一天，
+        // 2020-01-01 在 UTC 视角恰好命中 2020-01-02 的回放单（实证 30 笔）。
         let trades = fetch_today_trades(
             &db,
             &account_id,
-            chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2019, 6, 15).unwrap(),
         )
         .await
         .expect("fetch_today_trades ok");

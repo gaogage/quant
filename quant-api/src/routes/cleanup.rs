@@ -1248,9 +1248,9 @@ mod tests {
                   start_date, end_date, initial_capital, rebalance_frequency,
                   cost_model, slippage_model, execution_rules, parameters,
                   status, progress, mode, is_kept)
-               VALUES ($1, 'zzz_test', 'zzz_test', '000300.SH', ARRAY[]::text[],
+               VALUES ($1, 'factor-combo-v1', 'dv-t1-20260918', '000300.SH', ARRAY[]::text[],
                   '2026-01-05', '2026-01-09', 1000000, '10',
-                  '{}', '{}', '{}', '{}', 'completed', 100, 'backtest', true)"#,
+                  '{}', '{}', '{}', '{}', 'completed', 100, 'standard', true)"#,
         )
         .bind(tid)
         .execute(&db)
