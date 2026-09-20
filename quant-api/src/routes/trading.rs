@@ -477,6 +477,7 @@ pub async fn update_current_nav(db: &PgPool, account_id: &str) -> Result<f64, St
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use rust_decimal::Decimal;
 
     #[test]
@@ -520,5 +521,380 @@ mod tests {
         let slip = Decimal::new(2, 3); // 0.002
         let fill_price = target_price * (Decimal::ONE - slip);
         assert_eq!(fill_price, Decimal::new(9980, 2)); // 99.80
+    }
+
+    #[test]
+    fn short_id_yields_first_uuid_segment() {
+        let id = short_id();
+        assert!(!id.is_empty(), "short_id 非空");
+        assert!(!id.contains('-'), "只取 UUID 第一段: {id}");
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "应为 hex 片段: {id}"
+        );
+        // 连续生成不重复
+        assert_ne!(short_id(), short_id());
+    }
+
+    #[test]
+    fn biz_timestamp_uses_midnight_for_history_and_now_for_today() {
+        let historical = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let ts = biz_timestamp(historical);
+        assert_eq!(ts.timestamp_subsec_nanos(), 0, "历史日期应为该日 00:00 整");
+        assert_eq!(ts.date_naive(), historical);
+
+        let today = chrono::Local::now().date_naive();
+        let now_ts = biz_timestamp(today);
+        let now = chrono::Local::now();
+        let drift = (now_ts - now).num_seconds().abs();
+        assert!(drift <= 5, "今天应取真实时刻 now(): 偏差 {drift}s");
+    }
+}
+
+// ─── 第二批补充测试（DB 路径，真实本机 PG，zzz 键自造自清理）─────────────
+
+#[cfg(test)]
+mod db_second_batch {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 造 zzz 模拟账户：cash=100000 / margin=0 / reserve=5000，先清残留保证幂等。
+    async fn create_zzz_account(db: &sqlx::PgPool, account_id: &str) {
+        cleanup_account(db, account_id).await;
+        sqlx::query(
+            "INSERT INTO paper_account
+               (paper_account_id, name, initial_capital, cash, status,
+                account_type, signal_source, margin_amount, reserve_amount)
+             VALUES ($1, 'zzz 第二批交易测试', 100000, 100000, 'active',
+                'simulated', 'factor', 0, 5000)",
+        )
+        .bind(account_id)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_account");
+    }
+
+    /// 精确清理 zzz 账户的全部子表行（FK CASCADE 兜底前手动清，顺序无关化）。
+    async fn cleanup_account(db: &sqlx::PgPool, account_id: &str) {
+        for sql in [
+            "DELETE FROM paper_fill WHERE paper_account_id = $1",
+            "DELETE FROM paper_order WHERE paper_account_id = $1",
+            "DELETE FROM paper_margin_trade WHERE paper_account_id = $1",
+            "DELETE FROM paper_position WHERE paper_account_id = $1",
+        ] {
+            let _ = sqlx::query(sql).bind(account_id).execute(db).await;
+        }
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(db)
+            .await;
+    }
+
+    async fn account_balances(db: &sqlx::PgPool, account_id: &str) -> (Decimal, Decimal, Decimal) {
+        sqlx::query_as(
+            "SELECT COALESCE(cash,0), COALESCE(margin_amount,0), COALESCE(reserve_amount,0)
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(db)
+        .await
+        .expect("zzz account row")
+    }
+
+    #[tokio::test]
+    async fn update_current_nav_tracks_peak_and_drawdown_for_zzz_account() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api3_nav";
+        create_zzz_account(&db, account_id).await;
+
+        // 无持仓：nav = cash - margin = 100000；peak 初始化为 nav
+        let nav = update_current_nav(&db, account_id)
+            .await
+            .expect("nav update");
+        assert_eq!(nav, 100_000.0);
+        let (peak, dd): (Option<Decimal>, Option<Decimal>) = sqlx::query_as(
+            "SELECT peak_nav, max_drawdown_pct FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("zzz account");
+        assert_eq!(peak, Some(Decimal::from(100_000)));
+        assert_eq!(dd.unwrap_or(Decimal::ZERO), Decimal::ZERO, "无回撤");
+
+        // cash 降至 90000：nav 回撤 10%，peak 保持
+        sqlx::query("UPDATE paper_account SET cash = 90000 WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(&db)
+            .await
+            .expect("adjust cash");
+        let nav = update_current_nav(&db, account_id)
+            .await
+            .expect("nav update 2");
+        assert_eq!(nav, 90_000.0);
+        let (peak, dd): (Option<Decimal>, Option<Decimal>) = sqlx::query_as(
+            "SELECT peak_nav, max_drawdown_pct FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("zzz account 2");
+        assert_eq!(peak, Some(Decimal::from(100_000)), "peak 水位线单调保持");
+        let dd = dd.unwrap_or(Decimal::ZERO);
+        assert!(
+            (dd - Decimal::new(1, 1)).abs() < Decimal::new(1, 4),
+            "回撤应约 10%: {dd}"
+        );
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn margin_borrow_and_repay_roundtrip_on_zzz_account() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api3_margin";
+        create_zzz_account(&db, account_id).await;
+
+        // 金额校验拒绝分支
+        let err = execute_margin_borrow(&db, account_id, Decimal::ZERO, "zzz")
+            .await
+            .expect_err("零额借款应拒绝");
+        assert!(err.contains("大于0"), "拒绝信息应说明金额须为正: {err}");
+        let err = execute_margin_repay(&db, account_id, Decimal::from(-5), "zzz")
+            .await
+            .expect_err("负额还款应拒绝");
+        assert!(err.contains("大于0"), "拒绝信息应说明金额须为正: {err}");
+
+        // 借款 1000：cash↑ margin↑
+        let trade_id = execute_margin_borrow(&db, account_id, Decimal::from(1000), "zzz 借款")
+            .await
+            .expect("borrow");
+        assert!(trade_id.starts_with("mt-"), "融资流水 id 前缀: {trade_id}");
+        let (cash, margin, _) = account_balances(&db, account_id).await;
+        assert_eq!(cash, Decimal::from(101_000));
+        assert_eq!(margin, Decimal::from(1000));
+
+        // 超额还款拒绝
+        let err = execute_margin_repay(&db, account_id, Decimal::from(2000), "zzz")
+            .await
+            .expect_err("超额还款应拒绝");
+        assert!(
+            err.contains("超过当前融资金额"),
+            "拒绝信息应说明超额: {err}"
+        );
+
+        // 正常还款 400
+        let trade_id = execute_margin_repay(&db, account_id, Decimal::from(400), "zzz 还款")
+            .await
+            .expect("repay");
+        assert!(trade_id.starts_with("mt-"));
+        let (cash, margin, _) = account_balances(&db, account_id).await;
+        assert_eq!(cash, Decimal::from(100_600));
+        assert_eq!(margin, Decimal::from(600));
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn try_auto_repay_settles_excess_cash_above_reserve_on_zzz_account() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api3_autorepay";
+        create_zzz_account(&db, account_id).await;
+        execute_margin_borrow(&db, account_id, Decimal::from(800), "zzz 借款")
+            .await
+            .expect("borrow");
+
+        // cash=100800, reserve=5000 → excess=95800 > margin=800 → 全额归还 800
+        let repaid = try_auto_repay(&db, account_id)
+            .await
+            .expect("auto repay")
+            .expect("应触发自动归还");
+        assert!(repaid.starts_with("mt-"), "自动归还产生还款流水: {repaid}");
+        let (cash, margin, _) = account_balances(&db, account_id).await;
+        assert_eq!(margin, Decimal::ZERO, "excess 超过 margin 时全额归还");
+        assert_eq!(cash, Decimal::from(100_000), "归还 800 后现金回到本金");
+
+        // margin=0 后再触发：无事可还
+        let again = try_auto_repay(&db, account_id)
+            .await
+            .expect("auto repay again");
+        assert!(again.is_none(), "无融资时不再产生流水");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn execute_simulated_trade_fills_order_with_fees_on_zzz_account() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api3_sim";
+        create_zzz_account(&db, account_id).await;
+
+        // 买 100 股 @10.00，滑点 0.2%
+        let (order_id, fill_id) = execute_simulated_trade(
+            &db,
+            &PlannedTrade {
+                account_id: account_id.to_string(),
+                symbol: "510300.SH".to_string(),
+                side: "buy".to_string(),
+                target_quantity: Decimal::from(100),
+                target_price: Decimal::new(1000, 2), // 10.00
+                price_upper_limit: None,
+                price_lower_limit: None,
+                slippage_pct: 0.002,
+                target_value: Decimal::from(1000),
+                reason: Some("zzz 第二批模拟成交测试".to_string()),
+                strategy_version_id: None,
+                trade_date: None,
+            },
+        )
+        .await
+        .expect("simulated trade");
+        assert!(order_id.starts_with("po-"));
+        assert!(fill_id.starts_with("pf-"));
+
+        let (status,): (String,) =
+            sqlx::query_as("SELECT status FROM paper_order WHERE order_id = $1")
+                .bind(&order_id)
+                .fetch_one(&db)
+                .await
+                .expect("zzz order row");
+        assert_eq!(status, "filled", "模拟成交后订单状态 filled");
+
+        let (fill_price, quantity, commission, tax): (Decimal, Decimal, Decimal, Decimal) =
+            sqlx::query_as(
+                "SELECT price, quantity, commission, tax FROM paper_fill WHERE fill_id = $1",
+            )
+            .bind(&fill_id)
+            .fetch_one(&db)
+            .await
+            .expect("zzz fill row");
+        // 成交价 = 10.00 × (1 + 0.002) = 10.02
+        assert_eq!(fill_price, Decimal::new(1002, 2), "买入滑点抬高成交价");
+        assert_eq!(quantity, Decimal::from(100));
+        // 佣金 = max(1002 × 万2.5, 5) = 5（触发最低佣金）；买入无印花税
+        assert_eq!(commission, Decimal::from(5), "小额成交触发最低佣金 5 元");
+        assert_eq!(tax, Decimal::ZERO, "买入免印花税");
+
+        // 费用现金扣减独立成笔：cash 100000 - 5
+        let (cash, _, _) = account_balances(&db, account_id).await;
+        assert_eq!(cash, Decimal::from(99_995), "费用从现金扣除");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn create_planned_trade_supports_business_date_backfill() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api3_plan";
+        create_zzz_account(&db, account_id).await;
+
+        // 历史重放：显式 trade_date → created_at 为该业务日
+        let order_id = create_planned_trade(
+            &db,
+            &PlannedTrade {
+                account_id: account_id.to_string(),
+                symbol: "518880.SH".to_string(),
+                side: "buy".to_string(),
+                target_quantity: Decimal::from(10),
+                target_price: Decimal::new(7000, 2),
+                price_upper_limit: None,
+                price_lower_limit: None,
+                slippage_pct: 0.0,
+                target_value: Decimal::from(700),
+                reason: None,
+                strategy_version_id: None,
+                trade_date: Some(chrono::NaiveDate::from_ymd_opt(2026, 6, 15).unwrap()),
+            },
+        )
+        .await
+        .expect("planned trade with date");
+        // biz_timestamp 以本地时区（Asia/Shanghai）零点写入；读回须按同侧时区取日期
+        // （裸 ::date 走连接会话时区 UTC 会少一天——report 空日测试同源坑）。
+        let created_on: chrono::NaiveDate = sqlx::query_scalar(
+            "SELECT (created_at AT TIME ZONE 'Asia/Shanghai')::date FROM paper_order WHERE order_id = $1",
+        )
+        .bind(&order_id)
+        .fetch_one(&db)
+        .await
+        .expect("zzz order row");
+        assert_eq!(
+            created_on,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+            "历史重放订单应落业务日期"
+        );
+
+        // 常规调仓：无 trade_date → DB 默认 now()
+        let order_id = create_planned_trade(
+            &db,
+            &PlannedTrade {
+                account_id: account_id.to_string(),
+                symbol: "518880.SH".to_string(),
+                side: "sell".to_string(),
+                target_quantity: Decimal::from(10),
+                target_price: Decimal::new(7000, 2),
+                price_upper_limit: None,
+                price_lower_limit: None,
+                slippage_pct: 0.0,
+                target_value: Decimal::from(700),
+                reason: None,
+                strategy_version_id: None,
+                trade_date: None,
+            },
+        )
+        .await
+        .expect("planned trade without date");
+        let created_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT created_at FROM paper_order WHERE order_id = $1")
+                .bind(&order_id)
+                .fetch_one(&db)
+                .await
+                .expect("zzz order row");
+        let age = chrono::Utc::now()
+            .signed_duration_since(created_at)
+            .num_seconds()
+            .abs();
+        assert!(
+            age <= 60,
+            "无 trade_date 时 created_at 取当前时刻: 偏差 {age}s"
+        );
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn try_auto_repay_skips_when_cash_within_reserve() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api3_autorepay_hold";
+        create_zzz_account(&db, account_id).await;
+        execute_margin_borrow(&db, account_id, Decimal::from(300), "zzz 借款")
+            .await
+            .expect("borrow");
+
+        // cash 压到 reserve 之下：100300 - 96000 = 4300 < 5000
+        sqlx::query("UPDATE paper_account SET cash = 4300 WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(&db)
+            .await
+            .expect("drain cash");
+        let result = try_auto_repay(&db, account_id)
+            .await
+            .expect("auto repay skip");
+        assert!(result.is_none(), "现金低于保留额不应自动还款");
+        let (_, margin, _) = account_balances(&db, account_id).await;
+        assert_eq!(margin, Decimal::from(300), "融资保持不动");
+
+        // 不存在的账户同样返回 None（查询空 → Ok(None)）
+        let result = try_auto_repay(&db, "zzz_test_api3_no_such_account")
+            .await
+            .expect("missing account ok");
+        assert!(result.is_none());
+
+        cleanup_account(&db, account_id).await;
     }
 }

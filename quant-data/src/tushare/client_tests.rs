@@ -1,8 +1,8 @@
 //! client.rs 的 mock server 测试（Application 层覆盖率专项）。
 //!
 //! 覆盖：构造分支 / 参数组装 / 响应解码 / call_api 错误映射（业务码、
-//! HTTP 状态、解码失败、超时）/ 主备凭证配对切换（2026-09-15 行为）。
-//! 其余 30+ 薄封装接口与已测方法共用同一 call_api 模板，见报告跳过清单。
+//! HTTP 状态、解码失败、超时）/ 主备凭证配对切换（2026-09-15 行为）/
+//! 剩余 28 个薄封装接口的参数形态与 fields 白名单（表驱动批产）。
 
 use serde_json::{json, Value};
 
@@ -742,4 +742,680 @@ async fn primary_success_never_touches_fallback() {
 
     primary.shutdown();
     sentinel.shutdown();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 剩余 28 个薄封装接口批产（任务二）。
+//
+// 全部与已测方法共用同一 call_api 模板，此处统一断言三件事：
+// 1. 恰好发出一次指定 api 的调用；
+// 2. 参数组装形态（必传参数值 / None 参数不出现）；
+// 3. fields 白名单数量（固定 fields 的接口手算条数）。
+// 响应解码路径由共享的 call_api/serde 链路覆盖（EmptyOk 即走完整解码）。
+// ═══════════════════════════════════════════════════════════════
+
+/// 薄封装统一断言：恰好一次调用 + 参数形态 + fields 形态
+///
+/// `fields_len`: Some(n) 断言固定 fields 白名单恰 n 个；
+/// None 断言空 fields 序列化为 Some([])（非 null）。
+fn assert_thin_call(
+    mock: &MockTushare,
+    api: &str,
+    expect_params: &[(&str, Value)],
+    absent_params: &[&str],
+    fields_len: Option<usize>,
+) {
+    let reqs = mock.requests_for(api);
+    assert_eq!(reqs.len(), 1, "{} 应恰好调用一次", api);
+    for (key, value) in expect_params {
+        assert_eq!(
+            reqs[0].params.get(*key),
+            Some(value),
+            "{} 的 {} 参数：实际 {:?}",
+            api,
+            key,
+            reqs[0].params
+        );
+    }
+    for key in absent_params {
+        assert!(
+            !reqs[0].params.contains_key(*key),
+            "{} 不应出现 {} 参数（None 跳过），实际 {:?}",
+            api,
+            key,
+            reqs[0].params
+        );
+    }
+    match fields_len {
+        Some(n) => {
+            let fields = reqs[0]
+                .fields
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} 的 fields 应为 Some", api));
+            assert_eq!(fields.len(), n, "{} fields={:?}", api, fields);
+        }
+        None => assert!(
+            matches!(&reqs[0].fields, Some(f) if f.is_empty()),
+            "{} 空 fields 应序列化为 Some([])，实际 {:?}",
+            api,
+            reqs[0].fields
+        ),
+    }
+}
+
+/// 期货三接口 + 质押两接口（5 个薄封装）
+#[tokio::test]
+async fn futures_and_pledge_thin_wrappers_assemble_params_and_field_whitelists() {
+    let mock = spawn_mock_tushare(vec![
+        ("fut_daily", MockResponse::EmptyOk),
+        ("fut_wsr", MockResponse::EmptyOk),
+        ("fut_holding", MockResponse::EmptyOk),
+        ("pledge_stat", MockResponse::EmptyOk),
+        ("pledge_detail", MockResponse::EmptyOk),
+    ])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    // fut_daily：ts_code + trade_date + exchange + 分页；fields 16
+    // （pre_close..delv_settle 全量行情字段）
+    client
+        .fut_daily(
+            Some("ZZZ2609.SHFE"),
+            Some("20260803"),
+            Some("SHFE"),
+            None,
+            None,
+            Some(5000),
+            Some(0),
+        )
+        .await
+        .expect("fut_daily 应成功");
+    assert_thin_call(
+        &mock,
+        "fut_daily",
+        &[
+            ("ts_code", json!("ZZZ2609.SHFE")),
+            ("trade_date", json!("20260803")),
+            ("exchange", json!("SHFE")),
+            ("limit", json!("5000")),
+            ("offset", json!("0")),
+        ],
+        &["start_date", "end_date"],
+        Some(16),
+    );
+
+    // fut_wsr：trade_date + symbol（品种码非 ts_code）+ exchange + 分页；fields 17
+    client
+        .fut_wsr(
+            Some("20260803"),
+            Some("ZZZFUT"),
+            None,
+            None,
+            Some("SHFE"),
+            Some(5000),
+            Some(10000),
+        )
+        .await
+        .expect("fut_wsr 应成功");
+    assert_thin_call(
+        &mock,
+        "fut_wsr",
+        &[
+            ("trade_date", json!("20260803")),
+            ("symbol", json!("ZZZFUT")),
+            ("exchange", json!("SHFE")),
+            ("offset", json!("10000")),
+        ],
+        &["start_date", "end_date"],
+        Some(17),
+    );
+
+    // fut_holding：仅日期与品种（无分页）；fields 10（含 long_hld/short_hld）
+    client
+        .fut_holding(
+            Some("20260803"),
+            Some("ZZZFUT"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("fut_holding 应成功");
+    assert_thin_call(
+        &mock,
+        "fut_holding",
+        &[
+            ("trade_date", json!("20260803")),
+            ("symbol", json!("ZZZFUT")),
+        ],
+        &["limit", "offset", "exchange"],
+        Some(10),
+    );
+
+    // pledge_stat：ts_code + end_date（统计截止日）+ 分页；fields 7（无 ann_date）
+    client
+        .pledge_stat(Some("000001.SZ"), Some("20251231"), Some(5000), Some(0))
+        .await
+        .expect("pledge_stat 应成功");
+    assert_thin_call(
+        &mock,
+        "pledge_stat",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("end_date", json!("20251231")),
+            ("limit", json!("5000")),
+        ],
+        &[],
+        Some(7),
+    );
+
+    // pledge_detail：ts_code + ann_date（PIT 可得日）+ 窗口 + limit；fields 14
+    client
+        .pledge_detail(
+            Some("000001.SZ"),
+            Some("20260110"),
+            Some("20250101"),
+            Some("20251231"),
+            Some(5000),
+            None,
+        )
+        .await
+        .expect("pledge_detail 应成功");
+    assert_thin_call(
+        &mock,
+        "pledge_detail",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("ann_date", json!("20260110")),
+            ("start_date", json!("20250101")),
+            ("end_date", json!("20251231")),
+        ],
+        &["offset"],
+        Some(14),
+    );
+
+    mock.shutdown();
+}
+
+/// 股东结构四接口 + 事件类七接口（11 个薄封装）
+#[tokio::test]
+async fn shareholder_and_event_thin_wrappers_assemble_params() {
+    let mock = spawn_mock_tushare(vec![
+        ("stk_holdernumber", MockResponse::EmptyOk),
+        ("top10_holders", MockResponse::EmptyOk),
+        ("top10_floatholders", MockResponse::EmptyOk),
+        ("stk_holdertrade", MockResponse::EmptyOk),
+        ("block_trade", MockResponse::EmptyOk),
+        ("moneyflow_hsgt", MockResponse::EmptyOk),
+        ("margin", MockResponse::EmptyOk),
+        ("margin_detail", MockResponse::EmptyOk),
+        ("namechange", MockResponse::EmptyOk),
+        ("suspend_d", MockResponse::EmptyOk),
+        ("limit_list_d", MockResponse::EmptyOk),
+    ])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    // stk_holdernumber：ts_code + ann/end 窗口 + 分页；fields 4
+    client
+        .stk_holdernumber(
+            Some("000001.SZ"),
+            None,
+            Some("20250101"),
+            Some("20251231"),
+            Some(5000),
+            Some(0),
+        )
+        .await
+        .expect("stk_holdernumber 应成功");
+    assert_thin_call(
+        &mock,
+        "stk_holdernumber",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("start_date", json!("20250101")),
+            ("end_date", json!("20251231")),
+            ("limit", json!("5000")),
+        ],
+        &["ann_date"],
+        Some(4),
+    );
+
+    // top10_holders：ts_code + ann_date；fields 9（含 hold_change）
+    client
+        .top10_holders(Some("000001.SZ"), Some("20260110"), None, None, None, None)
+        .await
+        .expect("top10_holders 应成功");
+    assert_thin_call(
+        &mock,
+        "top10_holders",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("ann_date", json!("20260110")),
+        ],
+        &["start_date", "end_date", "limit"],
+        Some(9),
+    );
+
+    // top10_floatholders：ts_code + start/end 窗口 + 分页；fields 9
+    client
+        .top10_floatholders(
+            Some("000001.SZ"),
+            None,
+            Some("20250101"),
+            Some("20251231"),
+            Some(5000),
+            Some(0),
+        )
+        .await
+        .expect("top10_floatholders 应成功");
+    assert_thin_call(
+        &mock,
+        "top10_floatholders",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("start_date", json!("20250101")),
+            ("end_date", json!("20251231")),
+            ("offset", json!("0")),
+        ],
+        &["ann_date"],
+        Some(9),
+    );
+
+    // stk_holdertrade：仅 ann_date（全局按公告日）；fields 13
+    client
+        .stk_holdertrade(None, Some("20260110"), None, None, None, None)
+        .await
+        .expect("stk_holdertrade 应成功");
+    assert_thin_call(
+        &mock,
+        "stk_holdertrade",
+        &[("ann_date", json!("20260110"))],
+        &["ts_code", "start_date", "limit"],
+        Some(13),
+    );
+
+    // block_trade：ts_code + trade_date；fields 7（price/vol/amount/buyer/seller）
+    client
+        .block_trade(Some("000001.SZ"), Some("20260105"), None, None)
+        .await
+        .expect("block_trade 应成功");
+    assert_thin_call(
+        &mock,
+        "block_trade",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("trade_date", json!("20260105")),
+        ],
+        &["start_date", "end_date"],
+        Some(7),
+    );
+
+    // moneyflow_hsgt：start/end 成对（无 ts_code 维度）；空 fields
+    client
+        .moneyflow_hsgt(None, Some("20260101"), Some("20260131"))
+        .await
+        .expect("moneyflow_hsgt 应成功");
+    assert_thin_call(
+        &mock,
+        "moneyflow_hsgt",
+        &[
+            ("start_date", json!("20260101")),
+            ("end_date", json!("20260131")),
+        ],
+        &["trade_date"],
+        None,
+    );
+
+    // margin：单日 trade_date；空 fields
+    client
+        .margin(Some("20260105"), None, None)
+        .await
+        .expect("margin 应成功");
+    assert_thin_call(
+        &mock,
+        "margin",
+        &[("trade_date", json!("20260105"))],
+        &["start_date"],
+        None,
+    );
+
+    // margin_detail：ts_code + limit/offset；fields 11（证券级两融字段：
+    // trade_date/ts_code/name/rzye/rqye/rzmre/rqyl/rzche/rqchl/rqmcl/rzrqye）
+    client
+        .margin_detail(Some("000001.SZ"), None, None, None, Some(6000), Some(0))
+        .await
+        .expect("margin_detail 应成功");
+    assert_thin_call(
+        &mock,
+        "margin_detail",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("limit", json!("6000")),
+            ("offset", json!("0")),
+        ],
+        &["trade_date"],
+        Some(11),
+    );
+
+    // namechange：ts_code + end_date；空 fields
+    client
+        .namechange(Some("000001.SZ"), None, Some("20261231"))
+        .await
+        .expect("namechange 应成功");
+    assert_thin_call(
+        &mock,
+        "namechange",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("end_date", json!("20261231")),
+        ],
+        &["start_date"],
+        None,
+    );
+
+    // suspend_d：trade_date（单日停牌列表）；空 fields
+    client
+        .suspend_d(Some("20260105"), None, None, None)
+        .await
+        .expect("suspend_d 应成功");
+    assert_thin_call(
+        &mock,
+        "suspend_d",
+        &[("trade_date", json!("20260105"))],
+        &["ts_code", "start_date"],
+        None,
+    );
+
+    // limit_list_d：start/end 区间（无单日参数）；空 fields
+    client
+        .limit_list_d(None, None, Some("20260101"), Some("20260131"))
+        .await
+        .expect("limit_list_d 应成功");
+    assert_thin_call(
+        &mock,
+        "limit_list_d",
+        &[
+            ("start_date", json!("20260101")),
+            ("end_date", json!("20260131")),
+        ],
+        &["trade_date", "ts_code"],
+        None,
+    );
+
+    mock.shutdown();
+}
+
+/// 财务与行业类 12 个薄封装
+#[tokio::test]
+async fn financial_and_industry_thin_wrappers_assemble_params() {
+    let mock = spawn_mock_tushare(vec![
+        ("income", MockResponse::EmptyOk),
+        ("balancesheet", MockResponse::EmptyOk),
+        ("fina_indicator", MockResponse::EmptyOk),
+        ("fina_mainbz", MockResponse::EmptyOk),
+        ("fina_mainbz_vip", MockResponse::EmptyOk),
+        ("report_rc", MockResponse::EmptyOk),
+        ("cashflow", MockResponse::EmptyOk),
+        ("dividend", MockResponse::EmptyOk),
+        ("repurchase", MockResponse::EmptyOk),
+        ("share_float", MockResponse::EmptyOk),
+        ("index_classify", MockResponse::EmptyOk),
+        ("index_member_all", MockResponse::EmptyOk),
+    ])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    // income：ts_code 必填 + start_date；空 fields
+    client
+        .income("000001.SZ", Some("20250101"), None)
+        .await
+        .expect("income 应成功");
+    assert_thin_call(
+        &mock,
+        "income",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("start_date", json!("20250101")),
+        ],
+        &["end_date"],
+        None,
+    );
+
+    // balancesheet：ts_code + end_date；空 fields
+    client
+        .balancesheet("000001.SZ", None, Some("20251231"))
+        .await
+        .expect("balancesheet 应成功");
+    assert_thin_call(
+        &mock,
+        "balancesheet",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("end_date", json!("20251231")),
+        ],
+        &["start_date"],
+        None,
+    );
+
+    // fina_indicator：仅 ts_code；空 fields
+    client
+        .fina_indicator("000001.SZ", None, None)
+        .await
+        .expect("fina_indicator 应成功");
+    assert_thin_call(
+        &mock,
+        "fina_indicator",
+        &[("ts_code", json!("000001.SZ"))],
+        &["start_date", "end_date"],
+        None,
+    );
+
+    // fina_mainbz：ts_code + period + type（无公告日字段，PIT 需外部补）；fields 9
+    client
+        .fina_mainbz("000001.SZ", Some("20251231"), Some("P"), None, None)
+        .await
+        .expect("fina_mainbz 应成功");
+    assert_thin_call(
+        &mock,
+        "fina_mainbz",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("period", json!("20251231")),
+            ("type", json!("P")),
+        ],
+        &[],
+        Some(9),
+    );
+
+    // fina_mainbz_vip：period + 分页（无 ts_code，按报告期全市场）；fields 9
+    client
+        .fina_mainbz_vip("20251231", None, Some(5000), Some(0))
+        .await
+        .expect("fina_mainbz_vip 应成功");
+    assert_thin_call(
+        &mock,
+        "fina_mainbz_vip",
+        &[
+            ("period", json!("20251231")),
+            ("limit", json!("5000")),
+            ("offset", json!("0")),
+        ],
+        &["ts_code", "type"],
+        Some(9),
+    );
+
+    // report_rc：report_date + limit（卖方报告）；fields 23
+    client
+        .report_rc(None, Some("20260110"), None, None, Some(300), None)
+        .await
+        .expect("report_rc 应成功");
+    assert_thin_call(
+        &mock,
+        "report_rc",
+        &[("report_date", json!("20260110")), ("limit", json!("300"))],
+        &["ts_code", "offset"],
+        Some(23),
+    );
+
+    // cashflow：ts_code + 窗口 + 分页；fields 7（含 f_ann_date PIT 字段）
+    client
+        .cashflow(
+            "000001.SZ",
+            Some("20250101"),
+            Some("20251231"),
+            Some(2000),
+            Some(0),
+        )
+        .await
+        .expect("cashflow 应成功");
+    assert_thin_call(
+        &mock,
+        "cashflow",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("start_date", json!("20250101")),
+            ("end_date", json!("20251231")),
+            ("limit", json!("2000")),
+        ],
+        &[],
+        Some(7),
+    );
+
+    // dividend：ts_code + ann_date + ex_date（ex_date 非空时必传）；fields 14
+    // （含 2026-09-17 补的送转三字段）
+    client
+        .dividend(
+            "000001.SZ",
+            Some("20260110"),
+            None,
+            Some("20260121"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("dividend 应成功");
+    assert_thin_call(
+        &mock,
+        "dividend",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("ann_date", json!("20260110")),
+            ("ex_date", json!("20260121")),
+        ],
+        &["record_date", "imp_ann_date", "limit"],
+        Some(14),
+    );
+
+    // repurchase：ann_date + 分页（官方参数不含 ts_code）；fields 9
+    client
+        .repurchase(Some("20260110"), None, None, Some(2000), Some(0))
+        .await
+        .expect("repurchase 应成功");
+    assert_thin_call(
+        &mock,
+        "repurchase",
+        &[
+            ("ann_date", json!("20260110")),
+            ("limit", json!("2000")),
+            ("offset", json!("0")),
+        ],
+        &["ts_code"],
+        Some(9),
+    );
+
+    // share_float：ts_code + 解禁日窗口（无分页）；fields 7
+    client
+        .share_float(
+            Some("000001.SZ"),
+            None,
+            Some("20260101"),
+            Some("20260131"),
+            None,
+            None,
+        )
+        .await
+        .expect("share_float 应成功");
+    assert_thin_call(
+        &mock,
+        "share_float",
+        &[
+            ("ts_code", json!("000001.SZ")),
+            ("start_date", json!("20260101")),
+            ("end_date", json!("20260131")),
+        ],
+        &["ann_date", "limit", "offset"],
+        Some(7),
+    );
+
+    // index_classify：level + src（申万分类元数据）；fields 7
+    client
+        .index_classify(None, Some("L1"), None, Some("SW2021"))
+        .await
+        .expect("index_classify 应成功");
+    assert_thin_call(
+        &mock,
+        "index_classify",
+        &[("level", json!("L1")), ("src", json!("SW2021"))],
+        &["index_code", "parent_code"],
+        Some(7),
+    );
+
+    // index_member：801 前缀码映射 l1_code（fields 8 含 in_date/out_date/is_new）
+    client
+        .index_member(Some("801010.SI"), None, None, None, None)
+        .await
+        .expect("index_member 应成功");
+    assert_thin_call(
+        &mock,
+        "index_member_all",
+        &[("l1_code", json!("801010.SI"))],
+        &["l2_code", "l3_code", "ts_code", "limit", "offset"],
+        Some(8),
+    );
+
+    mock.shutdown();
+}
+
+/// index_member 的申万码前缀分发：801→l1 / 85→l3 / 其他→l2
+#[tokio::test]
+async fn index_member_dispatches_level_param_by_code_prefix() {
+    let mock = single_route("index_member_all", MockResponse::EmptyOk).await;
+    let client = client_for(&mock.base_url);
+
+    // 801 前缀（L1 码）→ l1_code
+    client
+        .index_member(Some("801010.SI"), None, None, None, None)
+        .await
+        .expect("801 前缀应成功");
+    // 85 前缀（L3 码）→ l3_code
+    client
+        .index_member(Some("851010.SI"), None, None, None, None)
+        .await
+        .expect("85 前缀应成功");
+    // 其他码段（非 801/85 开头）→ l2_code
+    client
+        .index_member(Some("700100.SI"), None, None, None, None)
+        .await
+        .expect("L2 码段应成功");
+
+    let reqs = mock.requests_for("index_member_all");
+    assert_eq!(reqs.len(), 3);
+    assert_eq!(reqs[0].params.get("l1_code"), Some(&json!("801010.SI")));
+    assert_eq!(reqs[1].params.get("l3_code"), Some(&json!("851010.SI")));
+    assert_eq!(reqs[2].params.get("l2_code"), Some(&json!("700100.SI")));
+    // 每次请求只带一个级别参数
+    for req in &reqs {
+        assert_eq!(
+            req.params.len(),
+            1,
+            "应只带一个级别参数，实际 {:?}",
+            req.params
+        );
+    }
+
+    mock.shutdown();
 }

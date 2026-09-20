@@ -625,3 +625,164 @@ pub(crate) async fn backfill_adj_factor_for_date(db: &sqlx::PgPool, date: NaiveD
         );
     }
 }
+
+// ─── 第二批补充测试（非 ignored，秒级，真实本机 PG）───────────────────────
+//
+// 安全边界：绝不触发真实 Tushare 同步（sync_* handler 不直调成功路径）；
+// backfill_adj_factor_for_date 只测空窗分支与覆盖率达标分支（均零写入）。
+// 覆盖率<90% 的补全分支会写生产 market_adjustment_factor，跳过。
+// quality_check 会写 data_quality_check 审计行，check_id 精确清理。
+
+#[cfg(test)]
+mod second_batch {
+    use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    async fn test_state() -> Arc<crate::AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let db = test_db().await;
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    async fn resp_json(resp: impl IntoResponse) -> serde_json::Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    async fn adj_count(db: &sqlx::PgPool, date: NaiveDate) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT symbol) FROM market_adjustment_factor WHERE trade_date = $1",
+        )
+        .bind(date)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn backfill_adj_factor_skips_non_trading_day_without_touching_data() {
+        let db = test_db().await;
+        // 2026-09-19 是周六：当日无 bar → 空窗提前返回，零写入
+        let saturday = NaiveDate::from_ymd_opt(2026, 9, 19).unwrap();
+        let before = adj_count(&db, saturday).await;
+        backfill_adj_factor_for_date(&db, saturday, "zzz_test_api4_adj").await;
+        let after = adj_count(&db, saturday).await;
+        assert_eq!(before, after, "非交易日空窗分支不应写 adj_factor");
+        // 未来无数据日期同样空窗
+        let future = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap();
+        let before = adj_count(&db, future).await;
+        backfill_adj_factor_for_date(&db, future, "zzz_test_api4_adj").await;
+        assert_eq!(before, adj_count(&db, future).await);
+    }
+
+    #[tokio::test]
+    async fn backfill_adj_factor_passes_through_when_coverage_sufficient() {
+        let db = test_db().await;
+        // 2026-09-18 是最近交易日：bar 5183 / adj 5572（>90%）→ 校验通过分支零写入
+        let trading_day = NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
+        let before = adj_count(&db, trading_day).await;
+        assert!(before > 0, "交易日应已有 adj_factor 基线");
+        backfill_adj_factor_for_date(&db, trading_day, "zzz_test_api4_adj").await;
+        assert_eq!(
+            before,
+            adj_count(&db, trading_day).await,
+            "覆盖率达标时不应触发前向填充"
+        );
+    }
+
+    #[tokio::test]
+    async fn data_stats_reports_positive_table_counts() {
+        let state = test_state().await;
+        let v = resp_json(data_stats(State(state)).await).await;
+        assert_eq!(v["code"], 0, "data_stats 应成功: {v}");
+        for key in [
+            "stock_count",
+            "bar_count",
+            "adj_factor_count",
+            "fin_statement_count",
+            "fin_indicator_count",
+        ] {
+            let count = v["data"][key].as_i64().unwrap_or(-1);
+            assert!(count > 0, "{key} 应为正数（真实库非空）: {v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn quality_check_zero_symbols_reports_zero_expected_and_cleans_report() {
+        let state = test_state().await;
+        let v = resp_json(
+            quality_check(
+                State(state.clone()),
+                Json(QualityCheckReq {
+                    symbols: vec![],
+                    start_date: "20260901".into(),
+                    end_date: "20260918".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 0, "quality_check 应成功: {v}");
+        assert_eq!(
+            v["data"]["expected_records"].as_i64(),
+            Some(0),
+            "空 symbols 期望 0"
+        );
+        assert_eq!(v["data"]["missing"].as_i64(), Some(0));
+        assert_eq!(
+            v["data"]["quality_score"].as_f64(),
+            Some(0.0),
+            "无样本时评分为 0"
+        );
+        // data_quality_check 审计行按返回的 check_id 精确清理
+        if let Some(check_id) = v["data"]["check_id"].as_str() {
+            let _ = sqlx::query("DELETE FROM data_quality_check WHERE check_id = $1")
+                .bind(check_id)
+                .execute(&state.db)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_adj_factor_backfill_rejects_malformed_date() {
+        let state = test_state().await;
+        let v = resp_json(
+            sync_adj_factor_backfill(
+                State(state),
+                Json(BackfillAdjFactorReq {
+                    date: "2026/09/18".into(), // 非 YYYYMMDD
+                    days: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "格式错误应拒绝: {v}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("date 格式错误"),
+            "错误信息应指出日期格式问题"
+        );
+    }
+}

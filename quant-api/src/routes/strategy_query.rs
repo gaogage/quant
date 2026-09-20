@@ -120,12 +120,18 @@ pub async fn load_active_combo_materialize_configs(db: &PgPool) -> Vec<ComboMate
                         .collect()
                 })
             });
-            let entry = map.entry(c).or_insert_with(|| ComboMaterializeConfig {
-                combo_name: String::new(),
-                include_fundamentals: false,
-                factor_whitelist: None,
-                combo_horizon: None,
-            });
+            // combo_name 必须在 or_insert_with 闭包内赋值（2026-09-20 真实生产 bug 修复：
+            // 此前恒为 String::new()，导致 scheduler.rs:942 的
+            // `filter(|c| c.combo_name.starts_with("full_pit_icir"))` 永远空集，
+            // PIT combo 因子保鲜任务自 7/31 引入起静默空转近两个月）。
+            let entry = map
+                .entry(c.clone())
+                .or_insert_with(|| ComboMaterializeConfig {
+                    combo_name: c,
+                    include_fundamentals: false,
+                    factor_whitelist: None,
+                    combo_horizon: None,
+                });
             if inc {
                 entry.include_fundamentals = true;
             }
@@ -218,5 +224,115 @@ pub async fn load_first_active_strategy_config(db: &PgPool) -> Option<StrategyCo
             warn!("[scheduler] 无 active 复合策略，跳过 ML 预测覆盖检查");
             None
         }
+    }
+}
+
+// ─── 第二批补充测试（非 ignored，秒级，真实本机 PG 只读）─────────────────
+
+#[cfg(test)]
+mod second_batch {
+    use super::*;
+
+    async fn test_db() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    // ── 纯函数 ──
+
+    #[test]
+    fn combo_horizon_from_name_extracts_positive_h_suffix() {
+        assert_eq!(combo_horizon_from_name("full_pit_icir_37f_h20"), 20);
+        assert_eq!(combo_horizon_from_name("combo_h1"), 1);
+        assert_eq!(combo_horizon_from_name("combo_h5"), 5);
+        // 无后缀回退 1
+        assert_eq!(combo_horizon_from_name("full_pit_icir_37f"), 1);
+        // 非法/非正数后缀回退 1
+        assert_eq!(combo_horizon_from_name("combo_h0"), 1);
+        assert_eq!(combo_horizon_from_name("combo_hx"), 1);
+        assert_eq!(combo_horizon_from_name("combo_h"), 1);
+        // rfind 取最后一个 _h：多段时取尾部
+        assert_eq!(combo_horizon_from_name("a_h5_h20"), 20);
+    }
+
+    // ── 只读查询（真实库）──
+
+    #[tokio::test]
+    async fn load_active_etf_symbols_union_returns_deduped_set() {
+        let db = test_db().await;
+        let symbols = load_active_etf_symbols_union(&db).await;
+        // active composite 策略（v24 系）均配置 518880.SH 黄金 ETF
+        assert!(
+            symbols.contains(&"518880.SH".to_string()),
+            "active 并集应含黄金 ETF: {symbols:?}"
+        );
+        // BTreeSet 去重且有序
+        let mut sorted = symbols.clone();
+        sorted.sort();
+        assert_eq!(symbols, sorted, "返回应去重且升序");
+    }
+
+    #[tokio::test]
+    async fn load_active_factor_combos_dedupes_active_declarations() {
+        let db = test_db().await;
+        let combos = load_active_factor_combos(&db).await;
+        assert!(!combos.is_empty(), "应至少有一个 active combo");
+        // v24 系 active 策略声明的两个 combo 必须出现（跨 composite/asset 去重后）
+        assert!(
+            combos.contains(&"full_pit_icir_indneutral_val_v1".to_string()),
+            "v24 composite combo 缺失: {combos:?}"
+        );
+        assert!(
+            combos.contains(&"full_pit_icir_37f_h20_fund_v2".to_string()),
+            "v24-a_share asset combo 缺失: {combos:?}"
+        );
+        // 无重复
+        let mut unique = combos.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(combos.len(), unique.len(), "combo 列表应已去重");
+    }
+
+    #[tokio::test]
+    async fn load_active_combo_materialize_configs_carries_whitelist_and_horizon() {
+        let db = test_db().await;
+        let configs = load_active_combo_materialize_configs(&db).await;
+        assert!(!configs.is_empty(), "应有 active combo 物化配置");
+        let mut combo_names: Vec<&str> = configs.iter().map(|c| c.combo_name.as_str()).collect();
+        combo_names.sort();
+        combo_names.dedup();
+        // 同名去重数应不增配置数（允许库内同前缀不同后缀的多条 active combo 共存）。
+        assert!(
+            combo_names.len() <= configs.len(),
+            "去重后条数不应超过原始条数"
+        );
+        // v24 主 combo 显式配置 horizon=20
+        let main = configs
+            .iter()
+            .find(|c| c.combo_name == "full_pit_icir_indneutral_val_v1")
+            .expect("v24 主 combo 配置");
+        assert_eq!(main.combo_horizon, Some(20));
+    }
+
+    #[tokio::test]
+    async fn load_strategy_config_resolves_active_v24_from_db() {
+        let db = test_db().await;
+        let cfg = load_strategy_config(&db, "v24").await;
+        assert_eq!(cfg.strategy_id, "v24");
+        assert_eq!(cfg.combo_name, "full_pit_icir_indneutral_val_v1");
+        assert!(!cfg.etf_symbols.is_empty(), "v24 应配置非空 ETF 列表");
+    }
+
+    #[tokio::test]
+    async fn load_first_active_strategy_config_returns_composite_strategy() {
+        let db = test_db().await;
+        let cfg = load_first_active_strategy_config(&db)
+            .await
+            .expect("存在 active composite 策略（v24）");
+        assert_eq!(
+            cfg.strategy_id, "v24",
+            "strategy_id 最小的 active composite"
+        );
     }
 }

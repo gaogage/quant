@@ -1169,3 +1169,263 @@ mod f1_combo_tests {
         assert!(total > 1_000_000, "全历史物化应超百万行，实际 {}", total);
     }
 }
+
+// ─── 第二批补充测试（非 ignored，秒级，真实本机 PG）───────────────────────
+//
+// 安全边界：物化成功路径写 multi_factor_value 全市场行（十万级），绝不直调——
+// 仅覆盖空区间零写入分支与不匹配版本的零写入分支；查询类直调真实数据断言。
+
+#[cfg(test)]
+mod second_batch {
+    use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    async fn test_state() -> Arc<crate::AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let db = test_db().await;
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    async fn resp_json(resp: impl IntoResponse) -> serde_json::Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    // ── handler 拒绝分支 ──
+
+    #[tokio::test]
+    async fn evaluate_rolling_pit_background_rejects_nonpositive_horizon() {
+        let state = test_state().await;
+        let v = resp_json(
+            evaluate_rolling_pit_background(
+                State(state),
+                Json(EvaluateRollingPitRequest {
+                    start_date: Some("2026-01-01".into()),
+                    end_date: Some("2026-06-30".into()),
+                    version: "1.0.0".into(),
+                    horizon: 0,
+                    train_lookback_days: None,
+                    max_windows: None,
+                    factor_codes: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "horizon=0 应被拒绝: {v}");
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("horizon must be positive"));
+    }
+
+    // ── 查询函数直调（真实库只读）──
+
+    #[tokio::test]
+    async fn load_rolling_pit_quarter_as_of_dates_returns_quarter_first_trade_days() {
+        let db = test_db().await;
+        let dates = load_rolling_pit_quarter_as_of_dates(&db, d(2026, 1, 1), d(2026, 6, 30), None)
+            .await
+            .expect("quarters");
+        assert_eq!(dates.len(), 2, "2026 H1 应有 2 个季度调仓点: {dates:?}");
+        // 每个调仓点是该季第一个交易日（1 月 / 4 月初，不晚于 1/15 与 4/15）
+        assert!(dates[0] >= d(2026, 1, 1) && dates[0] <= d(2026, 1, 15));
+        assert!(dates[1] >= d(2026, 4, 1) && dates[1] <= d(2026, 4, 15));
+    }
+
+    #[tokio::test]
+    async fn load_rolling_pit_quarter_as_of_dates_truncates_to_max_windows() {
+        let db = test_db().await;
+        let full = load_rolling_pit_quarter_as_of_dates(&db, d(2024, 1, 1), d(2026, 6, 30), None)
+            .await
+            .expect("quarters");
+        assert!(full.len() >= 6, "两年半至少 10 个季度，实际 {full:?}");
+        let truncated =
+            load_rolling_pit_quarter_as_of_dates(&db, d(2024, 1, 1), d(2026, 6, 30), Some(3))
+                .await
+                .expect("quarters truncated");
+        assert_eq!(truncated.len(), 3);
+        assert_eq!(&truncated, &full[..3], "截断保留最早的窗口");
+    }
+
+    #[tokio::test]
+    async fn load_candidate_technical_factors_errs_on_unknown_codes() {
+        let db = test_db().await;
+        let err = load_candidate_technical_factors(
+            &db,
+            "1.0.0",
+            20,
+            Some(&["zzz_test_api3_none".to_string()]),
+        )
+        .await
+        .expect_err("未知 code 应报错");
+        assert!(
+            err.contains("no active factor_definition"),
+            "错误信息应指出无定义: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_candidate_technical_factors_returns_specified_active_codes() {
+        let db = test_db().await;
+        // 自适应：从库中取一个 active 技术因子再指定它查询
+        let code: Option<String> = sqlx::query_scalar(
+            "SELECT factor_code FROM factor_definition
+             WHERE version='1.0.0' AND status='active'
+               AND factor_code !~ '^(cf_|div_|event_|fin_|external|margin_|mf_|north_|debt_|gross_|pe_|roe|ind_rel|mkt_rel|val_)'
+             ORDER BY factor_code LIMIT 1",
+        )
+        .fetch_optional(&db)
+        .await
+        .unwrap_or(None);
+        let Some(code) = code else {
+            panic!("库中应有至少一个 active 技术因子");
+        };
+        let rows =
+            load_candidate_technical_factors(&db, "1.0.0", 20, Some(std::slice::from_ref(&code)))
+                .await
+                .expect("specified codes");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, code);
+        assert_eq!(rows[0].1, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn load_candidate_technical_factors_full_scan_excludes_blacklisted_prefixes() {
+        let db = test_db().await;
+        let rows = load_candidate_technical_factors(&db, "1.0.0", 20, None)
+            .await
+            .expect("full scan");
+        assert!(!rows.is_empty(), "1.0.0 版本应有候选技术因子");
+        for (code, version) in &rows {
+            assert_eq!(version, "1.0.0");
+            for banned in ["fin_", "val_", "cf_", "div_", "event_", "north_", "margin_"] {
+                assert!(
+                    !code.starts_with(banned),
+                    "全量扫描不应包含黑名单前缀 {banned}: {code}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn previous_open_trade_date_steps_back_to_last_session() {
+        let db = test_db().await;
+        // 2026-09-19 是周六：应返回周五 2026-09-18
+        let prev = previous_open_trade_date(&db, d(2026, 9, 19))
+            .await
+            .expect("prev trade date");
+        assert_eq!(prev, d(2026, 9, 18));
+        assert!(prev < d(2026, 9, 19));
+        // 周一应返回上周五
+        let prev = previous_open_trade_date(&db, d(2026, 9, 21))
+            .await
+            .expect("prev trade date monday");
+        assert_eq!(prev, d(2026, 9, 18), "周一的上一交易日是上周五");
+    }
+
+    #[tokio::test]
+    async fn previous_open_trade_date_errs_when_calendar_has_no_earlier_day() {
+        let db = test_db().await;
+        let err = previous_open_trade_date(&db, d(1990, 1, 1))
+            .await
+            .expect_err("日历起点之前应报错");
+        assert!(
+            err.contains("no open trade date"),
+            "错误应说明无更早交易日: {err}"
+        );
+    }
+
+    // ── 物化零写入分支 ──
+
+    #[tokio::test]
+    async fn materialize_pit_combo_empty_range_writes_nothing() {
+        let db = test_db().await;
+        // start > end：季度查询空 → 循环 0 次，零写入
+        let rows = materialize_pit_combo(
+            &db,
+            "zzz_test_api3_combo",
+            "1.0.0",
+            20,
+            d(2026, 7, 1),
+            d(2026, 6, 1),
+        )
+        .await
+        .expect("empty range materialize");
+        assert_eq!(rows, 0);
+        // 确认零残留
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM multi_factor_value WHERE combo_name = 'zzz_test_api3_combo'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap_or(0);
+        assert_eq!(left, 0);
+    }
+
+    #[tokio::test]
+    async fn materialize_pit_combo_ext_ind_neutral_empty_range_writes_nothing() {
+        let db = test_db().await;
+        let params = PitComboMaterializeParams {
+            combo_name: "zzz_test_api3_combo",
+            factor_version: "1.0.0",
+            horizon: 20,
+            start_date: d(2026, 7, 1),
+            end_date: d(2026, 6, 1),
+            include_fundamentals: true,
+            min_abs_ic_ir: Some(0.2),
+            factor_whitelist: None,
+            ind_neutral: true,
+        };
+        let rows = materialize_pit_combo_ext(&db, &params)
+            .await
+            .expect("ind-neutral empty range");
+        assert_eq!(rows, 0, "空区间行业中性版同样零写入");
+    }
+
+    #[tokio::test]
+    async fn materialize_p42b_overlay_combo_missing_version_writes_nothing() {
+        let db = test_db().await;
+        // 不存在的 factor_version：pairs JOIN 空 → INSERT SELECT 0 行
+        let rows = materialize_p42b_overlay_combo(
+            &db,
+            "zzz_test_api3_overlay",
+            "zzz_test_api3_version",
+            d(2026, 6, 1),
+            d(2026, 6, 30),
+        )
+        .await
+        .expect("overlay missing version");
+        assert_eq!(rows, 0);
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM multi_factor_value WHERE combo_name = 'zzz_test_api3_overlay'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap_or(0);
+        assert_eq!(left, 0);
+    }
+}

@@ -2177,4 +2177,288 @@ mod tests {
             "Stock cumulative should exceed +100%"
         );
     }
+
+    // ─── 第二批补充：直调产品函数（此前测试仅镜像自测 helper）───────────
+
+    use axum::extract::{Path, State};
+    use axum::response::IntoResponse;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    async fn test_state() -> Arc<crate::AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let db = test_db().await;
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    async fn resp_json(resp: impl IntoResponse) -> Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    /// 构造 HS300 日频价格序列：ref_date 往回 days 天，首末价格 first..last 线性插值。
+    fn synthetic_hs300(ref_date: NaiveDate, days: i64, first: f64, last: f64) -> EquityCurve {
+        let mut curve = EquityCurve::new();
+        for i in 0..days {
+            let date = ref_date - chrono::Duration::days(days - i);
+            // 不含 ref_date 当日（compute_trailing_return 窗口为 [start, ref)）
+            let price = first + (last - first) * (i as f64) / (days as f64 - 1.0);
+            curve.insert(date.format("%Y-%m-%d").to_string(), price);
+        }
+        curve
+    }
+
+    #[test]
+    fn build_mvo_symbol_list_prepends_hs300_baseline() {
+        let symbols = build_mvo_symbol_list(&["518880.SH".to_string(), "511010.SH".to_string()]);
+        assert_eq!(symbols.len(), 3);
+        assert_eq!(symbols[0], "000300.SH", "HS300 基准固定在首位");
+        assert_eq!(symbols[1], "518880.SH");
+        // ETF 重复传入也保留原样（去重不是该函数职责）
+        let symbols = build_mvo_symbol_list(&["000300.SH".to_string()]);
+        assert_eq!(
+            symbols,
+            vec!["000300.SH".to_string(), "000300.SH".to_string()]
+        );
+    }
+
+    #[test]
+    fn compute_trailing_return_measures_window_return_with_min_days_gate() {
+        let ref_date = NaiveDate::from_ymd_opt(2026, 6, 30).unwrap();
+        // 200 天 +30% 行情
+        let mut prices = PriceMap::new();
+        prices.insert(
+            "000300.SH".to_string(),
+            synthetic_hs300(ref_date, 200, 100.0, 130.0),
+        );
+        let trail = compute_trailing_return(&prices, ref_date, 12).expect("trail");
+        assert!(
+            (trail - 0.30).abs() < 0.05,
+            "合成 +30% 行情 trailing 应≈0.30: {trail}"
+        );
+
+        // 数据点不足 50（<50 日）→ None
+        let mut thin = PriceMap::new();
+        thin.insert(
+            "000300.SH".to_string(),
+            synthetic_hs300(ref_date, 30, 100.0, 130.0),
+        );
+        assert_eq!(compute_trailing_return(&thin, ref_date, 12), None);
+
+        // 无 HS300 序列 → None
+        let empty: PriceMap = PriceMap::new();
+        assert_eq!(compute_trailing_return(&empty, ref_date, 12), None);
+    }
+
+    #[test]
+    fn regime_aware_min_stock_classifies_bull_bear_and_normal() {
+        let ref_date = NaiveDate::from_ymd_opt(2026, 6, 30).unwrap();
+        let mk = |first, last| {
+            let mut prices = PriceMap::new();
+            prices.insert(
+                "000300.SH".to_string(),
+                synthetic_hs300(ref_date, 200, first, last),
+            );
+            prices
+        };
+        // 牛市：+40% → 0.25
+        assert_eq!(regime_aware_min_stock(&mk(100.0, 140.0), ref_date), 0.25);
+        // 熊市：-25% → 0.08
+        assert_eq!(regime_aware_min_stock(&mk(100.0, 75.0), ref_date), 0.08);
+        // 震荡：+6% → 0.15
+        assert_eq!(regime_aware_min_stock(&mk(100.0, 106.0), ref_date), 0.15);
+    }
+
+    #[test]
+    fn compute_mvo_weights_pit_requires_sufficient_monthly_history() {
+        let ref_date = NaiveDate::from_ymd_opt(2026, 6, 30).unwrap();
+        // 仅 60 日 < 12 个月末 → None
+        let mut prices = PriceMap::new();
+        prices.insert(
+            "000300.SH".to_string(),
+            synthetic_hs300(ref_date, 60, 100.0, 120.0),
+        );
+        prices.insert(
+            "518880.SH".to_string(),
+            synthetic_hs300(ref_date, 60, 50.0, 60.0),
+        );
+        let symbols = vec!["000300.SH".to_string(), "518880.SH".to_string()];
+        assert_eq!(
+            compute_mvo_weights_pit(&prices, &symbols, ref_date, 3, 0.15, false),
+            None,
+            "不足 12 个月末的历史应拒绝"
+        );
+    }
+
+    #[test]
+    fn mvo_default_helpers_keep_stable_contract() {
+        assert_eq!(default_min_stock(), 0.50);
+        assert_eq!(default_mvo_lookback(), 36);
+        assert_eq!(default_top_n_mvo(), 20);
+        assert_eq!(default_dd_scale(), 1.0);
+        assert_eq!(default_rebalance_freq(), "annual");
+        assert_eq!(default_etf_symbols().len(), 4);
+        assert!(default_etf_symbols().contains(&"518880.SH".to_string()));
+        assert_eq!(default_min_stock_overlay(), 0.25);
+        assert_eq!(default_mvo_lookback_years(), 5);
+        assert_eq!(mvo_sim_default_etfs(), default_etf_symbols());
+        assert_eq!(mvo_sim_default_lookback(), 36);
+        assert_eq!(mvo_sim_default_min_stock(), 0.08);
+        assert_eq!(mvo_sim_default_rebalance(), "quarterly");
+    }
+
+    #[test]
+    fn compute_yearly_from_navs_splits_calendar_years() {
+        use crate::routes::mvo_engine::DailyNav;
+        let d = |y, m, day, r| DailyNav {
+            date: NaiveDate::from_ymd_opt(y, m, day).unwrap(),
+            nav: 1.0,
+            net_return: r,
+            leverage: 1.0,
+            regime: 0.0,
+        };
+        // 2024 +10%，2025 +20%
+        let navs = vec![
+            d(2024, 1, 5, 0.05),
+            d(2024, 12, 30, 0.047619),
+            d(2025, 1, 5, 0.10),
+            d(2025, 12, 30, 0.090909),
+        ];
+        let yearly = compute_yearly_from_navs(&navs);
+        assert_eq!(yearly.len(), 2, "两年两条记录: {yearly:?}");
+        assert_eq!(yearly[0]["year"], "2024");
+        let ret_2024 = yearly[0]["return_pct"].as_f64().unwrap();
+        let ret_2025 = yearly[1]["return_pct"].as_f64().unwrap();
+        assert!((ret_2024 - 10.0).abs() < 0.1, "2024 复利≈+10%: {ret_2024}");
+        assert!((ret_2025 - 20.0).abs() < 0.1, "2025 复利≈+20%: {ret_2025}");
+
+        // 空序列 → 空
+        assert!(compute_yearly_from_navs(&[]).is_empty());
+    }
+
+    // ── 真实库只读路径 ──
+
+    #[tokio::test]
+    async fn load_mvo_etf_prices_returns_full_history_for_index_and_etfs() {
+        let db = test_db().await;
+        let symbols = build_mvo_symbol_list(&default_etf_symbols());
+        let prices = load_mvo_etf_prices(&db, &symbols).await.expect("prices");
+        for sym in &symbols {
+            let curve = prices
+                .get(sym)
+                .unwrap_or_else(|| panic!("{sym} 缺价格序列"));
+            assert!(
+                curve.len() > 1000,
+                "{sym} 应有多年日频数据: {}",
+                curve.len()
+            );
+        }
+        // HS300 序列单调升序（BTreeMap 键排序）
+        let hs300 = &prices["000300.SH"];
+        let first = hs300.keys().next().unwrap();
+        let last = hs300.keys().last().unwrap();
+        assert!(first < last, "价格序列应按日期升序");
+    }
+
+    #[tokio::test]
+    async fn compute_mvo_weights_pit_allocates_on_real_three_year_history() {
+        let db = test_db().await;
+        let symbols = build_mvo_symbol_list(&default_etf_symbols());
+        let prices = load_mvo_etf_prices(&db, &symbols).await.expect("prices");
+        let test_start = NaiveDate::from_ymd_opt(2026, 6, 30).unwrap();
+        let weights = compute_mvo_weights_pit(&prices, &symbols, test_start, 3, 0.50, false);
+        let weights = weights.expect("3 年真实月度历史应产出 MVO 权重");
+        assert_eq!(weights.len(), symbols.len());
+        let sum: f64 = weights.iter().sum();
+        assert!((sum - 1.0).abs() < 0.02, "权重和应≈1: {sum}");
+        assert!(
+            weights[0] >= 0.49,
+            "HS300 权重应满足 min_stock 下限: {:?}",
+            weights
+        );
+    }
+
+    #[tokio::test]
+    async fn load_oos_equity_curves_returns_empty_for_unknown_run() {
+        let db = test_db().await;
+        let curves = load_oos_equity_curves(&db, "zzz_test_api3_no_such_run")
+            .await
+            .expect("oos curves");
+        assert!(curves.is_empty(), "未知 experiment_run 应返回空曲线集");
+    }
+
+    #[tokio::test]
+    async fn portfolio_report_rejects_unknown_task_and_serves_latest_task() {
+        let state = test_state().await;
+        let v = resp_json(
+            portfolio_report(
+                State(state.clone()),
+                Path("zzz_test_api3_no_such_task".to_string()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not found"));
+
+        // 动态取最新回测任务回读（库里存在 perf-db-smoke 任务）
+        let latest: Option<String> = sqlx::query_scalar(
+            "SELECT task_id FROM backtest_task ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+        let Some(task_id) = latest else {
+            panic!("backtest_task 应有至少一行历史任务");
+        };
+        let v =
+            resp_json(portfolio_report(State(state.clone()), Path(task_id.clone())).await).await;
+        assert_eq!(v["code"], 0, "真实任务应成功: {v}");
+        assert_eq!(v["data"]["task"]["task_id"], task_id);
+        for section in [
+            "targets",
+            "positions",
+            "exposures",
+            "attributions",
+            "violations",
+        ] {
+            assert!(v["data"][section].is_array(), "报告应含 {section} 数组节点");
+        }
+    }
+
+    #[tokio::test]
+    async fn portfolio_policy_rejects_unknown_policy() {
+        let state = test_state().await;
+        let v = resp_json(
+            portfolio_policy(
+                State(state),
+                Path("zzz_test_api3_no_such_policy".to_string()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not found"));
+    }
 }

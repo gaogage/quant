@@ -2149,3 +2149,562 @@ mod stale_pv_recompute_tests {
         Ok(n)
     }
 }
+
+// ─── 第二批补充测试（非 ignored，秒级，真实本机 PG）───────────────────────
+//
+// 写路径纪律：factor_definition / factor_value 只用 zzz_test_api2_ 前缀键
+// （版本号或 factor_code 带前缀，ON CONFLICT 唯一键与生产数据隔离），自造自清理。
+// batch_sync_factors / evaluate_all_factors 成功路径拉全市场重算，只测拒绝分支。
+// neutralize_factors 成功路径会 UPDATE 生产 factor_value.neutralized_value，跳过。
+
+#[cfg(test)]
+mod second_batch {
+    use super::*;
+    use axum::extract::{Path, Query, State};
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    async fn test_state() -> Arc<crate::AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let db = test_db().await;
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    async fn resp_json(resp: impl IntoResponse) -> serde_json::Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    // ── 纯函数 ──
+
+    #[tokio::test]
+    async fn list_factors_returns_the_registered_catalog() {
+        let v = resp_json(list_factors().await).await;
+        let factors = v["data"]["factors"].as_array().expect("factors array");
+        assert_eq!(v["code"], 0);
+        assert_eq!(factors.len(), 12, "目录固定 12 个量价因子");
+        assert!(factors
+            .iter()
+            .all(|f| f["name"].is_string() && f["category"] == "price_volume"));
+        let names: Vec<&str> = factors.iter().filter_map(|f| f["name"].as_str()).collect();
+        for expected in ["mom_5d", "vol_20d", "rev_5d", "turn_20d", "amihud_20d"] {
+            assert!(names.contains(&expected), "目录缺 {expected}");
+        }
+    }
+
+    #[test]
+    fn parse_factor_supports_std_suffix_and_extended_prefixes() {
+        assert_eq!(parse_factor("mom_5d_std"), Some(("momentum", 5)));
+        assert_eq!(parse_factor("vol_20d"), Some(("volatility", 20)));
+        assert_eq!(parse_factor("rsi_14d"), Some(("rsi", 14)));
+        assert_eq!(parse_factor("bb_pos_20d"), Some(("bb_position", 20)));
+        assert_eq!(parse_factor("atr_14d"), Some(("atr", 14)));
+        assert_eq!(parse_factor("amp_5d"), Some(("amplitude", 5)));
+        assert_eq!(parse_factor("vp_corr_20d"), Some(("vol_price_corr", 20)));
+        assert_eq!(parse_factor("skew_20d"), Some(("skewness", 20)));
+        assert_eq!(parse_factor("maxdd_60d"), Some(("max_drawdown", 60)));
+        // 非法输入
+        assert_eq!(parse_factor("mom_"), None);
+        assert_eq!(parse_factor("unknown_factor"), None);
+        assert_eq!(parse_factor("mom_xx"), None);
+    }
+
+    #[test]
+    fn parse_financial_factor_maps_source_columns() {
+        let roe = parse_financial_factor("roe").expect("roe spec");
+        assert_eq!(roe.code, "fin_roe");
+        assert_eq!(roe.source_column, "roe");
+        assert_eq!(roe.category, "fundamental");
+        // roe_ttm 与 roe 同源同 code
+        let roe_ttm = parse_financial_factor("roe_ttm").expect("roe_ttm spec");
+        assert_eq!(roe_ttm.code, "fin_roe");
+        assert!(
+            parse_financial_factor("no_such_fin").is_none(),
+            "未知金融因子应返回 None"
+        );
+    }
+
+    #[test]
+    fn normalize_filters_and_limits_for_definition_queries() {
+        assert_eq!(normalize_filter(Some("  ".into())), None, "空白过滤归 NULL");
+        assert_eq!(
+            normalize_filter(Some(" mom_5d_std ".into())),
+            Some("mom_5d_std".into())
+        );
+        assert_eq!(normalize_filter(None), None);
+        assert_eq!(normalize_limit(None), 100, "默认 limit 100");
+        assert_eq!(normalize_limit(Some(5)), 5);
+        assert_eq!(normalize_limit(Some(-3)), 1, "负数钳制到下限 1");
+        assert_eq!(normalize_limit(Some(9_999)), 500, "超上限钳制到 500");
+    }
+
+    // ── 只读 handler 直调（真实库）──
+
+    #[tokio::test]
+    async fn list_factor_definitions_filters_by_zzz_code_and_respects_limit() {
+        let state = test_state().await;
+        // 不存在的 code 过滤 → 空列表（真实库无 zzz 键）
+        let v = resp_json(
+            list_factor_definitions(
+                State(state.clone()),
+                Query(ListFactorDefinitionsQuery {
+                    factor_code: Some("zzz_test_api2_none".into()),
+                    version: None,
+                    category: None,
+                    status: None,
+                    limit: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 0);
+        assert_eq!(v["data"]["definitions"].as_array().unwrap().len(), 0);
+
+        // 无过滤 → 真实定义存在，limit=3 生效
+        let v = resp_json(
+            list_factor_definitions(
+                State(state.clone()),
+                Query(ListFactorDefinitionsQuery {
+                    factor_code: None,
+                    version: None,
+                    category: None,
+                    status: None,
+                    limit: Some(3),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 0);
+        assert_eq!(
+            v["data"]["definitions"].as_array().unwrap().len(),
+            3,
+            "limit=3 应精确限制返回数"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_factor_definition_reports_missing_definition() {
+        let state = test_state().await;
+        let v = resp_json(
+            get_factor_definition(
+                State(state),
+                Path(("zzz_test_api2_none".to_string(), "zzz-1".to_string())),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not found"),
+            "缺失定义应有明确错误: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_factor_computes_momentum_from_real_bars_with_zscore() {
+        let state = test_state().await;
+        let v = resp_json(
+            compute_factor(
+                State(state),
+                Json(ComputeFactorRequest {
+                    factor: "mom_5d".into(),
+                    symbols: Some(vec!["000001.SZ".into()]),
+                    start_date: Some("20260501".into()),
+                    end_date: Some("20260630".into()),
+                    standardize: Some("zscore".into()),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 0, "compute 应成功: {v}");
+        let count = v["data"]["value_count"].as_i64().unwrap_or(0);
+        assert!(count > 0, "真实 bar 区间应产出非空因子值: {v}");
+        // zscore 标准化开启时因子名追加 _std 后缀（标准化命名语义）。
+        assert_eq!(v["data"]["factor_name"], "mom_5d_std");
+    }
+
+    #[tokio::test]
+    async fn compute_factor_rejects_unknown_factor_without_touching_db() {
+        let state = test_state().await;
+        let v = resp_json(
+            compute_factor(
+                State(state),
+                Json(ComputeFactorRequest {
+                    factor: "zzz_test_api2_unknown".into(),
+                    symbols: None,
+                    start_date: None,
+                    end_date: None,
+                    standardize: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Unknown factor"));
+    }
+
+    #[tokio::test]
+    async fn evaluate_factor_computes_quantile_stats_from_real_bars() {
+        let state = test_state().await;
+        let v = resp_json(
+            evaluate_factor(
+                State(state),
+                Json(EvaluateFactorRequest {
+                    factor: "rev_5d".into(),
+                    symbols: Some(vec!["000001.SZ".into(), "000002.SZ".into()]),
+                    start_date: Some("20260401".into()),
+                    end_date: Some("20260630".into()),
+                    n_quantiles: 5,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 0, "evaluate 应成功: {v}");
+        assert!(v["data"].is_object(), "评估结果应为对象: {v}");
+    }
+
+    // ── zzz 写路径 handler 直调 ──
+
+    #[tokio::test]
+    async fn register_get_and_list_factor_definition_roundtrip_zzz() {
+        let state = test_state().await;
+        let factor_code = "zzz_test_api2_def";
+        let version = "zzz-1.0.0";
+        // 先清残留保证幂等
+        let _ = sqlx::query("DELETE FROM factor_definition WHERE factor_code = $1")
+            .bind(factor_code)
+            .execute(&state.db)
+            .await;
+
+        let v = resp_json(
+            register_factor_definition(
+                State(state.clone()),
+                Json(RegisterFactorDefinitionRequest {
+                    factor_code: factor_code.into(),
+                    version: version.into(),
+                    name: "zzz 第二批测试定义".into(),
+                    category: "zzz_test".into(),
+                    frequency: None,
+                    dependencies: Some(json!(["market_stock_daily_bar"])),
+                    parameters: None,
+                    status: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 0, "register 应成功: {v}");
+        assert_eq!(v["data"]["factor_code"], factor_code);
+        assert_eq!(v["data"]["status"], "active", "默认状态 active");
+
+        // get 回读
+        let v = resp_json(
+            get_factor_definition(
+                State(state.clone()),
+                Path((factor_code.to_string(), version.to_string())),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 0);
+        assert_eq!(v["data"]["name"], "zzz 第二批测试定义");
+        assert_eq!(v["data"]["dependencies"], json!(["market_stock_daily_bar"]));
+
+        // list 按 category 过滤命中
+        let v = resp_json(
+            list_factor_definitions(
+                State(state.clone()),
+                Query(ListFactorDefinitionsQuery {
+                    factor_code: None,
+                    version: None,
+                    category: Some("zzz_test".into()),
+                    status: None,
+                    limit: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let defs = v["data"]["definitions"].as_array().unwrap().clone();
+        assert!(
+            defs.iter()
+                .any(|d| d["factor_code"] == factor_code && d["version"] == version),
+            "category 过滤应命中 zzz 定义"
+        );
+
+        let _ = sqlx::query("DELETE FROM factor_definition WHERE factor_code = $1")
+            .bind(factor_code)
+            .execute(&state.db)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn register_factor_definition_rejects_blank_fields() {
+        let state = test_state().await;
+        let v = resp_json(
+            register_factor_definition(
+                State(state),
+                Json(RegisterFactorDefinitionRequest {
+                    factor_code: "   ".into(),
+                    version: "v1".into(),
+                    name: "name".into(),
+                    category: "cat".into(),
+                    frequency: None,
+                    dependencies: None,
+                    parameters: None,
+                    status: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("factor_code"));
+    }
+
+    #[tokio::test]
+    async fn sync_factor_values_persists_zzz_version_and_cleans_up() {
+        let state = test_state().await;
+        let version = "zzz_test_api2_sync";
+        // 清残留
+        let _ = sqlx::query("DELETE FROM factor_value WHERE factor_version = $1")
+            .bind(version)
+            .execute(&state.db)
+            .await;
+        let _ = sqlx::query("DELETE FROM factor_definition WHERE version = $1")
+            .bind(version)
+            .execute(&state.db)
+            .await;
+
+        let v = resp_json(
+            sync_factor_values(
+                State(state.clone()),
+                Json(SyncFactorRequest {
+                    factor: "mom_5d".into(),
+                    version: version.into(),
+                    symbols: Some(vec!["000001.SZ".into(), "000002.SZ".into()]),
+                    start_date: Some("20260501".into()),
+                    end_date: Some("20260630".into()),
+                    standardize: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 0, "sync 应成功: {v}");
+        let inserted = v["data"]["inserted"].as_i64().unwrap_or(0);
+        let total = v["data"]["total_values"].as_i64().unwrap_or(0);
+        assert!(inserted > 0, "真实 bar 应写入 zzz 版本因子值: {v}");
+        assert_eq!(inserted, total, "首次写入 inserted == total");
+
+        // zzz 版本 factor_value / factor_definition 均已落库
+        let value_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM factor_value WHERE factor_version = $1")
+                .bind(version)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or(0);
+        assert_eq!(value_rows, inserted, "落库行数与响应一致");
+        let def_status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM factor_definition WHERE factor_code = 'mom_5d' AND version = $1",
+        )
+        .bind(version)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+        assert_eq!(def_status.as_deref(), Some("active"), "sync 应同步注册定义");
+
+        // 清理
+        let _ = sqlx::query("DELETE FROM factor_value WHERE factor_version = $1")
+            .bind(version)
+            .execute(&state.db)
+            .await;
+        let _ = sqlx::query("DELETE FROM factor_definition WHERE version = $1")
+            .bind(version)
+            .execute(&state.db)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sync_financial_factor_values_persists_pit_rows_zzz_version() {
+        let state = test_state().await;
+        let version = "zzz_test_api2_fin";
+        let _ = sqlx::query("DELETE FROM factor_value WHERE factor_version = $1")
+            .bind(version)
+            .execute(&state.db)
+            .await;
+        let _ = sqlx::query("DELETE FROM factor_definition WHERE version = $1")
+            .bind(version)
+            .execute(&state.db)
+            .await;
+
+        let v = resp_json(
+            sync_financial_factor_values(
+                State(state.clone()),
+                Json(SyncFinancialFactorRequest {
+                    factor: "roe".into(),
+                    version: version.into(),
+                    symbols: Some(vec!["000001.SZ".into()]),
+                    start_date: Some("20250101".into()),
+                    end_date: Some("20260901".into()),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 0, "financial sync 应成功: {v}");
+        assert_eq!(v["data"]["factor_name"], "fin_roe");
+        assert_eq!(v["data"]["pit_date"], "ann_date");
+        let inserted = v["data"]["inserted"].as_i64().unwrap_or(0);
+        assert!(inserted > 0, "000001.SZ 2025-2026 财报应写入: {v}");
+
+        // PIT 断言：available_at == trade_date == ann_date（非 report_end_date）
+        let (trade_eq_avail,): (bool,) = sqlx::query_as(
+            "SELECT COUNT(*) FILTER (WHERE available_at = trade_date) = COUNT(*)
+             FROM factor_value WHERE factor_version = $1",
+        )
+        .bind(version)
+        .fetch_one(&state.db)
+        .await
+        .expect("pit check");
+        assert!(trade_eq_avail, "财务因子 available_at 必须等于公告日");
+
+        let _ = sqlx::query("DELETE FROM factor_value WHERE factor_version = $1")
+            .bind(version)
+            .execute(&state.db)
+            .await;
+        let _ = sqlx::query("DELETE FROM factor_definition WHERE version = $1")
+            .bind(version)
+            .execute(&state.db)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sync_factor_values_rejects_unknown_factor() {
+        let state = test_state().await;
+        let v = resp_json(
+            sync_factor_values(
+                State(state),
+                Json(SyncFactorRequest {
+                    factor: "zzz_test_api2_unknown".into(),
+                    version: "zzz_test_api2_x".into(),
+                    symbols: None,
+                    start_date: None,
+                    end_date: None,
+                    standardize: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Unknown factor"));
+    }
+
+    #[tokio::test]
+    async fn sync_financial_factor_values_rejects_unknown_factor() {
+        let state = test_state().await;
+        let v = resp_json(
+            sync_financial_factor_values(
+                State(state),
+                Json(SyncFinancialFactorRequest {
+                    factor: "zzz_test_api2_unknown".into(),
+                    version: "zzz_test_api2_x".into(),
+                    symbols: None,
+                    start_date: None,
+                    end_date: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Unknown financial factor"));
+    }
+
+    #[tokio::test]
+    async fn batch_sync_factors_rejects_unknown_factor_without_writing() {
+        let state = test_state().await;
+        let v = resp_json(
+            batch_sync_factors(
+                State(state),
+                Json(BatchSyncRequest {
+                    factor: "zzz_test_api2_unknown".into(),
+                    version: "zzz_test_api2_x".into(),
+                    start_date: None,
+                    end_date: None,
+                    standardize: None,
+                    chunk_size: 10,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unknown factor"));
+    }
+
+    #[tokio::test]
+    async fn neutralize_factors_rejects_missing_factor_values() {
+        let state = test_state().await;
+        let v = resp_json(
+            neutralize_factors(
+                State(state),
+                Json(NeutralizeRequest {
+                    factor: "zzz_test_api2_none".into(),
+                    start_date: "2026-06-01".into(),
+                    end_date: "2026-06-30".into(),
+                    do_industry: false,
+                    do_size: false,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no factor values found"));
+    }
+}
