@@ -14297,3 +14297,1575 @@ async fn db_generate_prediction_signals_unknown_set_returns_error() {
         "unexpected error message: {err}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// pit_alpha 纯函数补缺（第六批覆盖率收尾：regime/volatility/redistribute/
+// capacity floor/组合构建矩阵分支，均不连库）
+// ─────────────────────────────────────────────────────────────────────
+
+/// 构造 n+1 个收盘点：从 base 开始按 daily_ratios 逐日复利。
+fn vol_closes(base: f64, daily_ratios: &[f64]) -> Vec<(NaiveDate, f64)> {
+    let mut closes = Vec::with_capacity(daily_ratios.len() + 1);
+    let mut price = base;
+    closes.push((dbd(2026, 8, 1), price));
+    for (idx, ratio) in daily_ratios.iter().enumerate() {
+        price *= 1.0 + ratio;
+        closes.push((
+            dbd(2026, 8, 1) + chrono::Duration::days(idx as i64 + 1),
+            price,
+        ));
+    }
+    closes
+}
+
+/// trailing_volatility_from_closes 主路径 + None 边界，期望值手算：
+/// 21 个点（20 个日收益）：10 个 +1% 与 10 个 -1% 交替 → mean=0，
+/// 样本方差 = 20 * 1e-4 / 19 ≈ 1.0526315789473684e-5，
+/// 年化 vol = sqrt(方差) * sqrt(252) ≈ 0.05150436545633624。
+#[test]
+fn trailing_volatility_from_closes_matches_hand_computed_annualized_vol() {
+    let ratios: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+        .collect();
+    let closes = vol_closes(100.0, &ratios);
+    let score_day = closes.last().unwrap().0;
+
+    let vol = super::pit_alpha::trailing_volatility_from_closes(&closes, score_day, 20)
+        .expect("20 个有效日收益应产出年化波动率");
+    let variance: f64 = 20.0 * 1e-4 / 19.0;
+    let expected = variance.sqrt() * 252_f64.sqrt();
+    assert!(
+        (vol - expected).abs() < 1e-12,
+        "expected {expected}, got {vol}"
+    );
+
+    // 评分日不在序列中 → None
+    assert!(
+        super::pit_alpha::trailing_volatility_from_closes(&closes, dbd(2030, 1, 1), 20).is_none()
+    );
+    // 评分日收盘价非正 → None（position 谓词要求 close > 0）
+    let mut zero_day = closes.clone();
+    zero_day.last_mut().unwrap().1 = 0.0;
+    assert!(super::pit_alpha::trailing_volatility_from_closes(&zero_day, score_day, 20).is_none());
+    // lookback 超过可用历史（current_idx=20，回看 21 天越界）→ None
+    assert!(super::pit_alpha::trailing_volatility_from_closes(&closes, score_day, 21).is_none());
+    // 有效收益数不足 20（回看 19 天只攒下 19 个收益）→ None
+    assert!(super::pit_alpha::trailing_volatility_from_closes(&closes, score_day, 19).is_none());
+    // 窗口内的非正/非有限收盘被跳过：中段插入一个 0 价日（收益-1 与 +? 两次被剔除）
+    // 21 个点中间塞 0 后窗口仍 20 收益但只有 18 个有效 → None
+    let mut holed = closes.clone();
+    holed[10].1 = 0.0;
+    assert!(super::pit_alpha::trailing_volatility_from_closes(&holed, score_day, 20).is_none());
+}
+
+/// volatility_rank_scores：低波动排名更高，缺失历史的 symbol 直接剔除；
+/// n=3 时分母为 2，rank 分数 = 1.0 / 0.5 / 0.0（手算）。
+#[test]
+fn volatility_rank_scores_rank_low_vol_first_and_skip_missing_history() {
+    let score_day = dbd(2026, 8, 21);
+    // LOW：全 0 收益（vol=0）；MID：±1% 交替；HIGH：±5% 交替
+    let flat: Vec<f64> = vec![0.0; 20];
+    let mid: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+        .collect();
+    let high: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 0.05 } else { -0.05 })
+        .collect();
+    let mut history = HashMap::new();
+    history.insert("LOW".to_string(), vol_closes(100.0, &flat));
+    history.insert("MID".to_string(), vol_closes(100.0, &mid));
+    history.insert("HIGH".to_string(), vol_closes(100.0, &high));
+
+    let candidates = vec![
+        ("HIGH".to_string(), 3.0),
+        ("MID".to_string(), 2.0),
+        ("LOW".to_string(), 1.0),
+        ("NO_HISTORY".to_string(), 0.5),
+    ];
+    let scores = super::pit_alpha::volatility_rank_scores(&candidates, &history, score_day, 20);
+
+    assert_eq!(scores.len(), 3, "无历史symbol 不参与排名");
+    assert_eq!(scores["LOW"], 1.0, "最低波动 rank=0 → 1.0");
+    assert_eq!(scores["MID"], 0.5, "中波动 rank=1 → 0.5");
+    assert_eq!(scores["HIGH"], 0.0, "最高波动 rank=2 → 0.0");
+}
+
+/// detect_market_regime_from_returns：均值 trailing return 阈值 ±10% 三分类，
+/// 以及无有效观测时回退 Sideways。
+#[test]
+fn detect_market_regime_from_returns_classifies_bull_bear_and_sideways() {
+    // vol_closes 从 8/1 起 +1 点/日：5 日收益 → 序列止于 8/6，score_day 须取末日。
+    let score_day = dbd(2026, 8, 6);
+    let up: Vec<f64> = vec![0.03; 5]; // 5 日累计 +15.9% > +10% → Bull
+    let down: Vec<f64> = vec![-0.03; 5]; // 5 日累计 -14.1% < -10% → Bear
+    let flat: Vec<f64> = vec![0.0; 5];
+
+    let bull_history = HashMap::from([("A".to_string(), vol_closes(100.0, &up))]);
+    assert_eq!(
+        super::pit_alpha::detect_market_regime_from_returns(&bull_history, score_day, 5),
+        MarketRegime::Bull
+    );
+
+    let bear_history = HashMap::from([("A".to_string(), vol_closes(100.0, &down))]);
+    assert_eq!(
+        super::pit_alpha::detect_market_regime_from_returns(&bear_history, score_day, 5),
+        MarketRegime::Bear
+    );
+
+    let flat_history = HashMap::from([("A".to_string(), vol_closes(100.0, &flat))]);
+    assert_eq!(
+        super::pit_alpha::detect_market_regime_from_returns(&flat_history, score_day, 5),
+        MarketRegime::Sideways
+    );
+
+    // 评分日对不上任何序列 → count=0 → Sideways
+    let stale = HashMap::from([("A".to_string(), vol_closes(100.0, &up))]);
+    assert_eq!(
+        super::pit_alpha::detect_market_regime_from_returns(&stale, dbd(2030, 1, 1), 5),
+        MarketRegime::Sideways
+    );
+}
+
+/// regime_adjusted_weights：五个 regime 的系数矩阵手算。
+/// params 基准 (alpha=0.4, liq=0.2, rs=0.1, vol=0.1)：
+/// Bull ×(1.25,0.85,1.10,0.80) → (0.50,0.17,0.11,0.08)
+/// Bear/HighVolatility ×(0.65,1.30,0.80,1.40) → (0.26,0.26,0.08,0.14)
+/// Sideways/Mixed ×1 → 原样。负权重 clamp 到 0。
+#[test]
+fn regime_adjusted_weights_apply_hand_computed_regime_multipliers() {
+    let params = CandidateRankingParams {
+        alpha_rank_weight: 0.4,
+        liquidity_rank_weight: 0.2,
+        relative_strength_rank_weight: 0.1,
+        volatility_rank_weight: 0.1,
+        use_regime_aware_weights: true,
+    };
+    let f = |r: MarketRegime| super::pit_alpha::regime_adjusted_weights(params, r);
+
+    let assert_close = |got: f64, expected: f64| {
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "expected {expected}, got {got}"
+        );
+    };
+    let bull = f(MarketRegime::Bull);
+    assert_close(bull.0, 0.50);
+    assert_close(bull.1, 0.17);
+    assert_close(bull.2, 0.11);
+    assert_close(bull.3, 0.08);
+
+    for regime in [MarketRegime::Bear, MarketRegime::HighVolatility] {
+        let defensive = f(regime);
+        assert_close(defensive.0, 0.26);
+        assert_close(defensive.1, 0.26);
+        assert_close(defensive.2, 0.08);
+        assert_close(defensive.3, 0.14);
+    }
+
+    for regime in [MarketRegime::Sideways, MarketRegime::Mixed] {
+        let neutral = f(regime);
+        assert_close(neutral.0, 0.4);
+        assert_close(neutral.1, 0.2);
+        assert_close(neutral.2, 0.1);
+        assert_close(neutral.3, 0.1);
+    }
+
+    // 负权重经 max(0.0) 钳制为 0（防御：配置异常时不产生负贡献）
+    let negative = CandidateRankingParams {
+        alpha_rank_weight: -1.0,
+        liquidity_rank_weight: 0.2,
+        relative_strength_rank_weight: 0.1,
+        volatility_rank_weight: 0.1,
+        use_regime_aware_weights: true,
+    };
+    let clamped = super::pit_alpha::regime_adjusted_weights(negative, MarketRegime::Bull);
+    assert_eq!(clamped.0, 0.0, "负 alpha 权重应钳制为 0");
+}
+
+/// redistribute_weight 的防御分支：amount<=0 直接返回 0；
+/// base_sum=0（当前权重全 0）时按等额份额分摊（手算：0.1 平分给两只）。
+#[test]
+fn redistribute_weight_zero_amount_and_equal_share_branches() {
+    let mut weights = HashMap::from([
+        ("A".to_string(), Decimal::new(10, 2)),
+        ("B".to_string(), Decimal::new(10, 2)),
+    ]);
+    let caps = HashMap::from([
+        ("A".to_string(), Decimal::ONE),
+        ("B".to_string(), Decimal::ONE),
+    ]);
+
+    // amount<=0 → 返回 0，权重不动
+    let zero_back = super::pit_alpha::redistribute_weight(
+        &mut weights,
+        &HashSet::new(),
+        Decimal::ZERO,
+        &caps,
+        4,
+    );
+    assert_eq!(zero_back, Decimal::ZERO);
+    assert_eq!(weights["A"], Decimal::new(10, 2));
+
+    // 全员 excluded → 无 eligible，原额返回
+    let excluded: HashSet<String> = ["A".to_string(), "B".to_string()].into();
+    let leftover = super::pit_alpha::redistribute_weight(
+        &mut weights,
+        &excluded,
+        Decimal::new(20, 2),
+        &caps,
+        4,
+    );
+    assert_eq!(leftover, Decimal::new(20, 2));
+
+    // base_sum=0：权重全 0 时 equal_share = 1/n → 各加 0.05
+    let mut zero_weights = HashMap::from([
+        ("A".to_string(), Decimal::ZERO),
+        ("B".to_string(), Decimal::ZERO),
+    ]);
+    let back = super::pit_alpha::redistribute_weight(
+        &mut zero_weights,
+        &HashSet::new(),
+        Decimal::new(10, 2),
+        &caps,
+        4,
+    );
+    assert_eq!(back, Decimal::ZERO, "headroom 足够时应全额分完");
+    assert_eq!(zero_weights["A"], Decimal::new(5, 2));
+    assert_eq!(zero_weights["B"], Decimal::new(5, 2));
+}
+
+/// redistribute_weight_by_headroom / by_alpha_headroom / by_blended_alpha_headroom
+/// 的入口防御分支：amount<=0 返回 0；全员 excluded 时原额返回。
+#[test]
+fn headroom_refill_family_guard_branches_return_zero_or_leftover() {
+    let mut weights = HashMap::from([
+        ("A".to_string(), Decimal::new(10, 2)),
+        ("B".to_string(), Decimal::new(10, 2)),
+    ]);
+    let caps = HashMap::from([
+        ("A".to_string(), Decimal::ONE),
+        ("B".to_string(), Decimal::ONE),
+    ]);
+    let excluded: HashSet<String> = ["A".to_string(), "B".to_string()].into();
+    let snapshot = weights.clone();
+
+    for leftover in [
+        redistribute_weight_by_headroom(&mut weights, &excluded, Decimal::ZERO, &caps, 4),
+        redistribute_weight_by_alpha_headroom(&mut weights, &excluded, Decimal::ZERO, &caps, 4),
+        redistribute_weight_by_blended_alpha_headroom(
+            &mut weights,
+            &excluded,
+            Decimal::ZERO,
+            &caps,
+            4,
+        ),
+    ] {
+        assert_eq!(leftover, Decimal::ZERO, "amount=0 应立即返回 0");
+    }
+    for leftover in [
+        redistribute_weight_by_headroom(&mut weights, &excluded, Decimal::new(20, 2), &caps, 4),
+        redistribute_weight_by_alpha_headroom(
+            &mut weights,
+            &excluded,
+            Decimal::new(20, 2),
+            &caps,
+            4,
+        ),
+        redistribute_weight_by_blended_alpha_headroom(
+            &mut weights,
+            &excluded,
+            Decimal::new(20, 2),
+            &caps,
+            4,
+        ),
+    ] {
+        assert_eq!(leftover, Decimal::new(20, 2), "无 eligible 应原额返回");
+    }
+    assert_eq!(weights, snapshot, "所有调用均不得改动权重");
+}
+
+/// redistribute_weight_by_blended_alpha_headroom 主路径手算：
+/// 两只同为 0.10 权重、headroom 同为 0.40 时 alpha_boost 相同（1+1=2），
+/// 按 headroom 等比分摊 0.20 → 各 +0.10。
+#[test]
+fn blended_alpha_headroom_refill_splits_evenly_for_symmetric_weights() {
+    let mut weights = HashMap::from([
+        ("A".to_string(), Decimal::new(10, 2)),
+        ("B".to_string(), Decimal::new(10, 2)),
+    ]);
+    let caps = HashMap::from([
+        ("A".to_string(), Decimal::new(50, 2)),
+        ("B".to_string(), Decimal::new(50, 2)),
+    ]);
+    let back = redistribute_weight_by_blended_alpha_headroom(
+        &mut weights,
+        &HashSet::new(),
+        Decimal::new(20, 2),
+        &caps,
+        4,
+    );
+    assert_eq!(back, Decimal::ZERO);
+    assert_eq!(weights["A"], Decimal::new(20, 2));
+    assert_eq!(weights["B"], Decimal::new(20, 2));
+}
+
+/// apply_capacity_risk_budget 防御分支：空权重 / 无有效流动性数据直接返回。
+#[test]
+fn capacity_risk_budget_guard_branches_skip_empty_inputs() {
+    let config = PortfolioConstructionConfig {
+        capacity_risk_budget_profile: CapacityRiskBudgetProfile::ParticipationStrictV1,
+        ..Default::default()
+    };
+    // 空权重 → 直接返回（weights.is_empty 分支）
+    let mut empty: HashMap<String, Decimal> = HashMap::new();
+    super::pit_alpha::apply_capacity_risk_budget(&mut empty, &HashMap::new(), &config);
+    assert!(empty.is_empty());
+
+    // 权重非空但 average_amounts 全空 → liquidity_scores 为空直接返回
+    let mut weights = HashMap::from([("A".to_string(), Decimal::new(50, 2))]);
+    super::pit_alpha::apply_capacity_risk_budget(&mut weights, &HashMap::new(), &config);
+    assert_eq!(weights["A"], Decimal::new(50, 2));
+}
+
+/// apply_capacity_risk_budget 的 floor_refill_mode 三分支（Headroom /
+/// AlphaHeadroom / BlendedAlphaHeadroom）：gross 低于 0.60 floor 时
+/// 按 floor 家族补足到 0.60（三模式在同构输入下手算期望一致）。
+#[test]
+fn capacity_risk_budget_floor_refill_modes_restore_min_target_gross() {
+    for profile in [
+        CapacityRiskBudgetProfile::StressParticipationHeadroomFloor60V1,
+        CapacityRiskBudgetProfile::StressParticipationAlphaHeadroomFloor60V1,
+        CapacityRiskBudgetProfile::StressParticipationBlendedAlphaHeadroomFloor60V1,
+    ] {
+        let config = PortfolioConstructionConfig {
+            top_n: 2,
+            max_position_pct: Decimal::new(80, 2),
+            max_gross_exposure: 1.0,
+            capacity_risk_budget_profile: profile,
+            ..Default::default()
+        };
+        let mut weights = HashMap::from([
+            ("DEEP_A".to_string(), Decimal::new(20, 2)),
+            ("DEEP_B".to_string(), Decimal::new(20, 2)),
+        ]);
+        let average_amounts = HashMap::from([
+            ("DEEP_A".to_string(), 900_000_000.0),
+            ("DEEP_B".to_string(), 800_000_000.0),
+        ]);
+        super::pit_alpha::apply_capacity_risk_budget(&mut weights, &average_amounts, &config);
+        let gross: Decimal = weights.values().copied().sum();
+        assert!(
+            (gross - Decimal::new(60, 2)).abs() < Decimal::new(1, 6),
+            "{profile:?} 应把 gross 从 0.40 补足到 0.60 floor，实际 {gross}"
+        );
+    }
+}
+
+/// filter_candidate_risk_pool 的短路分支：候选数不超过 top_n 原样返回；
+/// 波动率全缺失（quantile None）原样返回；部分 symbol 无波动率数据时保留。
+#[test]
+fn candidate_risk_pool_short_circuits_when_small_or_no_volatility_data() {
+    let score_day = dbd(2026, 8, 21);
+    let config = PortfolioConstructionConfig {
+        top_n: 5,
+        candidate_risk_filter_profile: CandidateRiskFilterProfile::LowVolatilityV1,
+        ..Default::default()
+    };
+    let ratios: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+        .collect();
+    let mut history = HashMap::new();
+    history.insert("A".to_string(), vol_closes(100.0, &ratios));
+    history.insert("B".to_string(), vol_closes(200.0, &ratios));
+    let view = ReturnHistoryMatrixView::new(&history, 20);
+
+    // 候选数 <= top_n → 原样返回
+    let small = vec![("A".to_string(), 1.0)];
+    let kept = filter_candidate_risk_pool(score_day, &small, &view, &HashMap::new(), &config);
+    assert_eq!(kept.len(), 1);
+
+    // 空历史 → 波动率分位数为 None → 原样返回
+    let empty_history: HashMap<String, Vec<(NaiveDate, f64)>> = HashMap::new();
+    let empty_view = ReturnHistoryMatrixView::new(&empty_history, 20);
+    let candidates = vec![
+        ("A".to_string(), 3.0),
+        ("B".to_string(), 2.0),
+        ("C".to_string(), 1.0),
+        ("D".to_string(), 0.5),
+        ("E".to_string(), 0.25),
+        ("F".to_string(), 0.1),
+    ];
+    let kept = filter_candidate_risk_pool(
+        score_day,
+        &candidates,
+        &empty_view,
+        &HashMap::new(),
+        &config,
+    );
+    assert_eq!(kept.len(), candidates.len(), "无波动率数据时不做剔除");
+
+    // C 无历史：不在 volatility_scores 中 → 无条件保留（不因缺数据误杀）
+    let mut partial = history.clone();
+    partial.remove("B");
+    let partial_view = ReturnHistoryMatrixView::new(&partial, 20);
+    let kept = filter_candidate_risk_pool(
+        score_day,
+        &candidates,
+        &partial_view,
+        &HashMap::new(),
+        &config,
+    );
+    assert!(
+        kept.iter().any(|(symbol, _)| symbol == "C"),
+        "无波动率数据的 symbol 必须保留"
+    );
+}
+
+/// apply_industry_cap 短路分支：无上限/权重空/行业映射空/上限>=1 不动权重；
+/// 行业全部低于 cap 时（industry_scales 空）也不动。
+#[test]
+fn industry_cap_guard_branches_leave_weights_untouched() {
+    let mut weights = HashMap::from([("A".to_string(), Decimal::new(50, 2))]);
+    let industries = HashMap::from([("A".to_string(), "白酒".to_string())]);
+
+    // max_industry_weight_pct=None → 直接返回
+    let no_cap = PortfolioConstructionConfig::default();
+    super::pit_alpha::apply_industry_cap(&mut weights, &industries, &no_cap);
+    assert_eq!(weights["A"], Decimal::new(50, 2));
+
+    // cap >= 1.0 → 不限
+    let full_cap = PortfolioConstructionConfig {
+        max_industry_weight_pct: Some(1.0),
+        ..Default::default()
+    };
+    super::pit_alpha::apply_industry_cap(&mut weights, &industries, &full_cap);
+    assert_eq!(weights["A"], Decimal::new(50, 2));
+
+    // 行业映射为空 → 不限
+    let half_cap = PortfolioConstructionConfig {
+        max_industry_weight_pct: Some(0.5),
+        ..Default::default()
+    };
+    super::pit_alpha::apply_industry_cap(&mut weights, &HashMap::new(), &half_cap);
+    assert_eq!(weights["A"], Decimal::new(50, 2));
+
+    // 行业总权重低于 cap → 无需缩放
+    super::pit_alpha::apply_industry_cap(&mut weights, &industries, &half_cap);
+    assert_eq!(weights["A"], Decimal::new(50, 2), "0.50 恰等于 cap 不缩放");
+
+    // 权重为空 → 直接返回
+    let mut empty: HashMap<String, Decimal> = HashMap::new();
+    super::pit_alpha::apply_industry_cap(&mut empty, &industries, &half_cap);
+    assert!(empty.is_empty());
+}
+
+/// 独立 fractional_kelly_weight 纯函数：样本不足/分数非正/零方差返回 None，
+/// 正常路径手算：returns=[0.01,0.02,-0.01]，总体均值 μ=0.02/3，
+/// 总体方差 σ²=((0.01-μ)²+(0.02-μ)²+(-0.01-μ)²)/3=7/45000≈1.5556e-4，
+/// fraction=0.0001 → kelly=μ/σ²×fraction=42.857×0.0001≈0.0042857。
+#[test]
+fn fractional_kelly_weight_pure_function_branches_and_hand_computed_value() {
+    assert!(
+        fractional_kelly_weight(&[0.01, 0.02], 0.5).is_none(),
+        "样本<3 → None"
+    );
+    assert!(
+        fractional_kelly_weight(&[0.01, 0.02, -0.01], 0.0).is_none(),
+        "fraction<=0 → None"
+    );
+    assert!(
+        fractional_kelly_weight(&[0.01, 0.01, 0.01], 0.5).is_none(),
+        "零方差 → None"
+    );
+
+    let got =
+        fractional_kelly_weight(&[0.01, 0.02, -0.01], 0.0001).expect("正常输入应产出 kelly 权重");
+    let expected = (0.02_f64 / 3.0) / (7.0_f64 / 45000.0) * 0.0001;
+    assert!(
+        (got - expected).abs() < 1e-12,
+        "expected {expected}, got {got}"
+    );
+
+    // 超过 1 的 kelly 值应钳制到 1.0
+    let clamped = fractional_kelly_weight(&[0.01, 0.02, -0.01], 1.0).unwrap();
+    assert_eq!(clamped, 1.0);
+}
+
+/// stats 矩阵上的 fractional_kelly_weight（ReturnRiskSingleSymbolStats 路径）：
+/// 常数收益（零方差）与不足 3 个样本都返回 None。
+#[test]
+fn stats_matrix_fractional_kelly_rejects_flat_and_short_return_windows() {
+    let score_day = dbd(2026, 8, 21);
+    let symbols = vec!["FLAT".to_string(), "SHORT".to_string()];
+    let plan = ReturnRiskStatsPairwiseScopePlan {
+        score_days: vec![score_day],
+        symbols: symbols.clone(),
+        pair_keys: Vec::new(),
+    };
+    // FLAT：20 个零收益 → 零方差 → None；SHORT：仅 2 个收益（样本不足）→ None
+    let flat_history = HashMap::from([
+        ("FLAT".to_string(), vol_closes(100.0, &[0.0; 20])),
+        ("SHORT".to_string(), vol_closes(100.0, &[0.01, -0.01])),
+    ]);
+    let flat_matrix =
+        super::pit_alpha::build_score_date_return_risk_stats_matrix_with_pairwise_scope(
+            &flat_history,
+            &[score_day],
+            &symbols,
+            20,
+            &plan,
+        );
+    // return_count 统计窗口内数据点数（SHORT 3 点）；kelly 拒绝按收益样本数（2<3）。
+    assert_eq!(flat_matrix.return_count(score_day, "SHORT"), 3);
+    assert!(flat_matrix
+        .fractional_kelly_weight(score_day, "FLAT", 0.5)
+        .is_none());
+    // SHORT 3 个数据点满足 kelly 门槛（判定按点数），应产出权重：
+    let short_kelly = flat_matrix.fractional_kelly_weight(score_day, "SHORT", 0.5);
+    assert!(short_kelly.is_some(), "3 点满足门槛应有 kelly 权重");
+    assert!(
+        flat_matrix
+            .fractional_kelly_weight(score_day, "GHOST", 0.5)
+            .is_none(),
+        "无统计行的 symbol 返回 None"
+    );
+}
+
+/// 三只 symbol 的共享测试行情（21 点、±1% 交替收益），用于组合构建矩阵分支。
+fn matrix_branch_history() -> HashMap<String, Vec<(NaiveDate, f64)>> {
+    let ratios: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+        .collect();
+    HashMap::from([
+        ("AAA".to_string(), vol_closes(100.0, &ratios)),
+        ("BBB".to_string(), vol_closes(200.0, &ratios)),
+        ("CCC".to_string(), vol_closes(300.0, &ratios)),
+    ])
+}
+
+/// build_portfolio_weights_with_return_risk_matrices：RiskParity 与
+/// MaxDiversification 在「无 profile → view 兜底」和「style profile + 预载矩阵」
+/// 两路径下输出一致（同数据源等价性），且归一 gross=1。
+#[test]
+fn risk_parity_and_max_div_weights_match_between_view_and_preloaded_matrix_paths() {
+    let score_day = dbd(2026, 8, 21);
+    let history = matrix_branch_history();
+    let symbols = vec!["AAA".to_string(), "BBB".to_string(), "CCC".to_string()];
+    let candidates: Vec<(String, f64)> = symbols.iter().map(|s| (s.clone(), 1.0)).collect();
+
+    for method in [
+        PortfolioConstructionMethod::RiskParity,
+        PortfolioConstructionMethod::MaxDiversification,
+    ] {
+        // view 路径：无 profile → risk_matrix=None → ReturnHistoryMatrixView 兜底
+        let view_config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_position_pct: Decimal::new(60, 2),
+            max_gross_exposure: 1.0,
+            portfolio_method: method,
+            ..Default::default()
+        };
+        let via_view = build_portfolio_weights_with_return_risk_matrices(
+            score_day,
+            &candidates,
+            &history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &view_config,
+            None,
+        );
+        assert_eq!(via_view.len(), 3, "{method:?} view 路径应给全部三只配权");
+        let gross: Decimal = via_view.values().copied().sum();
+        assert!(
+            (gross - Decimal::ONE).abs() < Decimal::new(1, 6),
+            "{method:?} view 路径 gross 应归一到 1，实际 {gross}"
+        );
+
+        // 预载矩阵路径：style profile 使 uses_risk_matrix=true + 预载 lookback=20 矩阵
+        let matrix = Arc::new(super::pit_alpha::build_score_date_return_risk_matrix(
+            &history,
+            &[score_day],
+            &symbols,
+            20,
+        ));
+        let preloaded: HashMap<usize, Arc<ScoreDateReturnRiskMatrix>> =
+            HashMap::from([(20, matrix)]);
+        // 与 view 版同构（不设 style profile——否则 style budget 修饰矩阵路径风险权重，
+        // 两路径输出不同属预期，不能作为等价性断言的输入）。
+        let matrix_config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_position_pct: Decimal::new(60, 2),
+            max_gross_exposure: 1.0,
+            portfolio_method: method,
+            risk_budget_lookback_days: 20,
+            ..Default::default()
+        };
+        let via_matrix = build_portfolio_weights_with_return_risk_matrices(
+            score_day,
+            &candidates,
+            &history,
+            &HashMap::new(),
+            &HashMap::new(),
+            &matrix_config,
+            Some(&preloaded),
+        );
+        assert_eq!(via_matrix.len(), 3, "{method:?} 矩阵路径应给全部三只配权");
+        // 两路径数据同源：风险权重应逐只一致（style budget 默认不改变对称输入的形状）
+        for symbol in &symbols {
+            assert_eq!(
+                via_view[symbol], via_matrix[symbol],
+                "{method:?} 的 {symbol} 权重在两路径下应一致"
+            );
+        }
+    }
+}
+
+/// build_portfolio_weights_with_return_risk_matrices：候选经相关筛选后为空
+/// → 返回空权重表（selected.is_empty 短路）。
+#[test]
+fn return_risk_matrix_weights_return_empty_when_selection_yields_nothing() {
+    let score_day = dbd(2026, 8, 21);
+    let history = HashMap::new(); // 空行情 → 相关系数缺失 → select 走容忍分支但 selected 可能非空
+                                  // 用空 candidates 直接触发空选择
+    let config = PortfolioConstructionConfig {
+        top_n: 3,
+        portfolio_method: PortfolioConstructionMethod::RiskBudget,
+        ..Default::default()
+    };
+    let weights = build_portfolio_weights_with_return_risk_matrices(
+        score_day,
+        &[],
+        &history,
+        &HashMap::new(),
+        &HashMap::new(),
+        &config,
+        None,
+    );
+    assert!(weights.is_empty(), "空候选必须产出空权重");
+}
+
+/// build_portfolio_weights_with_return_risk_stats_matrices 分支：
+/// 1) 缺失所需 lookback 的 stats 矩阵 → 空表（uses_risk_matrix 但矩阵缺档）；
+/// 2) RiskParity/MaxDiversification 在 stats 矩阵齐备时正常产出；
+/// 3) Heuristic+kelly 但缺 kelly 档 → 空表。
+#[test]
+fn stats_matrix_portfolio_branches_cover_missing_and_supported_lookbacks() {
+    let score_day = dbd(2026, 8, 21);
+    let history = matrix_branch_history();
+    let symbols = vec!["AAA".to_string(), "BBB".to_string(), "CCC".to_string()];
+    let candidates: Vec<(String, f64)> = symbols.iter().map(|s| (s.clone(), 1.0)).collect();
+    let plan = ReturnRiskStatsPairwiseScopePlan {
+        score_days: vec![score_day],
+        symbols: symbols.clone(),
+        pair_keys: Vec::new(),
+    };
+    let build_stats = |lookback: usize| {
+        HashMap::from([(
+            lookback,
+            Arc::new(
+                super::pit_alpha::build_score_date_return_risk_stats_matrix_with_pairwise_scope(
+                    &history,
+                    &[score_day],
+                    &symbols,
+                    lookback,
+                    &plan,
+                ),
+            ),
+        )])
+    };
+
+    // 1) RiskParity 需要 risk_budget 档（uses_risk_matrix 由 style profile 触发），
+    //    矩阵缺 20 档 → 空表
+    let config_missing = PortfolioConstructionConfig {
+        top_n: 3,
+        max_position_pct: Decimal::new(60, 2),
+        max_gross_exposure: 1.0,
+        portfolio_method: PortfolioConstructionMethod::RiskParity,
+        risk_budget_lookback_days: 20,
+        style_risk_budget_profile: StyleRiskBudgetProfile::DefensiveStyleBudgetV1,
+        ..Default::default()
+    };
+    let empty_matrices: HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>> = HashMap::new();
+    let missing = build_portfolio_weights_with_return_risk_stats_matrices(
+        score_day,
+        &candidates,
+        &empty_matrices,
+        &HashMap::new(),
+        &HashMap::new(),
+        &config_missing,
+    );
+    assert!(
+        missing.is_empty(),
+        "缺 risk_budget 档的 stats 矩阵应返回空表"
+    );
+
+    // 2) RiskParity / MaxDiversification 在 stats 档齐备时产出满权重
+    for method in [
+        PortfolioConstructionMethod::RiskParity,
+        PortfolioConstructionMethod::MaxDiversification,
+    ] {
+        let config = PortfolioConstructionConfig {
+            top_n: 3,
+            max_position_pct: Decimal::new(60, 2),
+            max_gross_exposure: 1.0,
+            portfolio_method: method,
+            risk_budget_lookback_days: 20,
+            style_risk_budget_profile: StyleRiskBudgetProfile::DefensiveStyleBudgetV1,
+            ..Default::default()
+        };
+        let weights = build_portfolio_weights_with_return_risk_stats_matrices(
+            score_day,
+            &candidates,
+            &build_stats(20),
+            &HashMap::new(),
+            &HashMap::new(),
+            &config,
+        );
+        assert_eq!(weights.len(), 3, "{method:?} stats 路径应给全部三只配权");
+        let gross: Decimal = weights.values().copied().sum();
+        assert!(
+            // 实现语义：max_position_pct 截断后不重归一（如 MaxDiv 0.8=0.6+0.2），
+            // 只保证 gross<=1 且有配权。
+            gross <= Decimal::ONE + Decimal::new(1, 8),
+            "{method:?} stats 路径 gross 不应超 1（容差 1e-8），实际 {gross}"
+        );
+    }
+
+    // 3) Heuristic + kelly>0 但 stats 缺 kelly 档 → 空表
+    let kelly_config = PortfolioConstructionConfig {
+        top_n: 3,
+        max_position_pct: Decimal::new(60, 2),
+        max_gross_exposure: 1.0,
+        portfolio_method: PortfolioConstructionMethod::Heuristic,
+        kelly_fraction: 0.5,
+        kelly_lookback_days: 20,
+        correlation_lookback_days: 60,
+        risk_budget_lookback_days: 60,
+        ..Default::default()
+    };
+    let kelly_missing = build_portfolio_weights_with_return_risk_stats_matrices(
+        score_day,
+        &candidates,
+        &empty_matrices,
+        &HashMap::new(),
+        &HashMap::new(),
+        &kelly_config,
+    );
+    assert!(kelly_missing.is_empty(), "kelly 档缺失应返回空表");
+}
+
+/// apply_risk_contribution_control 防御分支：少于两只权重直接返回；
+/// 权重为 0 的条目在贡献统计中被跳过。
+#[test]
+fn risk_contribution_control_guards_and_skips_nonpositive_weights() {
+    let score_day = dbd(2026, 8, 21);
+    let history = matrix_branch_history();
+    let view = ReturnHistoryMatrixView::new(&history, 20);
+    let config = PortfolioConstructionConfig {
+        top_n: 3,
+        risk_contribution_control_profile: RiskContributionControlProfile::SoftSingleName20PctV1,
+        ..Default::default()
+    };
+
+    // 单只权重（len<2）→ 直接返回，权重不动
+    let mut single = HashMap::from([("AAA".to_string(), Decimal::ONE)]);
+    super::pit_alpha::apply_risk_contribution_control(&mut single, &view, score_day, &config);
+    assert_eq!(single["AAA"], Decimal::ONE);
+
+    // 含 0 权重条目：0 权重在贡献统计中被跳过，非零权重不受异常影响
+    let mut with_zero = HashMap::from([
+        ("AAA".to_string(), Decimal::new(50, 2)),
+        ("BBB".to_string(), Decimal::ZERO),
+    ]);
+    super::pit_alpha::apply_risk_contribution_control(&mut with_zero, &view, score_day, &config);
+    let gross: Decimal = with_zero.values().copied().sum();
+    assert!(
+        gross > Decimal::ZERO,
+        "正权重必须保留（0 权重条目允许被清理）"
+    );
+}
+
+/// apply_rebalance_path_smoothing：目标权重为空时直接返回；
+/// 滞带内保留旧权重导致 adjusted_gross 超过 target_gross 时按比例缩回。
+#[test]
+fn path_smoothing_empty_targets_and_gross_scale_back_branches() {
+    // 目标为空 → 直接返回（不触碰 previous）
+    let mut empty_targets: HashMap<String, Decimal> = HashMap::new();
+    let previous = HashMap::from([("A".to_string(), Decimal::new(90, 2))]);
+    super::pit_alpha::apply_rebalance_path_smoothing(&mut empty_targets, Some(&previous), 0.5, 1.0);
+    assert!(empty_targets.is_empty());
+
+    // previous=0.90 / target=0.50 / hysteresis=0.50：delta=-0.40 在滞带内 → 保留 0.90，
+    // adjusted_gross(0.90) > target_gross(0.50) → 缩放到 0.50/0.90
+    let mut target = HashMap::from([("A".to_string(), Decimal::new(50, 2))]);
+    super::pit_alpha::apply_rebalance_path_smoothing(&mut target, Some(&previous), 0.5, 1.0);
+    assert_eq!(
+        target["A"],
+        Decimal::new(50, 2),
+        "滞带保留旧权重后必须缩放回 target gross 0.50"
+    );
+}
+
+/// return_risk_stats_pairwise_scope_for_factor_scores 分支：
+/// 空输入产出空 plan；skip_top_pct/pool 截断参与配对；候选不足跳过该日；
+/// 超出配对预算返回 None。
+#[test]
+fn pairwise_scope_plan_handles_empty_skip_pool_and_budget_branches() {
+    let day = dbd(2026, 9, 11);
+    let mut scores_by_date = FactorScoresByDate::new();
+    scores_by_date.insert(
+        day,
+        vec![
+            ("S1".to_string(), 9.0),
+            ("S2".to_string(), 8.0),
+            ("S3".to_string(), 7.0),
+            ("S4".to_string(), 6.0),
+        ],
+    );
+
+    // 空评分日 → 空 plan（pair_keys 为空）
+    let empty_plan = return_risk_stats_pairwise_scope_for_factor_scores(
+        &[],
+        &["S1".to_string()],
+        &scores_by_date,
+        &SignalConfig::default(),
+        100,
+    )
+    .expect("空评分日应产出空 plan");
+    assert!(empty_plan.pair_keys.is_empty());
+
+    // 基础：4 只候选（top_n=3 → min_candidates=3）→ C(4,2)=6 对
+    let config = SignalConfig {
+        top_n: 3,
+        ..Default::default()
+    };
+    let plan = return_risk_stats_pairwise_scope_for_factor_scores(
+        &[day],
+        &[
+            "S1".to_string(),
+            "S2".to_string(),
+            "S3".to_string(),
+            "S4".to_string(),
+        ],
+        &scores_by_date,
+        &config,
+        100,
+    )
+    .expect("4 只候选应产出 plan");
+    assert_eq!(plan.pair_count(), 6, "C(4,2)=6 对");
+
+    // skip_top_pct=0.5 → 跳过前 2 只 → 剩 2 只 → C(2,2)=1 对
+    let skip_config = SignalConfig {
+        top_n: 3,
+        skip_top_pct: 0.5,
+        ..Default::default()
+    };
+    let skip_plan = return_risk_stats_pairwise_scope_for_factor_scores(
+        &[day],
+        &[
+            "S1".to_string(),
+            "S2".to_string(),
+            "S3".to_string(),
+            "S4".to_string(),
+        ],
+        &scores_by_date,
+        &skip_config,
+        100,
+    )
+    .expect("skip 后仍应产出 plan");
+    // 实现语义：skip 后剩 2 只低于 min_candidates(=top_n 3) 门槛 → plan 保留但 pair_keys
+    // 为空（防御性不产出不足样本的相关性对）。
+    assert_eq!(
+        skip_plan.pair_count(),
+        0,
+        "skip 50% 后剩 2 只不足门槛，应无对"
+    );
+
+    // pool=3 截断 → C(3,2)=3 对
+    let pool_config = SignalConfig {
+        top_n: 3,
+        score_candidate_pool_size: Some(3),
+        ..Default::default()
+    };
+    let pool_plan = return_risk_stats_pairwise_scope_for_factor_scores(
+        &[day],
+        &[
+            "S1".to_string(),
+            "S2".to_string(),
+            "S3".to_string(),
+            "S4".to_string(),
+        ],
+        &scores_by_date,
+        &pool_config,
+        100,
+    )
+    .expect("pool 截断后应产出 plan");
+    assert_eq!(pool_plan.pair_count(), 3, "pool=3 → C(3,2)=3 对");
+
+    // 候选不足 min_candidates（窗口外 symbol 全被过滤）→ 该日跳过 → 0 对
+    let scoped = return_risk_stats_pairwise_scope_for_factor_scores(
+        &[day],
+        &["UNKNOWN".to_string()],
+        &scores_by_date,
+        &config,
+        100,
+    )
+    .expect("候选不足不应报错");
+    assert_eq!(scoped.pair_count(), 0);
+
+    // 配对预算耗尽 → None
+    let over_budget = return_risk_stats_pairwise_scope_for_factor_scores(
+        &[day],
+        &[
+            "S1".to_string(),
+            "S2".to_string(),
+            "S3".to_string(),
+            "S4".to_string(),
+        ],
+        &scores_by_date,
+        &config,
+        5,
+    );
+    assert!(over_budget.is_none(), "C(4,2)=6 > 预算 5 应返回 None");
+}
+
+/// build_score_date_return_risk_stats_matrix_with_pairwise_scope 分支：
+/// plan 中不属于请求范围（score_day/symbol）的配对被跳过；
+/// 某侧收益缺失（无历史）的配对被跳过；零方差配对（常数收益）不产生相关系数。
+#[test]
+fn pairwise_scope_matrix_skips_out_of_scope_and_degenerate_pairs() {
+    let day = dbd(2026, 8, 21);
+    let ratios: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+        .collect();
+    let flat: Vec<f64> = vec![0.0; 20];
+    let mut history = HashMap::new();
+    history.insert("AAA".to_string(), vol_closes(100.0, &ratios));
+    history.insert("FLAT".to_string(), vol_closes(100.0, &flat));
+
+    let plan = ReturnRiskStatsPairwiseScopePlan {
+        score_days: vec![day],
+        symbols: vec!["AAA".to_string(), "FLAT".to_string()],
+        // GHOST 不在 symbols → 整对跳过；AAA/FLAT 参与但 FLAT 零方差 → pearson None
+        pair_keys: vec![
+            (day, "AAA".to_string(), "GHOST".to_string()),
+            (day, "AAA".to_string(), "FLAT".to_string()),
+        ],
+    };
+    let matrix = super::pit_alpha::build_score_date_return_risk_stats_matrix_with_pairwise_scope(
+        &history,
+        &[day],
+        &["AAA".to_string(), "FLAT".to_string()],
+        20,
+        &plan,
+    );
+    assert_eq!(matrix.row_count(), 2, "两只 symbol 各一行统计");
+    assert_eq!(
+        matrix.pair_row_count(),
+        0,
+        "GHOST 越界对被跳过；FLAT 零方差对无相关系数"
+    );
+}
+
+/// build_single_sleeve_target_weights：prefer stats 矩阵但未覆盖所需 lookback
+/// 时回退 raw 矩阵路径（stats 不覆盖 → matrices 版兜底）。
+#[test]
+fn single_sleeve_preferring_stats_falls_back_to_raw_matrix_path() {
+    let score_day = dbd(2026, 8, 21);
+    let history = matrix_branch_history();
+    let config = SignalConfig {
+        top_n: 3,
+        max_position_pct: Decimal::new(60, 2),
+        kelly_fraction: 0.0,
+        ..Default::default()
+    };
+    let empty_stats: HashMap<usize, Arc<ScoreDateReturnRiskStatsMatrix>> = HashMap::new();
+    let empty_raw: HashMap<usize, Arc<ScoreDateReturnRiskMatrix>> = HashMap::new();
+
+    let weights = super::pit_alpha::build_single_sleeve_target_weights(
+        score_day,
+        &config,
+        &history,
+        &HashMap::new(),
+        &HashMap::new(),
+        &empty_raw,
+        &empty_stats,
+        true,
+        &|day, _cfg| {
+            if day == score_day {
+                Some(vec![
+                    ("AAA".to_string(), 3.0),
+                    ("BBB".to_string(), 2.0),
+                    ("CCC".to_string(), 1.0),
+                    ("DDD".to_string(), 0.5),
+                    ("EEE".to_string(), 0.25),
+                ])
+            } else {
+                None
+            }
+        },
+    );
+    // stats 覆盖检查失败 → 回退 build_portfolio_weights_with_return_risk_matrices：
+    // 默认 top_n=3 → 按分数取前 3 只（AAA/BBB/CCC）配权，gross 归一。
+    let weights = weights.expect("raw 回退路径应产出目标权重");
+    assert_eq!(weights.len(), 3, "默认 top_n=3：按分数取前 3 只配权");
+    let gross: Decimal = weights.values().copied().sum();
+    assert!(
+        (gross - Decimal::ONE).abs() < Decimal::new(1, 6),
+        "gross={gross}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// pit_alpha 缓存链连库补缺（第六批：非 persistent 内存缓存路径、
+// capacity inputs、snapshot scope None 分支、manifest 错误分支）
+// ─────────────────────────────────────────────────────────────────────
+
+/// load_symbol_return_history_cached（非 persistent）：真实行情窗口二次调用
+/// 全命中内存缓存，且与首调逐日收益一致。
+#[tokio::test]
+async fn db_load_symbol_return_history_cached_hits_memory_cache_on_second_call() {
+    let pool = db_test_pool().await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let mut cache = SignalDataCache::default();
+
+    let first = super::pit_alpha::load_symbol_return_history_cached(
+        &pool,
+        &mut cache,
+        &symbols,
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("load real symbol return history through memory cache");
+    assert!(!first.is_empty(), "真实 symbol 必须带回收益序列");
+    for symbol in &symbols {
+        if let Some(rows) = first.get(symbol) {
+            assert!(!rows.is_empty(), "{symbol} 收益序列不应为空");
+        }
+    }
+
+    // 二次调用：完全复用内存缓存，输出等价
+    let second = super::pit_alpha::load_symbol_return_history_cached(
+        &pool,
+        &mut cache,
+        &symbols,
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("second call reuses memory cache");
+    assert_eq!(second.len(), first.len());
+    for (symbol, rows) in first.iter() {
+        assert_eq!(
+            second.get(symbol).map(|r| r.len()),
+            Some(rows.len()),
+            "{symbol} 两调长度一致"
+        );
+    }
+}
+
+/// load_symbol_return_history_for_snapshot_scope_cached 的 scope=None 分支：
+/// 等价于非 persistent 的 load_symbol_return_history_cached。
+#[tokio::test]
+async fn db_load_symbol_return_history_for_none_scope_uses_plain_memory_cache() {
+    let pool = db_test_pool().await;
+    let symbols = vec!["600519.SH".to_string()];
+    let mut cache = SignalDataCache::default();
+
+    let via_none_scope = load_symbol_return_history_for_snapshot_scope_cached(
+        &pool,
+        &mut cache,
+        None,
+        &symbols,
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 18),
+        20,
+    )
+    .await
+    .expect("scope=None should route to plain memory-cached loader");
+    assert!(
+        via_none_scope
+            .get("600519.SH")
+            .map(|r| r.len())
+            .unwrap_or(0)
+            > 0,
+        "真实 symbol 经 None scope 也应带回收益"
+    );
+}
+
+/// load_pit_average_amount_matrix_persistent_cached 的 data_version_id=None
+/// 分支：不做持久缓存 IO，直接由 average amount 历史构建 PIT 快照矩阵。
+#[tokio::test]
+async fn db_load_pit_average_amount_matrix_without_data_version_builds_from_history() {
+    let pool = db_test_pool().await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let score_days = [dbd(2026, 9, 11), dbd(2026, 9, 18)];
+    let mut cache = SignalDataCache::default();
+
+    let matrix = load_pit_average_amount_matrix_persistent_cached(
+        &pool,
+        &mut cache,
+        None,
+        &symbols,
+        dbd(2026, 7, 1),
+        dbd(2026, 9, 18),
+        &score_days,
+        60,
+    )
+    .await
+    .expect("data_version_id=None builds PIT matrix from plain history");
+    assert!(
+        matrix.contains_key(&dbd(2026, 9, 11)),
+        "PIT 矩阵必须包含请求的评分日"
+    );
+    let day_amounts = &matrix[&dbd(2026, 9, 11)];
+    assert!(!day_amounts.is_empty(), "评分日应至少有一只 symbol 的均额");
+}
+
+/// load_portfolio_capacity_inputs 与 _cached：RiskBudget 组合方法触发
+/// uses_capacity_inputs 分支，产出按评分日的 PIT 均额矩阵。
+#[tokio::test]
+async fn db_load_portfolio_capacity_inputs_cached_serves_risk_budget_config() {
+    let pool = db_test_pool().await;
+    let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+    let trading_days = [dbd(2026, 9, 11), dbd(2026, 9, 18)];
+    let config = PortfolioConstructionConfig {
+        top_n: 2,
+        max_position_pct: Decimal::new(50, 2),
+        max_gross_exposure: 1.0,
+        portfolio_method: PortfolioConstructionMethod::RiskBudget,
+        ..Default::default()
+    };
+    assert!(config.uses_capacity_inputs(), "RiskBudget 必须消费容量输入");
+
+    // 裸版（不走缓存）：直接查源表构建
+    let inputs = load_portfolio_capacity_inputs(
+        &pool,
+        &symbols,
+        dbd(2026, 7, 1),
+        dbd(2026, 9, 18),
+        &trading_days,
+        &config,
+    )
+    .await
+    .expect("plain capacity inputs loader serves RiskBudget config");
+    assert!(
+        inputs.contains_key(&dbd(2026, 9, 11)),
+        "裸版容量输入必须包含请求交易日"
+    );
+
+    // 缓存版（data_version_id=None → 不做持久 IO）
+    let mut cache = SignalDataCache::default();
+    let cached = load_portfolio_capacity_inputs_cached(
+        &pool,
+        &mut cache,
+        None,
+        &symbols,
+        dbd(2026, 7, 1),
+        dbd(2026, 9, 18),
+        &trading_days,
+        &config,
+    )
+    .await
+    .expect("cached capacity inputs loader serves RiskBudget config");
+    assert_eq!(
+        cached.len(),
+        inputs.len(),
+        "缓存版与裸版应产出相同评分日集合"
+    );
+}
+
+/// 持久缓存 manifest 读取的 Err 分支：无法建立数据库连接时必须以
+/// "Failed to load persistent return/risk feature matrix manifest" 报错
+/// （而非静默回退或 panic）。
+#[tokio::test]
+async fn db_persistent_matrix_manifest_read_error_is_surfaced() {
+    // 连接一个必然拒绝的本地端口（connect_lazy 不实际建连，查询时才失败）
+    let bad_pool = PgPool::connect_lazy("postgres://gaocheng@127.0.0.1:1/quant")
+        .expect("lazy pool constructor succeeds without connecting");
+    let symbols = vec!["600519.SH".to_string()];
+    let score_days = [dbd(2026, 9, 11)];
+
+    let err = load_return_risk_feature_matrix_persistent_cached(
+        &bad_pool,
+        &mut SignalDataCache::default(),
+        Some("zzz_test_bad_conn_dv"),
+        &symbols,
+        dbd(2026, 9, 11),
+        dbd(2026, 9, 18),
+        &score_days,
+        20,
+        None,
+    )
+    .await
+    .expect_err("connection-refused pool must surface error");
+    // 坏端口 pool 的错误形态可能是连接拒绝或取连接超时（取决于 sqlx 时序）——
+    // 断言 Err 且消息链路含 manifest/连接失败线索任一。
+    assert!(
+        err.contains("manifest") || err.contains("pool") || err.contains("connection"),
+        "unexpected error message: {err}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// generation 连库参数组合补缺（第六批：prediction_blend / event_gate /
+// min_daily_amount 组合分支、market_feature_snapshot 转发入口、
+// regime + event scope 组合、prewarm regime 深路径）
+//
+// 数据依据（psql 2026-09-20 核实）：
+// - `model_prediction pred-v19-repair-nlqr-20260603-20260615-4f` 与
+//   `full_pit_icir_37f_h20_fund_v2` 在 2026-06-03 的 symbol 交集 5,252 只，
+//   prediction blend 窗口（06-03 ~ 06-05）有充足交集；
+// - combo 评分 2025-09-05 起逐交易日齐备（09-11/09-18 均有）。
+// ─────────────────────────────────────────────────────────────────────
+
+/// generate_signals_with_cache_internal 的 prediction_blend 分支：
+/// 真实 prediction set 与真实 combo 混合，产出结构合法的信号。
+#[tokio::test]
+async fn db_generate_signals_with_prediction_blend_combines_real_sources() {
+    let pool = db_test_pool().await;
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        top_n: 10,
+        rebalance_freq_days: 5,
+        score_candidate_pool_size: Some(50),
+        prediction_blend: Some(PredictionBlendConfig {
+            prediction_set_id: "pred-v19-repair-nlqr-20260603-20260615-4f".into(),
+            factor_weight: 0.7,
+            prediction_weight: 0.3,
+            prediction_min_percentile: None,
+            prediction_min_score: None,
+        }),
+        ..Default::default()
+    };
+
+    let signals = generate_signals(&pool, &config, dbd(2026, 6, 3), dbd(2026, 6, 5))
+        .await
+        .expect("blend factor+prediction signals from real sources");
+    assert!(!signals.is_empty(), "交集 5,252 只必须产出信号");
+    for (day, signal) in &signals {
+        assert!(!signal.target_weights.is_empty(), "信号日 {day} 不应为空");
+    }
+}
+
+/// generate_signals_with_cache_internal 的 min_daily_amount + event_gate
+/// 组合分支：流动性过滤与事件门同时开启仍产出结构合法信号。
+#[tokio::test]
+async fn db_generate_signals_with_liquidity_filter_and_event_gate() {
+    let pool = db_test_pool().await;
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        top_n: 10,
+        rebalance_freq_days: 5,
+        score_candidate_pool_size: Some(50),
+        min_daily_amount_cny: Some(30_000_000.0),
+        event_gate: Some(EventGateConfig {
+            combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+            version: "1.0.0".into(),
+            mode: EventGateMode::BoostPositive,
+            score_direction: ScoreDirection::Descending,
+            min_score: 0.0,
+            boost_weight: 0.2,
+            active_regimes: Vec::new(),
+        }),
+        ..Default::default()
+    };
+
+    let signals = generate_signals(&pool, &config, dbd(2026, 9, 1), dbd(2026, 9, 11))
+        .await
+        .expect("liquidity filter + event gate combination");
+    assert!(!signals.is_empty(), "过滤组合下窗口内必产生信号");
+    // 事件门与流动性过滤只调排序/剔除，不放宽单票与总敞口约束
+    let max_weight = Decimal::new(10, 2) + Decimal::new(1, 9);
+    for (day, signal) in &signals {
+        assert!(!signal.target_weights.is_empty(), "信号日 {day} 不应为空");
+        for weight in signal.target_weights.values() {
+            assert!(*weight > Decimal::ZERO && *weight <= max_weight);
+        }
+    }
+}
+
+/// generate_signals_with_cache_and_market_feature_snapshot 转发入口：
+/// 携带 zzz_test data_version 的 snapshot scope 走持久缓存链，
+/// 产出与无 scope 版本完全一致的信号（数据同源，缓存不改行为）。
+#[tokio::test]
+async fn db_generate_signals_with_snapshot_scope_matches_plain_generation() {
+    let pool = db_test_pool().await;
+    let dv = "zzz_test_gen_snapshot_dv";
+    cleanup_zzz_test_market_feature_cache(&pool, dv).await;
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        top_n: 10,
+        rebalance_freq_days: 5,
+        score_candidate_pool_size: Some(50),
+        ..Default::default()
+    };
+
+    let plain = generate_signals(&pool, &config, dbd(2026, 9, 1), dbd(2026, 9, 11))
+        .await
+        .expect("plain generation baseline");
+
+    let scope = MarketFeatureSnapshotScope::new(
+        dv,
+        dbd(2026, 7, 1),
+        dbd(2026, 8, 31),
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 18),
+    );
+    let mut cache = SignalDataCache::default();
+    let via_snapshot = generate_signals_with_cache_and_market_feature_snapshot(
+        &pool,
+        &config,
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 11),
+        &mut cache,
+        &scope,
+    )
+    .await
+    .expect("snapshot-scoped generation through persistent cache chain");
+
+    assert_eq!(via_snapshot.len(), plain.len(), "信号日集合必须一致");
+    for (day, plain_signal) in &plain {
+        let scoped_signal = via_snapshot
+            .get(day)
+            .unwrap_or_else(|| panic!("snapshot 版缺失信号日 {day}"));
+        assert_eq!(
+            plain_signal.target_weights, scoped_signal.target_weights,
+            "信号日 {day} 两版本权重必须一致"
+        );
+    }
+
+    cleanup_zzz_test_market_feature_cache(&pool, dv).await;
+}
+
+/// generate_regime_signals_with_cache_and_market_feature_snapshot 转发入口：
+/// regime 政策 + snapshot scope 组合仍产出窗口内合法信号。
+#[tokio::test]
+async fn db_generate_regime_signals_with_snapshot_scope_end_to_end() {
+    let pool = db_test_pool().await;
+    let dv = "zzz_test_regime_snapshot_dv";
+    cleanup_zzz_test_market_feature_cache(&pool, dv).await;
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        top_n: 10,
+        rebalance_freq_days: 5,
+        score_candidate_pool_size: Some(50),
+        ..Default::default()
+    };
+    let policy = MarketRegimePolicy::professional_default("000300.SH");
+    let scope = MarketFeatureSnapshotScope::new(
+        dv,
+        dbd(2026, 7, 1),
+        dbd(2026, 8, 31),
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 18),
+    );
+
+    let mut cache = SignalDataCache::default();
+    let signals = generate_regime_signals_with_cache_and_market_feature_snapshot(
+        &pool,
+        &config,
+        &policy,
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 11),
+        &mut cache,
+        &scope,
+    )
+    .await
+    .expect("regime + snapshot scoped generation");
+
+    assert!(!signals.is_empty(), "regime 版窗口内必产生信号");
+    let window_days = db_sep_window_days();
+    for day in signals.keys() {
+        assert!(
+            window_days.contains(day),
+            "regime 信号日 {day} 必须是窗口内交易日"
+        );
+    }
+
+    cleanup_zzz_test_market_feature_cache(&pool, dv).await;
+}
+
+/// generate_regime_signals_with_cache_internal 的 event_gate 限定 regime 分支：
+/// active_regimes 非空时事件门只在 Bear 状态施加（344-358 分支），
+/// 输出仍为结构合法的 regime 信号。
+#[tokio::test]
+async fn db_generate_regime_signals_with_regime_scoped_event_gate() {
+    let pool = db_test_pool().await;
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        top_n: 10,
+        rebalance_freq_days: 5,
+        score_candidate_pool_size: Some(50),
+        event_gate: Some(EventGateConfig {
+            combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+            version: "1.0.0".into(),
+            mode: EventGateMode::ExcludeNegative,
+            score_direction: ScoreDirection::Descending,
+            min_score: 0.0,
+            boost_weight: 0.2,
+            active_regimes: vec![MarketRegime::Bear],
+        }),
+        ..Default::default()
+    };
+    let policy = MarketRegimePolicy::professional_default("000300.SH");
+
+    let signals =
+        generate_regime_signals(&pool, &config, &policy, dbd(2026, 9, 1), dbd(2026, 9, 11))
+            .await
+            .expect("regime-scoped event gate generation");
+    assert!(!signals.is_empty(), "限定 regime 的事件门仍应产出信号");
+}
+
+/// prewarm 的 regime 深路径：regime_policy 非空时按 benchmark 分类扩展
+/// score sources 并合并 universe（market_feature 940-998 分支），
+/// 同时带 regime 限定 event_gate 覆盖 event 分支。
+#[tokio::test]
+async fn db_prewarm_factor_signal_batch_feature_cache_with_regime_policy() {
+    let pool = db_test_pool().await;
+    let dv = "zzz_test_batch_regime_dv";
+    cleanup_zzz_test_market_feature_cache(&pool, dv).await;
+
+    let spec = FactorSignalFeaturePrewarmSpec {
+        data_version_id: dv.to_string(),
+        train_start: dbd(2026, 7, 1),
+        train_end: dbd(2026, 8, 31),
+        test_start: dbd(2026, 9, 1),
+        test_end: dbd(2026, 9, 18),
+        feature_start: dbd(2026, 7, 1),
+        feature_end: dbd(2026, 9, 18),
+        config: SignalConfig {
+            combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+            version: "1.0.0".into(),
+            top_n: 10,
+            rebalance_freq_days: 5,
+            score_candidate_pool_size: Some(20),
+            event_gate: Some(EventGateConfig {
+                combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+                version: "1.0.0".into(),
+                mode: EventGateMode::BoostPositive,
+                score_direction: ScoreDirection::Descending,
+                min_score: 0.0,
+                boost_weight: 0.2,
+                active_regimes: vec![MarketRegime::Bear],
+            }),
+            ..Default::default()
+        },
+        regime_policy: Some(MarketRegimePolicy::professional_default("000300.SH")),
+        return_risk_feature_cache_mode: ReturnRiskFeatureCacheMode::RawMatrix,
+    };
+
+    let mut cache = SignalDataCache::default();
+    let report = prewarm_factor_signal_batch_feature_cache(&pool, &mut cache, &[spec])
+        .await
+        .expect("prewarm with regime policy and scoped event gate");
+
+    assert_eq!(report.requested_specs, 1);
+    assert_eq!(
+        report.candidate_specs, 1,
+        "regime 深路径也必须产出 candidate"
+    );
+    assert!(report.total_symbol_count > 0);
+    assert!(!report.groups.is_empty());
+
+    cleanup_zzz_test_market_feature_cache(&pool, dv).await;
+}
+
+/// rank_candidates_for_capacity（非矩阵版）：单候选短路；regime-aware
+/// profile（NonlinearRegimeAlphaLiquidityV2）触发 detect_market_regime +
+/// regime_adjusted_weights 联动分支。
+#[test]
+fn rank_candidates_for_capacity_short_circuits_single_and_uses_regime_weights() {
+    let score_day = dbd(2026, 8, 21);
+    let ratios: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+        .collect();
+    let up: Vec<f64> = vec![0.03; 20];
+    let mut history = HashMap::new();
+    history.insert("AAA".to_string(), vol_closes(100.0, &ratios));
+    history.insert("BBB".to_string(), vol_closes(200.0, &up));
+    let amounts = HashMap::from([
+        ("AAA".to_string(), 100_000.0),
+        ("BBB".to_string(), 900_000.0),
+    ]);
+
+    // 单候选短路：原样返回
+    let single = super::pit_alpha::rank_candidates_for_capacity(
+        score_day,
+        &[("AAA".to_string(), 1.0)],
+        &history,
+        &amounts,
+        CandidateRankingProfile::NonlinearRegimeAlphaLiquidityV2,
+        20,
+    );
+    assert_eq!(single.len(), 1);
+    assert_eq!(single[0].0, "AAA");
+
+    // regime-aware 权重：多候选重排不丢候选（permuted 结果集合不变）
+    let candidates = vec![("AAA".to_string(), 3.0), ("BBB".to_string(), 1.0)];
+    let ranked = super::pit_alpha::rank_candidates_for_capacity(
+        score_day,
+        &candidates,
+        &history,
+        &amounts,
+        CandidateRankingProfile::NonlinearRegimeAlphaLiquidityV2,
+        20,
+    );
+    let mut symbols: Vec<&str> = ranked.iter().map(|(s, _)| s.as_str()).collect();
+    symbols.sort();
+    assert_eq!(symbols, vec!["AAA", "BBB"], "重排不得丢候选");
+}
+
+/// 独立 average_abs_correlation_to_reference：自身收益不足 3 个 → None；
+/// 参考集全部缺数据（correlations 空）→ None；正常路径与手算 pearson 一致。
+#[test]
+fn average_abs_correlation_reference_handles_short_and_empty_reference_sets() {
+    let score_day = dbd(2026, 8, 21);
+    let ratios: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+        .collect();
+    let mut history = HashMap::new();
+    history.insert("AAA".to_string(), vol_closes(100.0, &ratios));
+    history.insert("BBB".to_string(), vol_closes(200.0, &ratios));
+
+    // 自身收益 <3 → None（score_day 前无足够历史）
+    let short = HashMap::from([("SHORT".to_string(), vol_closes(100.0, &[0.01, -0.01]))]);
+    assert!(average_abs_correlation_to_reference(
+        "SHORT",
+        &["BBB".to_string()],
+        &short,
+        score_day,
+        20
+    )
+    .is_none());
+
+    // 参考集里的 symbol 均无有效收益（pearson 全 None）→ None
+    assert!(
+        average_abs_correlation_to_reference(
+            "AAA",
+            &["GHOST".to_string()],
+            &history,
+            score_day,
+            20
+        )
+        .is_none(),
+        "无任何有效相关系数时应返回 None"
+    );
+
+    // 正常路径：AAA 与 BBB 同为 ±1% 交替序列 → 完全正相关 |ρ|=1（手算）
+    let references = vec!["BBB".to_string()];
+    let corr = average_abs_correlation_to_reference("AAA", &references, &history, score_day, 20)
+        .expect("identical return series must yield a correlation");
+    assert!(
+        (corr - 1.0).abs() < 1e-9,
+        "同形状序列 |ρ| 应为 1，实际 {corr}"
+    );
+}

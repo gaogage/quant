@@ -836,7 +836,7 @@ where
 
 // TODO(DDD Step 2): 信号管线参数建模债，参数对象化待 Step 2 统一推进；显式豁免。
 #[allow(clippy::too_many_arguments)]
-fn build_single_sleeve_target_weights<S>(
+pub(crate) fn build_single_sleeve_target_weights<S>(
     score_day: NaiveDate,
     config: &SignalConfig,
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
@@ -1613,7 +1613,7 @@ pub(crate) async fn load_symbol_return_history(
     Ok(returns_by_symbol)
 }
 
-async fn load_symbol_return_history_cached(
+pub(crate) async fn load_symbol_return_history_cached(
     pool: &PgPool,
     cache: &mut SignalDataCache,
     symbols: &[String],
@@ -3160,7 +3160,7 @@ pub(crate) fn build_portfolio_weights_with_return_risk_stats_matrix(
     )
 }
 
-fn rank_candidates_for_capacity(
+pub(crate) fn rank_candidates_for_capacity(
     score_day: NaiveDate,
     candidates: &[(String, f64)],
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
@@ -3434,7 +3434,7 @@ fn liquidity_rank_scores(
 
 /// Compute inverse-volatility rank scores: lower trailing volatility → higher rank.
 /// Uses the trailing volatility computation that is PIT-safe (only data at or before score_day).
-fn volatility_rank_scores(
+pub(crate) fn volatility_rank_scores(
     candidates: &[(String, f64)],
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
     score_day: NaiveDate,
@@ -3464,7 +3464,7 @@ fn volatility_rank_scores(
 }
 
 /// Simplified PIT trailing annualized volatility from closes data.
-fn trailing_volatility_from_closes(
+pub(crate) fn trailing_volatility_from_closes(
     closes: &[(NaiveDate, f64)],
     trade_date: NaiveDate,
     lookback_days: i64,
@@ -3496,7 +3496,7 @@ fn trailing_volatility_from_closes(
 }
 
 /// Simple market regime detection from benchmark-like composite of candidate returns.
-fn detect_market_regime_from_returns(
+pub(crate) fn detect_market_regime_from_returns(
     return_history: &HashMap<String, Vec<(NaiveDate, f64)>>,
     score_day: NaiveDate,
     lookback_days: usize,
@@ -3538,7 +3538,7 @@ fn detect_market_regime_from_returns(
 /// In bear/high_volatility markets: favor low volatility and liquidity over alpha.
 /// In bull markets: allow more alpha weight.
 /// In sideways/mixed markets: balanced approach.
-fn regime_adjusted_weights(
+pub(crate) fn regime_adjusted_weights(
     params: CandidateRankingParams,
     regime: MarketRegime,
 ) -> (f64, f64, f64, f64) {
@@ -4207,7 +4207,7 @@ fn target_weight_cap_with_multiplier(
         .max(Decimal::ZERO)
 }
 
-fn apply_capacity_risk_budget(
+pub(crate) fn apply_capacity_risk_budget(
     weights: &mut HashMap<String, Decimal>,
     average_amounts: &HashMap<String, f64>,
     config: &PortfolioConstructionConfig,
@@ -4408,7 +4408,7 @@ fn cap_bucket_and_redistribute(
     weights.retain(|_, weight| *weight > Decimal::ZERO);
 }
 
-fn redistribute_weight(
+pub(crate) fn redistribute_weight(
     weights: &mut HashMap<String, Decimal>,
     excluded_symbols: &HashSet<String>,
     amount: Decimal,
@@ -4686,7 +4686,7 @@ pub(crate) fn redistribute_weight_by_blended_alpha_headroom(
     remaining
 }
 
-fn apply_industry_cap(
+pub(crate) fn apply_industry_cap(
     weights: &mut HashMap<String, Decimal>,
     industry_by_symbol: &HashMap<String, String>,
     config: &PortfolioConstructionConfig,
@@ -4877,7 +4877,7 @@ fn cap_style_bucket(
 // R9: 三联体合并为单一泛型函数。原 apply_risk_contribution_control /
 // _from_matrix / _from_stats_matrix 逻辑同构，仅数据源不同，现统一查 MatrixView trait。
 // base 版的 risk_budget_lookback_days 由调用方在构造 ReturnHistoryMatrixView 时冻结。
-fn apply_risk_contribution_control<M: super::matrix_view::MatrixView>(
+pub(crate) fn apply_risk_contribution_control<M: super::matrix_view::MatrixView>(
     weights: &mut HashMap<String, Decimal>,
     matrix: &M,
     score_day: NaiveDate,

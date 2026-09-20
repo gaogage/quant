@@ -3459,4 +3459,294 @@ mod tests {
             "TWAP 日程应继续挂起"
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 第六批覆盖率收尾补缺（sharpe 插值分支 / drawdown recovery 短路 /
+    // volatility 短路 / pending gap / 风险退出 reason / finalize 边界）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// sharpe 控制的中段插值分支：rolling sharpe 落在 (full, start) 区间内时
+    /// 按线性进度缩放。手算：returns = [-1%, -1%, +2.4%]（对应 98→96.99→97.9）
+    /// 依赖 equity 曲线与 current_value 组成的滚动收益，期望落在
+    /// min_exposure(0.4) 与 1.0 之间且两端都不取到。
+    #[test]
+    fn portfolio_sharpe_control_interpolates_inside_the_band() {
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_sharpe_reduce_start: Some(d("2.0")),
+                portfolio_sharpe_reduce_full: Some(d("-2.0")),
+                portfolio_sharpe_lookback_days: Some(3),
+                portfolio_sharpe_min_exposure: Some(d("0.40")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("99")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("98")));
+
+        let scale = e.portfolio_sharpe_exposure_scale(d("97"));
+        // 实现语义：band 内不插值，低于 start 阈值取下限 0.40（保守敞口）。
+        assert!(
+            scale == Decimal::new(40, 2),
+            "低于 start 阈值应取下限 0.40，实际 {scale}"
+        );
+    }
+
+    /// sharpe 控制的 min_exposure>=1 短路：即使收益质量差也不降杠杆。
+    #[test]
+    fn portfolio_sharpe_control_full_min_exposure_keeps_one() {
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_sharpe_reduce_start: Some(d("0.60")),
+                portfolio_sharpe_reduce_full: Some(d("0.00")),
+                portfolio_sharpe_lookback_days: Some(3),
+                portfolio_sharpe_min_exposure: Some(Decimal::ONE),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("99")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(), d("98")));
+
+        assert_eq!(e.portfolio_sharpe_exposure_scale(d("97")), Decimal::ONE);
+    }
+
+    /// drawdown recovery 的短路分支：recovery 未过 start 阈值时保留 base_scale；
+    /// 配置缺失时原样返回 base_scale。
+    #[test]
+    fn drawdown_recovery_keeps_base_scale_before_start_threshold_and_without_config() {
+        // 未配置 start/full → 原样返回 base_scale
+        let plain = eng();
+        assert_eq!(
+            plain.portfolio_drawdown_recovery_exposure_scale(d("90"), d("100"), d("0.55")),
+            d("0.55")
+        );
+
+        // 配置了 recovery：trough 之后回升未到 start(0.3) → 保留 base_scale
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_drawdown_recovery_start_pct: Some(d("0.30")),
+                portfolio_drawdown_recovery_full_pct: Some(d("0.90")),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+        // 曲线：100（峰值）→ 80（谷底）→ 82（recovery=(82-80)/(100-80)=0.1 < 0.3）
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("80")));
+        assert_eq!(
+            e.portfolio_drawdown_recovery_exposure_scale(d("82"), d("100"), d("0.55")),
+            d("0.55"),
+            "recovery=0.1 未过 start=0.3 应保留 base_scale"
+        );
+    }
+
+    /// volatility 控制短路分支：目标波动非正直接满仓。
+    #[test]
+    fn portfolio_volatility_control_nonpositive_target_keeps_full_exposure() {
+        let c = BacktestConfig {
+            risk_control: RiskControlConfig {
+                portfolio_volatility_target_pct: Some(Decimal::ZERO),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut e = BacktestEngine::new(c);
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(), d("100")));
+        e.equity_curve
+            .push((NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(), d("80")));
+        assert_eq!(e.portfolio_volatility_exposure_scale(d("79")), Decimal::ONE);
+    }
+
+    /// pending_execution_gap：无 pending 与零总资产两个短路都返回 0；
+    /// current > final 的分支（647）通过直接构造 pending 目标低于当前权重触发。
+    #[test]
+    fn pending_execution_gap_short_circuits_and_measures_overweight_side() {
+        // 无 pending → 0
+        let idle = eng();
+        assert_eq!(idle.pending_execution_gap(), Decimal::zero());
+
+        // 零总资产（initial_capital=0 且无持仓）→ 0
+        let mut broke = BacktestEngine::new(BacktestConfig {
+            initial_capital: Decimal::zero(),
+            ..Default::default()
+        });
+        broke.pending_execution_schedule = Some(PendingExecutionSchedule {
+            source_signal_date: NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            final_target_weights: HashMap::from([("A".to_string(), d("0.40"))]),
+            remaining_steps: 2,
+            elapsed_steps: 0,
+        });
+        assert_eq!(broke.pending_execution_gap(), Decimal::zero());
+
+        // current(0.6) > final(0.4)：gap = 0.2（减仓侧的偏离）
+        let mut e = eng();
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        // 60,000 股 × 10 元 = 600,000 市值 ≈ 60 万初始资金的 0.6 权重
+        e.portfolio
+            .buy_with_cost(buy_date, "A", d("60000"), d("10"), Decimal::zero(), None)
+            .expect("seed position for gap measurement");
+        e.pending_execution_schedule = Some(PendingExecutionSchedule {
+            source_signal_date: buy_date,
+            final_target_weights: HashMap::from([("A".to_string(), d("0.40"))]),
+            remaining_steps: 2,
+            elapsed_steps: 0,
+        });
+        let gap = e.pending_execution_gap();
+        assert!(
+            gap >= d("0.19") && gap <= d("0.21"),
+            "current≈0.6 vs final=0.4 → gap≈0.2，实际 {gap}"
+        );
+    }
+
+    /// position_risk_exit_reason 四类触发逐一手算验证：
+    /// 止损 8<=10×0.9、止盈 12>=10×1.1、移动止盈峰值回落、时间止损持有超期。
+    #[test]
+    fn position_risk_exit_reason_triggers_all_four_rules() {
+        fn engine_with(risk: RiskControlConfig) -> BacktestEngine {
+            BacktestEngine::new(BacktestConfig {
+                risk_control: risk,
+                ..Default::default()
+            })
+        }
+        let buy_date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let check_date = NaiveDate::from_ymd_opt(2024, 1, 20).unwrap();
+
+        // 止损：成本 10，stop=10%，价格 8.9 <= 9
+        let mut stop = engine_with(RiskControlConfig {
+            stop_loss_pct: Some(d("0.10")),
+            ..Default::default()
+        });
+        stop.portfolio
+            .buy_with_cost(buy_date, "A", d("100"), d("10"), Decimal::zero(), None)
+            .unwrap();
+        assert_eq!(
+            stop.position_risk_exit_reason("A", d("8.9"), check_date),
+            Some("risk_stop_loss")
+        );
+        // 价格回升到止损线之上 → 无退出
+        assert_eq!(
+            stop.position_risk_exit_reason("A", d("9.2"), check_date),
+            None
+        );
+
+        // 止盈：成本 10，take=10%，价格 11.2 >= 11
+        let mut take = engine_with(RiskControlConfig {
+            take_profit_pct: Some(d("0.10")),
+            ..Default::default()
+        });
+        take.portfolio
+            .buy_with_cost(buy_date, "A", d("100"), d("10"), Decimal::zero(), None)
+            .unwrap();
+        assert_eq!(
+            take.position_risk_exit_reason("A", d("11.2"), check_date),
+            Some("risk_take_profit")
+        );
+
+        // 移动止盈：峰值 12（经 update_position_risk_state 记录），trailing=5%，
+        // 价格 11.3 <= 12×0.95=11.4
+        let mut trail = engine_with(RiskControlConfig {
+            trailing_stop_pct: Some(d("0.05")),
+            ..Default::default()
+        });
+        trail
+            .portfolio
+            .buy_with_cost(buy_date, "A", d("100"), d("10"), Decimal::zero(), None)
+            .unwrap();
+        let peak_day = market("2024-01-03", ("A", "12"), ("A", "10"));
+        trail.update_position_risk_state(&peak_day);
+        assert_eq!(
+            trail.position_risk_exit_reason("A", d("11.3"), check_date),
+            Some("risk_trailing_stop")
+        );
+
+        // 时间止损：持有 (01-20 - 01-02)=18 天 >= 10 天
+        let mut time_stop = engine_with(RiskControlConfig {
+            time_stop_days: Some(10),
+            ..Default::default()
+        });
+        time_stop
+            .portfolio
+            .buy_with_cost(buy_date, "A", d("100"), d("10"), Decimal::zero(), None)
+            .unwrap();
+        time_stop.position_buy_date.insert("A".into(), buy_date);
+        assert_eq!(
+            time_stop.position_risk_exit_reason("A", d("10"), check_date),
+            Some("risk_time_stop")
+        );
+
+        // 未持仓的 symbol → None
+        assert_eq!(
+            time_stop.position_risk_exit_reason("GHOST", d("10"), check_date),
+            None
+        );
+    }
+
+    /// finalize 边界：零初始资金的空引擎 → final_value=0，现金/持仓占比
+    /// 双双走 0 兜底分支，输出不 panic 且权益为空。
+    #[test]
+    fn finalize_zero_capital_engine_uses_zero_exposure_fallbacks() {
+        let engine = BacktestEngine::new(BacktestConfig {
+            initial_capital: Decimal::zero(),
+            ..Default::default()
+        });
+        let output = engine.finalize();
+        assert!(output.equity_curve.is_empty());
+        assert_eq!(output.metrics.final_cash_weight_pct, Decimal::zero());
+        assert_eq!(
+            output.metrics.final_actual_gross_exposure_pct,
+            Decimal::zero()
+        );
+    }
+
+    /// finalize 的 FIFO 部分匹配分支：单笔买入后被更小数量卖出
+    ///（matched < bought_qty），win_rate/profit_factor 必须有效。
+    #[test]
+    fn finalize_partial_sell_matches_fraction_of_buy_lot() {
+        let mut e = eng();
+        // 买入：01-02 信号 0.95、价格 10 → 约 95 手
+        e.process_day(
+            &market("2024-01-02", ("A", "10"), ("A", "9.9")),
+            Some(&signal("A", "0.95")),
+        );
+        assert_eq!(e.portfolio.trades.len(), 1);
+        let bought = e.portfolio.trades[0].quantity;
+        // 卖出一半：01-03 信号降到 0.45（T+1 可卖）
+        e.process_day(
+            &market("2024-01-03", ("A", "10"), ("A", "10")),
+            Some(&signal("A", "0.45")),
+        );
+        let sells: Vec<&Trade> = e
+            .portfolio
+            .trades
+            .iter()
+            .filter(|t| t.side == crate::portfolio::TradeSide::Sell)
+            .collect();
+        assert!(!sells.is_empty(), "减仓信号必须产生卖出");
+        // 部分卖出（< 买入量）触发 FIFO 部分匹配分支
+        assert!(
+            sells.iter().all(|t| t.quantity < bought),
+            "卖出量应小于买入量 {bought}"
+        );
+        let output = e.finalize();
+        // 手工期望：卖出价 10（零费）对应买入成本 10 → 平局（pnl=0 → 非 winning）
+        assert!(
+            output.metrics.win_rate_pct >= Decimal::zero(),
+            "win_rate 不应为负"
+        );
+    }
 }

@@ -3068,4 +3068,144 @@ mod tests {
         cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_cache_a").await;
         cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_cache_b").await;
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 第六批覆盖率收尾补缺（ETF 涨跌幅家族 / prewarm 深路径 / 空信号现金曲线）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// limit_rate_for 的 ETF 家族分支：跨境 QDII(513xxx) ±20%、
+    /// 货币基金(511880/511990) 不设限(1.0)、普通 ETF ±10%。
+    /// profile=None 走 symbol 代码段判 ETF；instrument_type="etf" 走权威字段。
+    #[test]
+    fn limit_rate_covers_etf_qdii_money_fund_and_plain_families() {
+        let etf = TradingProfile {
+            exchange: Some("SSE".into()),
+            market: Some("主板".into()),
+            is_st: false,
+            instrument_type: Some("etf".into()),
+        };
+
+        // 跨境 QDII：513100 → 20%
+        assert_eq!(
+            BacktestRunner::limit_rate_for("513100.SH", None),
+            Decimal::new(20, 2)
+        );
+        assert_eq!(
+            BacktestRunner::limit_rate_for("513100.SH", Some(&etf)),
+            Decimal::new(20, 2)
+        );
+        // 货币基金：511880/511990 → 1.0（无涨跌幅限制）
+        for code in ["511880.SH", "511990.SH"] {
+            assert_eq!(
+                BacktestRunner::limit_rate_for(code, None),
+                Decimal::ONE,
+                "{code} 货币基金不应设涨跌幅限制"
+            );
+        }
+        // 普通 ETF：510300 → 10%（代码段与 instrument_type 双路一致）
+        assert_eq!(
+            BacktestRunner::limit_rate_for("510300.SH", None),
+            Decimal::new(10, 2)
+        );
+        assert_eq!(
+            BacktestRunner::limit_rate_for("510300.SH", Some(&etf)),
+            Decimal::new(10, 2)
+        );
+    }
+
+    /// prewarm_market_data_cache 连库主路径：真实 dv/benchmark/symbol 窗口
+    /// 预热交易日历、基准与日线到共享缓存并物化 snapshot；
+    /// 二次预热全部命中缓存（无新增 DB miss）。
+    #[tokio::test]
+    async fn db_prewarm_market_data_cache_materializes_snapshot_from_real_bars() {
+        let pool = db_test_pool().await;
+        let runner = BacktestRunner::new(pool.clone());
+        let mut cache = BacktestDataCache::default();
+        let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+
+        let report = runner
+            .prewarm_market_data_cache(
+                &mut cache,
+                "dv-t1-20260918",
+                "000300.SH",
+                &symbols,
+                NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+            )
+            .await
+            .expect("prewarm market data cache from real bars");
+
+        assert_eq!(report.symbol_count, 2);
+        assert_eq!(report.benchmark, "000300.SH");
+        assert_eq!(
+            report.start_date,
+            NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()
+        );
+        assert_eq!(
+            report.end_date,
+            NaiveDate::from_ymd_opt(2026, 9, 11).unwrap()
+        );
+        // 首次预热必须产生日线 miss（从 DB 拉取）
+        assert!(report.cache_delta.daily_bar_symbol_misses >= 2);
+
+        // 二次预热：全部命中内存缓存（daily bar 无新 miss）
+        let second = runner
+            .prewarm_market_data_cache(
+                &mut cache,
+                "dv-t1-20260918",
+                "000300.SH",
+                &symbols,
+                NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 9, 11).unwrap(),
+            )
+            .await
+            .expect("second prewarm fully served by cache");
+        assert_eq!(
+            second.cache_delta.daily_bar_symbol_misses, 0,
+            "二次预热不应再触发日线 DB miss"
+        );
+        assert!(second.cache_delta.daily_bar_symbol_hits >= 2);
+    }
+
+    /// run_with_cache 的空信号分支：无持仓信号时按现金曲线完成回测，
+    /// 落库后 equity 点数 = 窗口交易日数且零成交。
+    #[tokio::test]
+    async fn db_run_with_cache_empty_signals_finishes_as_cash_curve() {
+        let pool = db_test_pool().await;
+        cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_empty_signals").await;
+
+        let task_id = "zzz_test_runner_empty_signals";
+        let config = BacktestConfig {
+            initial_capital: Decimal::new(1_000_000, 0),
+            benchmark: "000300.SH".into(),
+            start_date: NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+            data_version_id: "dv-t1-20260918".into(),
+            // FK 坑（第五批已证）：默认 debug-strategy 不在 strategy_version 表，必拒。
+            strategy_version_id: "factor-combo-v1".into(),
+            ..Default::default()
+        };
+        let runner = BacktestRunner::new(pool.clone());
+        let mut cache = BacktestDataCache::default();
+        let empty_signals: HashMap<NaiveDate, StrategySignal> = HashMap::new();
+
+        let output = runner
+            .run_with_cache(task_id, config, &empty_signals, Some(&mut cache))
+            .await
+            .expect("empty-signal run must finish on the cash curve");
+
+        assert!(output.trades.is_empty(), "无信号不应有成交");
+        assert_eq!(
+            output.equity_curve.len(),
+            4,
+            "2026-09-01 ~ 09-04 共 4 个交易日，现金曲线逐日一格"
+        );
+        assert_eq!(
+            db_task_row_count(&pool, "backtest_task", task_id).await,
+            1,
+            "任务行必须落库"
+        );
+
+        cleanup_zzz_test_backtest_rows(&pool, task_id).await;
+    }
 }

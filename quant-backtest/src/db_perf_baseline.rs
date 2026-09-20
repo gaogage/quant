@@ -886,4 +886,136 @@ mod tests {
         // 空交易日 -> 无信号
         assert!(generate_rebalance_signals(&[], &symbols, 2, 2).is_empty());
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 第六批覆盖率收尾：run_db_perf_baseline 端到端连库（最小 config）
+    //
+    // 写表面（psql 2026-09-20 核实）：
+    // - strategy_definition(PERF_DB_SMOKE) / strategy_version(perf-db-smoke-v1)
+    //   / data_version(perf-db-smoke-data-v1)：三行固定 smoke 元数据（幂等
+    //   upsert，库中已存在），测试保持不清理；
+    // - backtest_* / portfolio_* 九表按 task_id 落库 → 测试用
+    //   zzz_test_perf_runner 前缀 task，前置+结尾按精确 task_id 清理。
+    // ─────────────────────────────────────────────────────────────────
+
+    /// 清理 zzz_test_perf 前缀 task 的九表落库行（精确 task_id 键）。
+    async fn cleanup_zzz_perf_rows(pool: &sqlx::PgPool, task_id: &str) {
+        for table in [
+            "backtest_task",
+            "backtest_result",
+            "backtest_equity_curve",
+            "backtest_trade",
+            "portfolio_target",
+            "backtest_position",
+            "portfolio_exposure",
+            "portfolio_attribution",
+            "portfolio_constraint_violation",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE task_id = $1"))
+                .bind(task_id)
+                .execute(pool)
+                .await
+                .unwrap_or_else(|e| panic!("cleanup {table} for {task_id}: {e}"));
+        }
+    }
+
+    /// run_db_perf_baseline 最小端到端：2 symbol × 10 交易日 × 5 日调仓，
+    /// 真实行情跑通「元数据 upsert → 选symbol → 合成信号 → BacktestRunner
+    /// 九表落库 → 报告」。断言报告字段与落库行数。
+    #[tokio::test]
+    async fn run_db_perf_baseline_end_to_end_with_minimal_config() {
+        let url = "postgres://gaocheng@localhost/quant";
+        let pool = sqlx::PgPool::connect(url)
+            .await
+            .expect("connect local quant db");
+        // 前置清残留（正常情况下不存在）
+        cleanup_zzz_perf_rows(&pool, "zzz_test_perf_runner").await;
+        // run 内部 task_id = {prefix}-{uuid}，事后按 report.task_id 精确清理
+        let config = DbPerfBaselineConfig {
+            database_url: url.to_string(),
+            trading_days: 10,
+            symbols: 2,
+            rebalance_every_n_days: 5,
+            basket_size: 2,
+            start_date: NaiveDate::from_ymd_opt(2024, 2, 20).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 3, 8).unwrap(),
+            benchmark: "000300.SH".to_string(),
+            task_prefix: "zzz_test_perf_runner".to_string(),
+        };
+
+        let report = run_db_perf_baseline(config)
+            .await
+            .expect("db perf baseline end-to-end run");
+
+        // 报告字段：最小配置的确定性断言
+        assert!(report.task_id.starts_with("zzz_test_perf_runner-"));
+        // database_url 无口令（trust 认证）→ 不脱敏原样返回
+        assert_eq!(report.database_url, url);
+        assert_eq!(report.requested_trading_days, 10);
+        assert_eq!(report.requested_symbols, 2);
+        assert_eq!(report.rebalance_every_n_days, 5);
+        assert_eq!(report.basket_size, 2);
+        assert_eq!(
+            report.actual_symbols, 2,
+            "2024-02~03 每日 4,800+ bar，2 只候选必满"
+        );
+        // 10 个交易日 → 等权信号在 step_by(5) 的 0/5 两天产生 → 2 个信号
+        assert_eq!(report.signal_count, 2, "0/5 两档调仓日各一信号");
+        assert_eq!(report.equity_points, 10);
+        assert_eq!(report.benchmark_points, 10);
+        // 2024-02-20 起第 10 个交易日为 03-04（SSE 日历），实际回测终点取之
+        assert_eq!(
+            report.end_date,
+            NaiveDate::from_ymd_opt(2024, 3, 4).unwrap()
+        );
+        // 有真实行情 → 必有成交与逐日持仓
+        assert!(report.trade_count > 0, "真实行情下建仓必须产生成交");
+        assert!(report.daily_position_count > 0);
+        assert!(report.target_count > 0);
+        assert!(
+            report.attribution_count > 0,
+            "默认 Full 持久化下 attribution 逐日记录"
+        );
+        // audit hash 全部为 64 位十六进制
+        for hash in [
+            &report.equity_curve_sha256,
+            &report.signal_hash_sha256,
+            &report.config_sha256,
+            &report.data_version_sha256,
+        ] {
+            assert_eq!(hash.len(), 64);
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+        // config/data_version hash 与本地重算一致（手算期望）
+        assert_eq!(
+            report.data_version_sha256,
+            hash_data_version("perf-db-smoke-data-v1")
+        );
+
+        // 落库核验：任务行 + 权益曲线逐日行
+        let (task_rows,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM backtest_task WHERE task_id = $1")
+                .bind(&report.task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count backtest_task rows");
+        assert_eq!(task_rows, 1, "任务行必须落库");
+        let (equity_rows,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM backtest_equity_curve WHERE task_id = $1")
+                .bind(&report.task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count equity rows");
+        assert_eq!(equity_rows as usize, report.equity_points);
+
+        // 结尾清理：按精确 task_id 清九表
+        cleanup_zzz_perf_rows(&pool, &report.task_id).await;
+        let (left,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM backtest_task WHERE task_id = $1")
+                .bind(&report.task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count leftover rows");
+        assert_eq!(left, 0, "清理后不应残留任务行");
+    }
 }

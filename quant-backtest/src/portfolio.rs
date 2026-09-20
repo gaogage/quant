@@ -527,4 +527,150 @@ mod tests {
         let trade = p.trades.last().unwrap();
         assert_eq!(trade.transfer_fee, Decimal::ZERO);
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 第六批覆盖率收尾补缺（buy/sell 转发体 / 零量与限额防御分支）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// buy()/sell() 便捷转发体：等价于零参与率、无限价的 buy_with_cost /
+    /// sell_with_cost，成交后持仓数经 num_positions 反映，卖出清仓后归零。
+    #[test]
+    fn buy_and_sell_convenience_wrappers_round_trip_position() {
+        let day1 = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let day2 = NaiveDate::from_ymd_opt(2024, 1, 3).unwrap();
+        let mut p = default_portfolio();
+
+        assert_eq!(p.num_positions(), 0, "初始无持仓");
+        // 默认费率含 1bp 滑点：买入手算成交价 = 10 × (1 + 0.0001) = 10.001
+        let fill = p.buy(
+            day1,
+            "600000.SH",
+            Decimal::new(1000, 0),
+            Decimal::new(10, 0),
+        );
+        assert_eq!(fill, Some(Decimal::new(10001, 3)));
+        assert_eq!(p.num_positions(), 1);
+
+        // T+1：当日买入不可卖
+        assert!(
+            p.sell(day1, "600000.SH", Decimal::new(100, 0), Decimal::new(10, 0))
+                .is_none(),
+            "T+1 当日买入不应可卖"
+        );
+        p.end_of_day();
+
+        // 次日全部可卖：清仓后持仓归零
+        // 卖出手算成交价 = 11 × (1 - 0.0001) = 10.9989
+        let sell_fill = p.sell(
+            day2,
+            "600000.SH",
+            Decimal::new(1000, 0),
+            Decimal::new(11, 0),
+        );
+        assert_eq!(sell_fill, Some(Decimal::new(109989, 4)));
+        assert_eq!(p.num_positions(), 0, "清仓后 num_positions 归零");
+    }
+
+    /// buy_with_cost / sell_with_cost 的防御分支：零数量直接 None；
+    /// 卖出超过可卖数量 None；仓位上限触发 None；无限价时不钳制滑点价。
+    #[test]
+    fn cost_variants_guard_zero_quantity_overweight_and_sellable() {
+        let day = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let mut p = Portfolio::new(
+            Decimal::new(1_000_000, 0),
+            FeeConfig::default(),
+            Decimal::new(10, 2), // 单票上限 10%
+        );
+
+        // 零数量买入 → None（不产生成交记录）
+        assert!(p
+            .buy_with_cost(
+                day,
+                "A",
+                Decimal::ZERO,
+                Decimal::new(10, 0),
+                Decimal::ZERO,
+                None
+            )
+            .is_none());
+        assert_eq!(p.trades.len(), 0);
+
+        // 仓位上限 10%：120,000 元市值 > 100 万 × 10% → None
+        assert!(p
+            .buy_with_cost(
+                day,
+                "A",
+                Decimal::new(12000, 0),
+                Decimal::new(10, 0),
+                Decimal::ZERO,
+                None
+            )
+            .is_none());
+        assert_eq!(p.trades.len(), 0, "仓位超限不应落成交");
+
+        // 合法买入 9% 仓位后：零数量卖出 → None；超可卖数量 → None
+        assert!(p
+            .buy_with_cost(
+                day,
+                "A",
+                Decimal::new(9000, 0),
+                Decimal::new(10, 0),
+                Decimal::ZERO,
+                None
+            )
+            .is_some());
+        assert!(p
+            .sell_with_cost(
+                day,
+                "A",
+                Decimal::ZERO,
+                Decimal::new(10, 0),
+                Decimal::ZERO,
+                None
+            )
+            .is_none());
+        p.end_of_day();
+        assert!(
+            p.sell_with_cost(
+                day,
+                "A",
+                Decimal::new(9001, 0),
+                Decimal::new(10, 0),
+                Decimal::ZERO,
+                None
+            )
+            .is_none(),
+            "超过可卖数量必须拒绝"
+        );
+        assert_eq!(p.num_positions(), 1, "拒绝的卖出不影响持仓");
+    }
+
+    /// 无限价（None）路径不做滑点价钳制：带参与率的卖出实际成交价
+    /// = 报价 × (1 - slippage)，无 down_limit 兜底分支保持原滑点价。
+    #[test]
+    fn sell_with_cost_without_down_limit_keeps_raw_slippage_price() {
+        let day = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let mut p = default_portfolio();
+        p.buy(day, "A", Decimal::new(1000, 0), Decimal::new(10, 0));
+        p.end_of_day();
+
+        // participation=0.1 → slippage = 0.0001 + 0.05×sqrt(0.1) ≈ 0.015912
+        let fill = p
+            .sell_with_cost(
+                day,
+                "A",
+                Decimal::new(100, 0),
+                Decimal::new(10, 0),
+                Decimal::new(1, 1),
+                None,
+            )
+            .expect("no down limit must not reject sell");
+        let expected_slippage = Decimal::new(1, 4)
+            + Decimal::new(5, 2) * Decimal::from_f64(0.1_f64.sqrt()).expect("sqrt 0.1");
+        let expected = Decimal::new(10, 0) * (Decimal::ONE - expected_slippage);
+        assert!(
+            (fill - expected).abs() < Decimal::new(1, 8),
+            "expected {expected}, got {fill}"
+        );
+    }
 }
