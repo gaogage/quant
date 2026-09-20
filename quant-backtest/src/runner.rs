@@ -2484,11 +2484,11 @@ mod tests {
 
     /// 连接本地 quant 库（先例：quant-factor/src/repository.rs 的 tests 模式）。
     /// runner 的 DB 写表测试（full_flow/dup/cache/empty_signals）共享九张生产表，
-/// 并行执行时曾出现 task 行被外部删除导致 FK 23503（根源未定位，疑似 PG
-/// 连接池竞争下的时序问题）——静态互斥串行化，稳定压倒并行速度。
-static DB_RUN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// 并行执行时曾出现 task 行被外部删除导致 FK 23503（根源未定位，疑似 PG
+    /// 连接池竞争下的时序问题）——静态互斥串行化，稳定压倒并行速度。
+    static DB_RUN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn db_test_pool() -> PgPool {
+    async fn db_test_pool() -> PgPool {
         PgPool::connect("postgres://gaocheng@localhost/quant")
             .await
             .expect("connect local quant db")
