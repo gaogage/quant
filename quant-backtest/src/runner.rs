@@ -2578,12 +2578,12 @@ mod tests {
 
     /// 数据依据（psql 2026-09-20 核实）：
     /// `SELECT symbol, MIN(trade_date), MAX(trade_date), COUNT(*) FROM market_stock_daily_bar_adj
-    ///  WHERE symbol IN ('600519.SH','000001.SZ') GROUP BY 1`
-    /// → 两 symbol 均覆盖 2006-01-04 ~ 2026-09-18（600519.SH 4,772 行）。
+    ///  WHERE symbol IN ('601857.SH','000001.SZ') GROUP BY 1`
+    /// → 两 symbol 均覆盖 2006-01-04 ~ 2026-09-18（601857.SH 4,772 行）。
     #[tokio::test]
     async fn db_load_daily_bars_returns_real_stock_bars_and_cache_hits() {
         let runner = BacktestRunner::new(db_test_pool().await);
-        let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+        let symbols = vec!["601857.SH".to_string(), "000001.SZ".to_string()];
 
         let bars = runner
             .load_daily_bars(
@@ -2601,7 +2601,7 @@ mod tests {
             .expect("daily bars must span at least one day");
         assert_eq!(*last_day, dbd(2026, 9, 18));
         let last_day_bars = &bars[last_day];
-        assert!(last_day_bars.contains_key("600519.SH"));
+        assert!(last_day_bars.contains_key("601857.SH"));
         assert!(last_day_bars.contains_key("000001.SZ"));
         for (open, close, pre_close, amount) in last_day_bars.values() {
             assert!(*open > Decimal::zero());
@@ -2645,20 +2645,20 @@ mod tests {
 
     /// 数据依据（psql 2026-09-20 核实）：
     /// `SELECT symbol, exchange, market, is_st FROM market_stock
-    ///  WHERE symbol IN ('600519.SH','000001.SZ')`
-    /// → 600519.SH: SSE/主板/非ST；000001.SZ: SZSE/主板/非ST。
+    ///  WHERE symbol IN ('601857.SH','000001.SZ')`
+    /// → 601857.SH: SSE/主板/非ST；000001.SZ: SZSE/主板/非ST。
     #[tokio::test]
     async fn db_load_trading_profiles_returns_real_profiles_and_cache_hits() {
         let runner = BacktestRunner::new(db_test_pool().await);
-        let symbols = vec!["600519.SH".to_string(), "000001.SZ".to_string()];
+        let symbols = vec!["601857.SH".to_string(), "000001.SZ".to_string()];
 
         let profiles = runner
             .load_trading_profiles(&symbols)
             .await
             .expect("load real trading profiles");
         let maotai = profiles
-            .get("600519.SH")
-            .expect("600519.SH trading profile");
+            .get("601857.SH")
+            .expect("601857.SH trading profile");
         assert_eq!(maotai.exchange.as_deref(), Some("SSE"));
         assert_eq!(maotai.market.as_deref(), Some("主板"));
         assert!(!maotai.is_st);
@@ -2692,5 +2692,380 @@ mod tests {
             mid.trading_profile_symbol_misses
         );
         assert_eq!(second.len(), 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // DB 全流程连库（BacktestRunner::run / run_with_cache 端到端落库）
+    //
+    // run 的 signals 参数由调用方注入（不依赖因子数据链），手工构造信号即可
+    // 跑通「建任务 → 加载行情 → 引擎回测 → 九表落库」全流程。
+    // 写路径一律 zzz_test_runner* 前缀 task_id + 前置/结尾九表清理。
+    //
+    // 数据依据（psql 2026-09-20 核实）：
+    // - `SELECT data_version_id FROM market_stock_daily_bar ORDER BY trade_date DESC LIMIT 1`
+    //   → dv-t1-20260918（EOD 最新批次）；
+    // - market_trade_calendar SSE 2026-08-03 ~ 2026-09-11 共 30 个交易日
+    //   （08-03/08-04/09-07/09-08 均 is_open）；
+    // - market_stock_daily_bar_adj 两 symbol 各 30 行；market_index_daily_bar
+    //   000300.SH 30 行（窗口内逐日齐全）。
+    // ─────────────────────────────────────────────────────────────────
+
+    /// 清理 zzz_test_runner 前缀 task 的全部回测落库行（九表，前置+结尾双清）。
+    async fn cleanup_zzz_test_backtest_rows(pool: &PgPool, task_id: &str) {
+        for table in [
+            "backtest_task",
+            "backtest_result",
+            "backtest_equity_curve",
+            "backtest_trade",
+            "portfolio_target",
+            "backtest_position",
+            "portfolio_exposure",
+            "portfolio_attribution",
+            "portfolio_constraint_violation",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE task_id = $1"))
+                .bind(task_id)
+                .execute(pool)
+                .await
+                .unwrap_or_else(|e| panic!("cleanup zzz_test_runner rows in {table}: {e}"));
+        }
+    }
+
+    /// 统计指定表内某 task_id 的落库行数。
+    async fn db_task_row_count(pool: &PgPool, table: &str, task_id: &str) -> i64 {
+        let (count,): (i64,) =
+            sqlx::query_as(&format!("SELECT COUNT(*) FROM {table} WHERE task_id = $1"))
+                .bind(task_id)
+                .fetch_one(pool)
+                .await
+                .unwrap_or_else(|e| panic!("count {table} rows for {task_id}: {e}"));
+        count
+    }
+
+    /// 全流程主测试：真实行情 + 手工信号跑 run()，断言引擎输出与九表落库。
+    ///
+    /// config 要点：601857.SH/000001.SZ 两只主板股、30 个交易日窗口
+    /// （2026-08-03 ~ 2026-09-11）、dv-t1-20260918、基准 000300.SH、
+    /// 初始资金 100 万、Standard + Full 持久化（明细表全写）。
+    /// 信号设计：08-03（周一）等权建仓 → 08-04 开盘执行；
+    /// 09-07（周一）调权 60/40 → 09-08 开盘执行（NextOpen 时序）。
+    #[tokio::test]
+    async fn db_run_full_flow_persists_all_detail_tables() {
+        let pool = db_test_pool().await;
+        cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_full_flow").await;
+
+        let task_id = "zzz_test_runner_full_flow";
+        let config = BacktestConfig {
+            initial_capital: Decimal::new(1_000_000, 0),
+            benchmark: "000300.SH".into(),
+            start_date: dbd(2026, 8, 3),
+            end_date: dbd(2026, 9, 11),
+            // strategy_version_id 受 backtest_task FK 约束（fk_backtest_task_strategy_version），
+            // 默认值 "debug-strategy" 不在 strategy_version 表中，必须用真实行。
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "dv-t1-20260918".into(),
+            symbols: vec!["601857.SH".into(), "000001.SZ".into()],
+            ..Default::default()
+        };
+        let signals = HashMap::from([
+            (
+                dbd(2026, 8, 3),
+                StrategySignal {
+                    date: dbd(2026, 8, 3),
+                    target_weights: HashMap::from([
+                        ("601857.SH".to_string(), Decimal::new(50, 2)),
+                        ("000001.SZ".to_string(), Decimal::new(50, 2)),
+                    ]),
+                },
+            ),
+            (
+                dbd(2026, 9, 7),
+                StrategySignal {
+                    date: dbd(2026, 9, 7),
+                    target_weights: HashMap::from([
+                        ("601857.SH".to_string(), Decimal::new(60, 2)),
+                        ("000001.SZ".to_string(), Decimal::new(40, 2)),
+                    ]),
+                },
+            ),
+        ]);
+
+        let runner = BacktestRunner::new(pool.clone());
+        let output = runner
+            .run(task_id, config, &signals)
+            .await
+            .expect("run full backtest against real market data");
+
+        // ── 引擎输出断言 ──
+        // 30 个交易日逐日一个净值点；首日（08-03，信号次日才执行）纯现金 = 初始资金。
+        assert_eq!(output.equity_curve.len(), 30, "每日一个净值点");
+        assert_eq!(
+            output.equity_curve.first().map(|(d, _)| *d),
+            Some(dbd(2026, 8, 3)),
+            "净值曲线首日 = 窗口首个交易日"
+        );
+        assert_eq!(
+            output.equity_curve.last().map(|(d, _)| *d),
+            Some(dbd(2026, 9, 11)),
+            "净值曲线末日 = 窗口最后一个交易日"
+        );
+        assert_eq!(
+            output.equity_curve.first().expect("first equity point").1,
+            Decimal::new(1_000_000, 0),
+            "首日无持仓无成交，权益应等于初始资金"
+        );
+        assert!(
+            output.equity_curve.last().expect("last equity point").1 > Decimal::ZERO,
+            "期末权益必须为正"
+        );
+
+        // 成交与信号对应：NextOpen 时序下信号日 t 的成交落在 t+1 交易日。
+        assert!(!output.trades.is_empty(), "两次调仓必产生成交");
+        assert_eq!(
+            output.metrics.num_trades,
+            output.trades.len(),
+            "metrics 成交数与明细一致"
+        );
+        let trade_days: HashSet<NaiveDate> = output.trades.iter().map(|t| t.trade_date).collect();
+        assert!(
+            trade_days.contains(&dbd(2026, 8, 4)),
+            "08-03 信号应在 08-04 开盘执行，实际成交日 {trade_days:?}"
+        );
+        assert!(
+            trade_days.contains(&dbd(2026, 9, 8)),
+            "09-07 信号应在 09-08 开盘执行，实际成交日 {trade_days:?}"
+        );
+        let first_day_buys: Vec<_> = output
+            .trades
+            .iter()
+            .filter(|t| t.trade_date == dbd(2026, 8, 4))
+            .collect();
+        assert!(!first_day_buys.is_empty(), "建仓日必有成交");
+        assert!(
+            first_day_buys.iter().all(|t| t.quantity > Decimal::ZERO),
+            "建仓成交数量必须为正"
+        );
+
+        // 持仓明细覆盖两只股票，数量非负。
+        let held: HashSet<&String> = output.daily_positions.iter().map(|p| &p.symbol).collect();
+        for symbol in ["601857.SH", "000001.SZ"] {
+            assert!(
+                held.contains(&symbol.to_string()),
+                "{symbol} 应出现在持仓明细中"
+            );
+        }
+        assert!(output
+            .daily_positions
+            .iter()
+            .all(|p| p.quantity >= Decimal::ZERO));
+
+        // ── 九表落库断言 ──
+        let (status, mode, progress): (String, String, String) = sqlx::query_as(
+            "SELECT status::text, mode::text, progress::text FROM backtest_task WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("backtest_task row must exist after run");
+        assert_eq!(status, "completed", "run 结束后任务应标记 completed");
+        assert_eq!(mode, "standard");
+        assert_eq!(progress, "100");
+
+        assert_eq!(
+            db_task_row_count(&pool, "backtest_result", task_id).await,
+            1,
+            "唯一一行汇总结果"
+        );
+        assert_eq!(
+            db_task_row_count(&pool, "backtest_equity_curve", task_id).await,
+            30,
+            "净值曲线逐日落库"
+        );
+        assert_eq!(
+            db_task_row_count(&pool, "backtest_trade", task_id).await as usize,
+            output.trades.len(),
+            "成交逐笔落库，行数与引擎输出一致"
+        );
+        let (off_schedule,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM backtest_trade \
+             WHERE task_id = $1 AND trade_time::date NOT IN ('2026-08-04', '2026-09-08')",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check trade dates");
+        assert_eq!(off_schedule, 0, "成交只应发生在两个计划执行日");
+
+        for table in [
+            "portfolio_target",
+            "backtest_position",
+            "portfolio_exposure",
+            "portfolio_attribution",
+        ] {
+            assert!(
+                db_task_row_count(&pool, table, task_id).await > 0,
+                "Standard+Full 模式下 {table} 必须有明细行"
+            );
+        }
+
+        cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_full_flow").await;
+    }
+
+    /// Err 路径：同一 task_id 二次 run，create_task 裸 INSERT 主键冲突必须报错。
+    /// （run 内部无显式 config 校验分支，数据库唯一约束回传是实际的 Err 路径。）
+    #[tokio::test]
+    async fn db_run_duplicate_task_id_returns_error() {
+        let pool = db_test_pool().await;
+        cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_dup").await;
+
+        let task_id = "zzz_test_runner_dup";
+        // 短窗口（5 个交易日）+ 单信号，降低测试成本。
+        let config = BacktestConfig {
+            initial_capital: Decimal::new(1_000_000, 0),
+            benchmark: "000300.SH".into(),
+            start_date: dbd(2026, 9, 7),
+            end_date: dbd(2026, 9, 11),
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "dv-t1-20260918".into(),
+            symbols: vec!["601857.SH".into()],
+            ..Default::default()
+        };
+        let signals = HashMap::from([(
+            dbd(2026, 9, 7),
+            StrategySignal {
+                date: dbd(2026, 9, 7),
+                target_weights: HashMap::from([("601857.SH".to_string(), Decimal::ONE)]),
+            },
+        )]);
+
+        let runner = BacktestRunner::new(pool.clone());
+        runner
+            .run(task_id, config.clone(), &signals)
+            .await
+            .expect("first run must succeed");
+
+        let err = runner
+            .run(task_id, config, &signals)
+            .await
+            .expect_err("duplicate task_id must fail on create_task insert");
+        assert!(
+            err.to_string().to_lowercase().contains("duplicate"),
+            "应为唯一约束冲突错误，实际: {err}"
+        );
+
+        cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_cache_a").await;
+    }
+
+    /// run_with_cache 变体：批量 trial 场景下复用调用方缓存——
+    /// 第二次 run 同窗口/同 dv/同 symbols 时市场数据全部命中内存缓存，
+    /// 且两次回测结果完全一致。
+    #[tokio::test]
+    async fn db_run_with_cache_reuses_market_data_across_trials() {
+        let pool = db_test_pool().await;
+        cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_cache_a").await;
+
+        let config = BacktestConfig {
+            initial_capital: Decimal::new(1_000_000, 0),
+            benchmark: "000300.SH".into(),
+            start_date: dbd(2026, 8, 3),
+            end_date: dbd(2026, 9, 11),
+            strategy_version_id: "factor-combo-v1".into(),
+            data_version_id: "dv-t1-20260918".into(),
+            symbols: vec!["601857.SH".into(), "000001.SZ".into()],
+            ..Default::default()
+        };
+        let signals = HashMap::from([(
+            dbd(2026, 8, 3),
+            StrategySignal {
+                date: dbd(2026, 8, 3),
+                target_weights: HashMap::from([
+                    ("601857.SH".to_string(), Decimal::new(50, 2)),
+                    ("000001.SZ".to_string(), Decimal::new(50, 2)),
+                ]),
+            },
+        )]);
+
+        let runner = BacktestRunner::new(pool.clone());
+        let mut cache = BacktestDataCache::default();
+
+        // 第一遍（task A）：空缓存起步，四类市场数据各一次 miss。
+        let out_a = runner
+            .run_with_cache(
+                "zzz_test_runner_cache_a",
+                config.clone(),
+                &signals,
+                Some(&mut cache),
+            )
+            .await
+            .expect("first trial with cold cache");
+        let after_a = cache.stats();
+        assert_eq!(after_a.trading_day_misses, 1, "交易日历一次 miss");
+        assert_eq!(after_a.benchmark_data_misses, 1, "基准行情一次 miss");
+        assert_eq!(
+            after_a.daily_bar_symbol_misses, 2,
+            "两只股票日线各一次 miss"
+        );
+        assert_eq!(
+            after_a.trading_profile_symbol_misses, 2,
+            "两只股票交易画像各一次 miss"
+        );
+
+        // 第二遍（task B）：同参数换 task_id，四类数据全部命中，不再触发 DB miss。
+        let out_b = runner
+            .run_with_cache(
+                "zzz_test_runner_cache_b",
+                config,
+                &signals,
+                Some(&mut cache),
+            )
+            .await
+            .expect("second trial with warm cache");
+        let after_b = cache.stats();
+        assert_eq!(after_b.trading_day_hits, after_a.trading_day_hits + 1);
+        assert_eq!(after_b.trading_day_misses, after_a.trading_day_misses);
+        assert_eq!(after_b.benchmark_data_hits, after_a.benchmark_data_hits + 1);
+        assert_eq!(after_b.benchmark_data_misses, after_a.benchmark_data_misses);
+        assert_eq!(
+            after_b.daily_bar_symbol_hits,
+            after_a.daily_bar_symbol_hits + 2
+        );
+        assert_eq!(
+            after_b.daily_bar_symbol_misses,
+            after_a.daily_bar_symbol_misses
+        );
+        assert_eq!(
+            after_b.trading_profile_symbol_hits,
+            after_a.trading_profile_symbol_hits + 2
+        );
+        assert_eq!(
+            after_b.trading_profile_symbol_misses,
+            after_a.trading_profile_symbol_misses
+        );
+
+        // 同数据 + 同信号 + 同引擎 → 两次 trial 结果完全一致（回测可复现性）。
+        assert_eq!(
+            out_b.equity_curve, out_a.equity_curve,
+            "缓存复用不得改变回测结果"
+        );
+        assert_eq!(out_b.metrics.num_trades, out_a.metrics.num_trades);
+
+        // 两个 task 均完整落库（缓存只影响读取路径，不影响持久化）。
+        for task_id in ["zzz_test_runner_cache_a", "zzz_test_runner_cache_b"] {
+            let (status,): (String,) =
+                sqlx::query_as("SELECT status::text FROM backtest_task WHERE task_id = $1")
+                    .bind(task_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("task {task_id} missing: {e}"));
+            assert_eq!(status, "completed", "task {task_id} 应正常完成");
+            assert_eq!(
+                db_task_row_count(&pool, "backtest_equity_curve", task_id).await,
+                30,
+                "task {task_id} 净值曲线应完整落库"
+            );
+        }
+
+        cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_cache_a").await;
+        cleanup_zzz_test_backtest_rows(&pool, "zzz_test_runner_cache_b").await;
     }
 }

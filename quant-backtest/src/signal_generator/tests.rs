@@ -14010,3 +14010,290 @@ async fn db_prewarm_factor_signal_batch_feature_cache_with_real_combo() {
 
     cleanup_zzz_test_market_feature_cache(&pool, "zzz_test_batch_dv").await;
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// generation 全流程连库（generate_signals 族端到端，只读）
+//
+// 数据依据（psql 2026-09-20 核实）：
+// - `SELECT DISTINCT trade_date FROM multi_factor_value
+//    WHERE combo_name='full_pit_icir_37f_h20_fund_v2' AND version='1.0.0'
+//    AND trade_date >= '2026-08-01'` → 2026-08-03 起逐交易日均有评分
+//   （09-01 有 5,768 行、09-07 有 5,557 行）；
+// - market_trade_calendar SSE 2026-09-01 ~ 09-11 共 9 个交易日：
+//   [09-01, 09-02, 09-03, 09-04, 09-07, 09-08, 09-09, 09-10, 09-11]；
+// - model_prediction `pred-v19-repair-nlqr-20260603-20260615-4f`
+//   （06-03 ~ 06-15 逐日约 5,200 行且满足 available_at <= trade_date）。
+//
+// 信号日语义（pit_alpha.rs rebalance_score_days / score_day_for_signal）：
+// entry_delay=0 时，信号日 = trading_days[i]（i = 1, 1+freq, ...），
+// 评分日 = 信号日前一交易日。
+// ─────────────────────────────────────────────────────────────────────
+
+/// 窗口内全部交易日（2026-09-01 ~ 09-11，psql 核实）。
+fn db_sep_window_days() -> Vec<NaiveDate> {
+    vec![
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 2),
+        dbd(2026, 9, 3),
+        dbd(2026, 9, 4),
+        dbd(2026, 9, 7),
+        dbd(2026, 9, 8),
+        dbd(2026, 9, 9),
+        dbd(2026, 9, 10),
+        dbd(2026, 9, 11),
+    ]
+}
+
+/// 断言一组生成信号的结构不变量：持仓数不超过 top_n、权重为正且
+/// 不超过 max_position_pct（10% 默认 + 容差）、总敞口归一。
+fn db_assert_signal_structure(signals: &HashMap<NaiveDate, StrategySignal>) {
+    assert!(!signals.is_empty(), "窗口内必产生信号");
+    let max_weight = Decimal::new(10, 2) + Decimal::new(1, 9);
+    for (day, signal) in signals {
+        assert!(
+            !signal.target_weights.is_empty(),
+            "信号日 {day} 持仓不应为空"
+        );
+        assert!(
+            signal.target_weights.len() <= 20,
+            "信号日 {day} 持仓数 {} 超出合理上限",
+            signal.target_weights.len()
+        );
+        let mut gross = Decimal::ZERO;
+        for (symbol, weight) in &signal.target_weights {
+            assert!(
+                *weight > Decimal::ZERO,
+                "信号日 {day} 的 {symbol} 权重必须为正"
+            );
+            assert!(
+                *weight <= max_weight,
+                "信号日 {day} 的 {symbol} 权重 {weight} 超过单票上限"
+            );
+            gross += *weight;
+        }
+        assert!(
+            gross > Decimal::new(90, 2) && gross <= Decimal::ONE + Decimal::new(1, 6),
+            "信号日 {day} 总敞口 {gross} 应接近满仓归一"
+        );
+    }
+}
+
+/// generate_signals 主路径：真实 combo 评分 → 排序选股 → 等权组合 → 信号。
+/// freq=5、entry_delay=0 时信号日为窗口第 2/7 个交易日（09-02 与 09-09）。
+#[tokio::test]
+async fn db_generate_signals_full_flow_from_real_combo() {
+    let pool = db_test_pool().await;
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        top_n: 10,
+        rebalance_freq_days: 5,
+        score_candidate_pool_size: Some(50),
+        ..Default::default()
+    };
+
+    let signals = generate_signals(&pool, &config, dbd(2026, 9, 1), dbd(2026, 9, 11))
+        .await
+        .expect("generate signals from real combo scores");
+
+    db_assert_signal_structure(&signals);
+
+    // 调仓日精确断言：freq=5 的信号日 = trading_days[1] 与 trading_days[6]。
+    let mut days: Vec<NaiveDate> = signals.keys().copied().collect();
+    days.sort();
+    assert_eq!(
+        days,
+        vec![dbd(2026, 9, 2), dbd(2026, 9, 9)],
+        "freq=5 应在窗口第 2/7 个交易日产生信号"
+    );
+    // 信号 key 必须落在窗口交易日上（供 BacktestRunner::run 直接消费）。
+    for day in &days {
+        assert!(
+            db_sep_window_days().contains(day),
+            "信号日 {day} 必须是窗口内交易日"
+        );
+    }
+}
+
+/// generate_signals_with_cache 变体：同一 config 二次调用命中内存缓存
+/// （combo scores 不再触发 DB miss），且输出与首调完全一致。
+#[tokio::test]
+async fn db_generate_signals_with_cache_hits_combo_scores_on_second_call() {
+    let pool = db_test_pool().await;
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        top_n: 10,
+        rebalance_freq_days: 5,
+        score_candidate_pool_size: Some(50),
+        ..Default::default()
+    };
+
+    let mut cache = SignalDataCache::default();
+    let before = cache.stats();
+    let first = generate_signals_with_cache(
+        &pool,
+        &config,
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 11),
+        &mut cache,
+    )
+    .await
+    .expect("first generation loads combo scores from DB");
+    let after_first = cache.stats();
+    // 两个 score day（09-01 与 09-08）各一次 miss。
+    assert_eq!(
+        after_first.combo_score_misses - before.combo_score_misses,
+        2,
+        "首调两个评分日各一次 DB miss"
+    );
+
+    let before_second = cache.stats();
+    let second = generate_signals_with_cache(
+        &pool,
+        &config,
+        dbd(2026, 9, 1),
+        dbd(2026, 9, 11),
+        &mut cache,
+    )
+    .await
+    .expect("second generation reuses in-memory cache");
+    let after_second = cache.stats();
+    assert_eq!(
+        after_second.combo_score_hits - before_second.combo_score_hits,
+        2,
+        "二次调用两个评分日全部命中内存缓存"
+    );
+    assert_eq!(
+        after_second.combo_score_misses - before_second.combo_score_misses,
+        0,
+        "缓存命中后不应再有 DB miss"
+    );
+
+    // 缓存复用不得改变信号输出（keys 顺序随机，先排序再比对）。
+    let mut first_days: Vec<NaiveDate> = first.keys().copied().collect();
+    first_days.sort();
+    let mut second_days: Vec<NaiveDate> = second.keys().copied().collect();
+    second_days.sort();
+    assert_eq!(second_days, first_days, "两代调仓日一致");
+    for (day, first_signal) in &first {
+        let second_signal = second
+            .get(day)
+            .unwrap_or_else(|| panic!("二次调用缺失信号日 {day}"));
+        assert_eq!(
+            first_signal.target_weights, second_signal.target_weights,
+            "信号日 {day} 两代目标权重必须一致"
+        );
+    }
+}
+
+/// generate_regime_signals：professional_default 政策叠加真实基准收益分类，
+/// 输出结构不变量（信号日可以是政策调整后的任意调仓日，不做精确断言）。
+#[tokio::test]
+async fn db_generate_regime_signals_applies_professional_policy() {
+    let pool = db_test_pool().await;
+    let config = SignalConfig {
+        combo_name: "full_pit_icir_37f_h20_fund_v2".into(),
+        version: "1.0.0".into(),
+        top_n: 10,
+        rebalance_freq_days: 5,
+        score_candidate_pool_size: Some(50),
+        ..Default::default()
+    };
+    let policy = MarketRegimePolicy::professional_default("000300.SH");
+
+    let signals =
+        generate_regime_signals(&pool, &config, &policy, dbd(2026, 9, 1), dbd(2026, 9, 11))
+            .await
+            .expect("generate regime-aware signals from real combo and benchmark");
+
+    // 政策按真实市况覆盖参数（Bull top_n=80/gross=1.0、Bear top_n=30/gross=0.50、
+    // HighVolatility gross=0.35、Sideways/Mixed top_n=50/gross=0.80），
+    // 不能沿用 base config 的满仓/10 只结构断言，改用政策感知的区间断言。
+    assert!(!signals.is_empty(), "窗口内必产生 regime 信号");
+    let max_weight = Decimal::new(10, 2) + Decimal::new(1, 9);
+    for (day, signal) in &signals {
+        assert!(
+            !signal.target_weights.is_empty(),
+            "信号日 {day} 持仓不应为空"
+        );
+        // top_n 上限 = Bull 的 80（预选池 50 会再截一次，取宽松上界 80）。
+        assert!(
+            signal.target_weights.len() <= 80,
+            "信号日 {day} 持仓数 {} 超过政策 top_n 上限 80",
+            signal.target_weights.len()
+        );
+        let mut gross = Decimal::ZERO;
+        for (symbol, weight) in &signal.target_weights {
+            assert!(
+                *weight > Decimal::ZERO,
+                "信号日 {day} 的 {symbol} 权重必须为正"
+            );
+            assert!(
+                *weight <= max_weight,
+                "信号日 {day} 的 {symbol} 权重 {weight} 超过单票上限"
+            );
+            gross += *weight;
+        }
+        // 总敞口 ∈ 政策 gross 档位 [0.35, 1.0]，等权和恒等于档位值。
+        assert!(
+            gross >= Decimal::new(30, 2) && gross <= Decimal::ONE + Decimal::new(1, 6),
+            "信号日 {day} 总敞口 {gross} 应落在政策档位 [0.35, 1.0]（略放宽下界）"
+        );
+    }
+    // 政策可能按市况调整 freq/top_n，信号日集合不精确断言，
+    // 但必须全部落在窗口交易日上。
+    let window_days = db_sep_window_days();
+    for day in signals.keys() {
+        assert!(
+            window_days.contains(day),
+            "regime 信号日 {day} 必须是窗口内交易日"
+        );
+    }
+}
+
+/// generate_prediction_signals：真实 prediction set（pred-v19-repair 系列，
+/// 06-03 起有评分）跑通全流程。窗口 06-03 ~ 06-05 共 3 个交易日，
+/// freq=5、entry_delay=0 时信号日 = 第 2 个交易日（06-04）。
+#[tokio::test]
+async fn db_generate_prediction_signals_from_real_prediction_set() {
+    let pool = db_test_pool().await;
+    let config = PredictionSignalConfig {
+        prediction_set_id: "pred-v19-repair-nlqr-20260603-20260615-4f".into(),
+        top_n: 10,
+        rebalance_freq_days: 5,
+        ..Default::default()
+    };
+
+    let signals = generate_prediction_signals(&pool, &config, dbd(2026, 6, 3), dbd(2026, 6, 5))
+        .await
+        .expect("generate signals from real persisted model predictions");
+
+    db_assert_signal_structure(&signals);
+    let mut days: Vec<NaiveDate> = signals.keys().copied().collect();
+    days.sort();
+    assert_eq!(
+        days,
+        vec![dbd(2026, 6, 4)],
+        "3 交易日窗口 freq=5 只应在第 2 个交易日产生信号"
+    );
+}
+
+/// generate_prediction_signals 的 Err 路径：不存在的 prediction set
+/// 必须报"No model predictions found"（而非空信号静默返回）。
+#[tokio::test]
+async fn db_generate_prediction_signals_unknown_set_returns_error() {
+    let pool = db_test_pool().await;
+    let config = PredictionSignalConfig {
+        prediction_set_id: "zzz_test_no_such_prediction_set".into(),
+        ..Default::default()
+    };
+
+    let err = generate_prediction_signals(&pool, &config, dbd(2026, 6, 3), dbd(2026, 6, 5))
+        .await
+        .expect_err("unknown prediction set must fail");
+    assert!(
+        err.contains("No model predictions found"),
+        "unexpected error message: {err}"
+    );
+}
