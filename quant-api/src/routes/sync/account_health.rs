@@ -978,17 +978,62 @@ async fn check_account_deps(
             .fetch_one(db)
             .await
             .unwrap_or((0, 0, 0));
+            // ETF 复权「值可信」双判据（任务72，2026-09-20）：行完备不等于值正确。
+            // 实证：511010.SH 2026-09-18 分红（fund_div div_cash=0.6204）当日 adj
+            // 仍是前值填充的 1.0380，真实跳变 1.0420 被抹平——行数完备使旧门禁全绿，
+            // 静默错值混入 MVO/composite 信号层（与任务71 比例阈值漏报同构）。
+            // 判据①派生值行数：source 白名单只认 'tushare'（forward_fill/backfill_fwd/
+            // derived_* 全属派生，白名单而非黑名单，防未来新增派生源漏网）。
+            // 判据②分红日跳变：对照 market_fund_div.ex_date（PIT 语义用除权日非公告日），
+            // 除权日 adj 必须相对前一交易日发生变化，否则真实公司行动被抹平。
+            let (etf_adj_derived_rows, etf_div_flat_days): (i64, i64) = sqlx::query_as(
+                "WITH derived AS (
+               SELECT COUNT(*)::int8 AS n
+               FROM market_adjustment_factor
+               WHERE symbol = ANY($1::text[])
+                 AND trade_date >= $2 AND trade_date <= $3
+                 AND source <> 'tushare'
+             ),
+             div_days AS (
+               SELECT d.symbol, d.ex_date,
+                      (SELECT a.adj_factor FROM market_adjustment_factor a
+                        WHERE a.symbol = d.symbol AND a.trade_date >= d.ex_date
+                        ORDER BY a.trade_date LIMIT 1) AS adj_on_after,
+                      (SELECT a.adj_factor FROM market_adjustment_factor a
+                        WHERE a.symbol = d.symbol AND a.trade_date < d.ex_date
+                        ORDER BY a.trade_date DESC LIMIT 1) AS adj_before
+               FROM market_fund_div d
+               WHERE d.symbol = ANY($1::text[])
+                 AND d.ex_date >= $2 AND d.ex_date <= $3
+             )
+             SELECT (SELECT n FROM derived)::int8,
+                    (SELECT COUNT(*) FROM div_days
+                      WHERE adj_before IS NOT NULL AND adj_on_after IS NOT NULL
+                        AND adj_on_after = adj_before)::int8",
+            )
+            .bind(&cfg.etf_symbols)
+            .bind(start)
+            .bind(end)
+            .fetch_one(db)
+            .await
+            .unwrap_or((0, 0));
             out.push(check_item(
                 acct,
                 sid,
                 "ETF复权因子区间覆盖(MVO)",
-                if etf_adj_bad == 0 { "green" } else { "red" },
+                if etf_adj_bad == 0 && etf_adj_derived_rows == 0 && etf_div_flat_days == 0 {
+                    "green"
+                } else {
+                    "red"
+                },
                 format!(
-                    "{}只ETF，期望{}个 symbol-day，覆盖{}，缺口ETF数{}",
+                    "{}只ETF，期望{}个 symbol-day，覆盖{}，缺口ETF数{}；值可信：派生值(非tushare){}行、分红日未跳变{}处（均要求 0）",
                     cfg.etf_symbols.len(),
                     etf_adj_expected,
                     etf_adj_actual,
-                    etf_adj_bad
+                    etf_adj_bad,
+                    etf_adj_derived_rows,
+                    etf_div_flat_days
                 ),
                 Some("/api/v1/quant/data/sync/fund-adj"),
                 Some(json!({

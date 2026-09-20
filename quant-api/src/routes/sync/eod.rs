@@ -628,6 +628,33 @@ pub async fn sync_eod_data(
     if adj_n > 0 {
         info!("[scheduler] EOD 复权因子同步: {} 条", adj_n);
     }
+    // ── ETF 复权因子同步（任务72，2026-09-20 补链）──
+    // 必须独立调用 fund_adj：Tushare 股票 adj_factor 接口对基金无数据，上面的
+    // sync_adj_factor 拿不到任何 ETF 行。此前本链缺失，ETF 的 adj 全靠下方
+    // backfill 前值填充——非除权日填对，**除权日必错**：实证 511010.SH
+    // 2026-09-18 分红（fund_div div_cash=0.6204）当日 adj 仍为前值 1.0380，
+    // 真实跳变 1.0420 被抹平，而行数完备使旧 ETF 门禁全绿（静默错值）。
+    // 只跑策略池（load_active_etf_symbols_union，当前 7 只）：fund_adj 逐只循环
+    // 受 Tushare 限流 60/min，全量 2009 只会把 EOD 链拖成小时级。
+    if !etf_symbols.is_empty() {
+        match quant_data::sync::sync_fund_adj(
+            db,
+            tushare,
+            &etf_symbols,
+            &date_str,
+            &date_str,
+            &format!("dv-fund-adj-eod-{}", date_str),
+        )
+        .await
+        {
+            Ok(n) => info!(
+                "[scheduler] EOD ETF 复权因子同步: {} 条 ({} 只策略池 ETF)",
+                n,
+                etf_symbols.len()
+            ),
+            Err(e) => warn!("[scheduler] EOD ETF 复权因子同步失败: {}", e),
+        }
+    }
     // backfill 再次兜底（sync_adj_factor 部分失败时补全剩余）
     crate::routes::sync::market_data::backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
 
