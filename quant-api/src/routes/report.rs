@@ -988,6 +988,9 @@ mod daily_report_tests {
              LEFT JOIN paper_nav_snapshot s
                     ON s.paper_account_id = pa.paper_account_id AND s.snapshot_date = $1
              WHERE pa.status = 'active' AND pa.account_type = 'simulated'
+               -- 排除 zzz 测试账户（2026-09-21 修：fifth_batch 并行造 zzz 账户时，
+               -- 「已建未写快照」中间态会被本守卫扫到，属窗口竞态非数据不完整）
+               AND pa.paper_account_id NOT LIKE 'zzz%'
                AND (s.paper_account_id IS NULL OR s.daily_return IS NULL)",
         )
         .bind(date)
@@ -1045,6 +1048,9 @@ mod fifth_batch {
             "DELETE FROM paper_margin_trade WHERE paper_account_id = $1",
             "DELETE FROM paper_position WHERE paper_account_id = $1",
             "DELETE FROM paper_nav_snapshot WHERE paper_account_id = $1",
+            // 账户行本身也要删（2026-09-21 修：残留 active simulated 账户会让
+            // daily_report_tests 的"待补账户"守卫误炸）
+            "DELETE FROM paper_account WHERE paper_account_id = $1",
         ] {
             let _ = sqlx::query(sql).bind(account_id).execute(db).await;
         }
@@ -1270,6 +1276,9 @@ mod fifth_batch {
         let acct_a = "zzz_test_api5_rsA";
         // 不完整账户：持仓 symbol 当日无 bar → daily_return 置 NULL（次日 T+1 补发语义）
         let acct_b = "zzz_test_api5_rsB";
+        // 前置全删远未来日（上次 panic 残留防连锁）
+        sqlx::query("DELETE FROM paper_nav_snapshot WHERE snapshot_date = '2027-06-17'")
+            .execute(&db).await.unwrap();
         for a in [acct_a, acct_b] {
             cleanup_account(&db, a).await;
         }
