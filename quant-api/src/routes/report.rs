@@ -870,6 +870,13 @@ pub async fn push_dingtalk_trade_detail_notification(
 }
 
 #[cfg(test)]
+/// report 域写库测试互斥锁（2026-09-22 修）：refresh_eod_snapshot /
+/// snapshot_positions_for_all_accounts 是**全库 active 扫描**的产品函数，
+/// 并行时会顺带给其它测试的中间态账户补快照（如 resend 测试的 rsA
+/// 处于已建未写完整快照时被补 2027-06-15 行 → prev_nav 错乱 →
+/// daily_return 断言失败）。report 域四个写库测试必须串行。
+static REPORT_WRITE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 mod daily_report_tests {
     use super::*;
 
@@ -979,6 +986,7 @@ mod daily_report_tests {
     /// 用「调用前后快照指纹不变」+「命中数为 0」双守卫防数据漂移误写。
     #[tokio::test]
     async fn refresh_eod_snapshot_is_noop_when_day_already_complete() {
+        let _report_write_guard = super::REPORT_WRITE_TEST_LOCK.lock().await;
         let db = test_db().await;
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
 
@@ -1000,10 +1008,15 @@ mod daily_report_tests {
         assert_eq!(pending, 0, "守卫失败：{date} 存在待补账户，换完整日期再测");
 
         async fn day_fingerprint(db: &sqlx::PgPool, date: NaiveDate) -> String {
+            // 排除 zzz 账户（2026-09-22 修，与守卫同口径）：产品 refresh_eod_snapshot
+            // 不识测试前缀，会顺带给并行中「已建无快照」的 zzz 账户补当日快照行
+            // （并行实证 COUNT 4→7、事后被各测试 cleanup 删除故查无实据）——
+            // 本测试验证「完整日的真实账户无写入」，指纹口径须与之一致
             sqlx::query_scalar::<_, String>(
                 "SELECT COUNT(*)::text || ':' || COALESCE(MAX(nav::text),'') || ':' \
                  || COUNT(daily_return)::text
-                 FROM paper_nav_snapshot WHERE snapshot_date = $1",
+                 FROM paper_nav_snapshot WHERE snapshot_date = $1 \
+                 AND paper_account_id NOT LIKE 'zzz%'",
             )
             .bind(date)
             .fetch_one(db)
@@ -1153,6 +1166,7 @@ mod fifth_batch {
 
     #[tokio::test]
     async fn refresh_eod_snapshot_backfills_missing_daily_return() {
+        let _report_write_guard = super::REPORT_WRITE_TEST_LOCK.lock().await;
         let db = test_db().await;
         let account_id = "zzz_test_api5_eod";
         // 守卫：远未来日原本无任何快照（有则说明环境异常，换日期再测）
@@ -1206,6 +1220,7 @@ mod fifth_batch {
 
     #[tokio::test]
     async fn snapshot_after_rebalance_writes_trade_count_and_returns() {
+        let _report_write_guard = super::REPORT_WRITE_TEST_LOCK.lock().await;
         let db = test_db().await;
         let account_id = "zzz_test_api5_snap";
         // 前置精确清理（2026-09-21 补：panic 残留防连锁失败，删 zzz 账户该日快照）
@@ -1271,6 +1286,7 @@ mod fifth_batch {
 
     #[tokio::test]
     async fn resend_daily_report_handles_complete_and_incomplete_days() {
+        let _report_write_guard = super::REPORT_WRITE_TEST_LOCK.lock().await;
         let db = test_db().await;
         // 完整账户：持仓 symbol 当日有 bar → daily_return 有值
         let acct_a = "zzz_test_api5_rsA";

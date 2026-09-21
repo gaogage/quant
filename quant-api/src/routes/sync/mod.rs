@@ -2262,12 +2262,10 @@ mod sixth_batch {
         assert_eq!(empty["estimated_total_rows"], 0);
         assert_eq!(empty["estimated_api_calls"], 90);
         assert_eq!(empty["date_range"]["calendar_day_count"], 90);
-        assert!(
-            empty["sync_endpoint_status"]
-                .as_str()
-                .unwrap()
-                .contains("background_false")
-        );
+        assert!(empty["sync_endpoint_status"]
+            .as_str()
+            .unwrap()
+            .contains("background_false"));
 
         // 单批次估算：90 天 × 350 行/天 = 31500
         let batch = AkshareAnalystRevisionSyncPlanBatch {
