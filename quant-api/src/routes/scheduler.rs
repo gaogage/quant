@@ -983,6 +983,51 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                     }
                 }
             }
+            "rolling_pit_eval" => {
+                // rolling PIT IC 评估调度化（2026-09-21，rolling IC 专项发现 A 修复）：
+                // factor_evaluation 此前无任何定时调用者，rolling 权重曾冻结 2.5 个月
+                // （2026-06-30 后停更，与 sync_fund_adj 缺调度同构——能力存在但无人调用）。
+                // IC 评估是 PIT combo 物化前置（ICIR 权重按 as-of 前最新评估），停更 =
+                // combo 权重对新市场结构停止适应。建议 cron 排非交易日（周六晨）。
+                // 走 background 路由异步执行不阻塞调度循环；horizon 20/60 各提交一遍
+                // （factor_evaluation 现存这两个 horizon 的评估序列）。
+                let api_base = self_api_base();
+                let client = reqwest::Client::new();
+                let end = chrono::Utc::now().date_naive();
+                let lookback = params
+                    .get("lookback_days")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(370);
+                let start = end - chrono::Duration::days(lookback);
+                for horizon in [20i16, 60i16] {
+                    let payload = serde_json::json!({
+                        "start_date": start.format("%Y%m%d").to_string(),
+                        "end_date": end.format("%Y%m%d").to_string(),
+                        "horizon": horizon,
+                    });
+                    match client
+                        .post(format!(
+                            "{}/api/v1/quant/factors/evaluate-rolling-pit/background",
+                            api_base
+                        ))
+                        .json(&payload)
+                        .timeout(std::time::Duration::from_secs(60))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            info!(
+                            "[scheduler] rolling PIT IC 评估任务已提交(horizon={} 区间 {}~{}): {}",
+                            horizon, start, end, resp.status()
+                        )
+                        }
+                        Err(e) => warn!(
+                            "[scheduler] rolling PIT IC 评估任务提交失败(horizon={}): {}",
+                            horizon, e
+                        ),
+                    }
+                }
+            }
             "market_level_source_freshness" => {
                 let today = chrono::Utc::now().date_naive();
                 let api_base = self_api_base();

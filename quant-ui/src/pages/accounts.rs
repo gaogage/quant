@@ -780,20 +780,28 @@ pub fn AccountsContent() -> Element {
                                                         let so = m["sortino_ratio"].as_f64().unwrap_or(0.0);
                                                         let md = m["max_drawdown_pct"].as_f64().unwrap_or(0.0);
                                                         let ca = m["calmar_ratio"].as_f64().unwrap_or(0.0);
+                                                        // 波动率/胜率（2026-09-21 补齐）：无快照新账号后端返回 null → 显示 —
+                                                        let vol = m["volatility_pct"].as_f64();
+                                                        let wr = m["win_rate_pct"].as_f64();
+                                                        let fmt_vol = vol.map(|v| format!("{:.2}%", v)).unwrap_or_else(|| "—".into());
+                                                        let fmt_wr = wr.map(|v| format!("{:.1}%", v)).unwrap_or_else(|| "—".into());
                                                         let ar_color = if ar >= 0.0 { "text-green-600 dark:text-green-400" } else { "text-red-600 dark:text-red-400" };
                                                         let cr_color = if cr >= 0.0 { "text-green-600 dark:text-green-400" } else { "text-red-600 dark:text-red-400" };
+                                                        let wr_color = if wr.unwrap_or(0.0) >= 50.0 { "text-green-600 dark:text-green-400" } else { "text-orange-600 dark:text-orange-400" };
                                                         let created = d["created_at"].as_str().unwrap_or("-");
                                                         let days = m["nav_history_days"].as_i64().unwrap_or(0);
                                                         rsx! {
                                                             div { class: "mb-4",
                                                                 h4 { class: "text-sm font-semibold text-gray-900 dark:text-white mb-3", "绩效指标" }
-                                                                div { class: "grid grid-cols-3 md:grid-cols-6 gap-3",
+                                                                div { class: "grid grid-cols-4 md:grid-cols-8 gap-3",
                                                                     div { class: "bg-gray-100 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "年化收益" } div { class: "font-mono font-semibold {ar_color}", "{ar:.2}%" } }
                                                                     div { class: "bg-gray-100 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "累计收益" } div { class: "font-mono font-semibold {cr_color}", "{cr:.2}%" } }
                                                                     div { class: "bg-gray-100 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Sharpe" } div { class: "font-mono font-semibold text-blue-600 dark:text-blue-400", "{sh:.2}" } }
                                                                     div { class: "bg-gray-100 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Sortino" } div { class: "font-mono font-semibold text-blue-600 dark:text-blue-400", "{so:.2}" } }
                                                                     div { class: "bg-gray-100 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "最大回撤" } div { class: "font-mono font-semibold text-red-600 dark:text-red-400", "{md:.2}%" } }
                                                                     div { class: "bg-gray-100 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "Calmar" } div { class: "font-mono font-semibold text-yellow-600 dark:text-yellow-400", "{ca:.2}" } }
+                                                                    div { class: "bg-gray-100 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "波动率" } div { class: "font-mono font-semibold text-purple-600 dark:text-purple-400", "{fmt_vol}" } }
+                                                                    div { class: "bg-gray-100 dark:bg-gray-800/50 rounded-lg p-3 text-center", div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "胜率" } div { class: "font-mono font-semibold {wr_color}", "{fmt_wr}" } }
                                                                 }
                                                                 div { class: "text-xs text-gray-400 dark:text-gray-600 mt-2", "启动: {created} · 样本: {days}天" }
                                                             }

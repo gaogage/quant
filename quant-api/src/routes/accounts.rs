@@ -34,6 +34,8 @@ struct NavPerf {
     sortino_ratio: Option<f64>,
     calmar_ratio: Option<f64>,
     max_drawdown_pct: Option<f64>,
+    volatility_pct: Option<f64>,
+    win_rate_pct: Option<f64>,
     trading_days: i64,
     yearly_returns: Option<serde_json::Value>,
 }
@@ -47,6 +49,8 @@ impl NavPerf {
             sortino_ratio: None,
             calmar_ratio: None,
             max_drawdown_pct: None,
+            volatility_pct: None,
+            win_rate_pct: None,
             trading_days: 0,
             yearly_returns: None,
         }
@@ -127,6 +131,10 @@ async fn compute_perf_from_nav(
         sortino_ratio: Some((m.sortino * 100.0).round() / 100.0),
         calmar_ratio: Some((m.calmar * 100.0).round() / 100.0),
         max_drawdown_pct: Some((m.max_drawdown * 1000.0).round() / 10.0),
+        // 波动率/胜率（2026-09-21 账号页绩效指标补齐）：compute_metrics 已算出，
+        // 小数×100 转百分数，口径与 historical_replay 响应一致
+        volatility_pct: Some((m.volatility * 10000.0).round() / 100.0),
+        win_rate_pct: Some((m.win_rate * 10000.0).round() / 100.0),
         trading_days: m.trading_days as i64,
         yearly_returns: Some(serde_json::Value::Array(yearly)),
     })
@@ -390,6 +398,8 @@ pub async fn account_detail(
     let sortino = perf.sortino_ratio.unwrap_or(0.0);
     let cum_ret = perf.cumulative_return_pct.unwrap_or(0.0);
     let calmar = perf.calmar_ratio.unwrap_or(0.0);
+    let volatility = perf.volatility_pct;
+    let win_rate = perf.win_rate_pct;
     // 最大回撤：优先用从 NAV 序列实时算的值；无快照时回退账号字段
     let mdd = perf.max_drawdown_pct.or(mdd);
     let replay_days = perf.trading_days;
@@ -497,6 +507,8 @@ pub async fn account_detail(
                 "sortino_ratio": (sortino * 100.0).round() / 100.0,
                 "max_drawdown_pct": mdd.unwrap_or(0.0),
                 "calmar_ratio": (calmar * 100.0).round() / 100.0,
+                "volatility_pct": volatility,
+                "win_rate_pct": win_rate,
                 "nav_history_days": replay_days,
             },
             "yearly_returns": yearly_returns_json,

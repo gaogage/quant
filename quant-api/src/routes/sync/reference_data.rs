@@ -291,3 +291,89 @@ pub async fn sync_historical(
 
     Json(json!({"code": 0, "data": {"results": results}}))
 }
+
+// ─── 第三批补充测试（非 ignored，秒级，真实本机 PG）─────────────────────
+//
+// 安全边界：sync_* handler 成功路径会真实调用 Tushare 同步，一律不测；
+// 只测参数校验早退分支（无效日期 / 区间倒置），均在触库触网络之前返回。
+
+#[cfg(test)]
+mod third_batch {
+    use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+
+    async fn test_state() -> Arc<crate::AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    async fn resp_json(resp: impl IntoResponse) -> serde_json::Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    #[test]
+    fn backfill_request_defaults_to_completion_marker_mode() {
+        // 只给日期区间时默认走 completion marker 回填（force_tushare=false）
+        let req: BackfillRequest =
+            serde_json::from_str(r#"{"start_date":"20240101","end_date":"20240331"}"#)
+                .expect("minimal backfill req");
+        assert_eq!(req.start_date, "20240101");
+        assert_eq!(req.end_date, "20240331");
+        assert!(!req.force_tushare);
+    }
+
+    #[tokio::test]
+    async fn sync_limit_backfill_rejects_invalid_date_format_before_any_work() {
+        let state = test_state().await;
+        let resp = sync_limit_backfill(
+            State(state),
+            Json(BackfillRequest {
+                start_date: "2026/01/01".to_string(),
+                end_date: "20260131".to_string(),
+                force_tushare: false,
+            }),
+        )
+        .await;
+        let body = resp_json(resp).await;
+        // parse_health_date 只接受 YYYY-MM-DD / YYYYMMDD
+        assert_eq!(body["code"], 1, "{body}");
+        assert_eq!(
+            body["message"],
+            "日期格式无效: 2026/01/01，需要 YYYY-MM-DD 或 YYYYMMDD"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_limit_backfill_rejects_reversed_range_before_any_work() {
+        let state = test_state().await;
+        let resp = sync_limit_backfill(
+            State(state),
+            Json(BackfillRequest {
+                start_date: "20260601".to_string(),
+                end_date: "20260101".to_string(),
+                force_tushare: false,
+            }),
+        )
+        .await;
+        let body = resp_json(resp).await;
+        assert_eq!(body["code"], 1, "{body}");
+        assert_eq!(body["message"], "start_date 不能晚于 end_date");
+    }
+}

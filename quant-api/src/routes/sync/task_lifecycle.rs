@@ -389,3 +389,280 @@ pub async fn cancel_sync_task(
         })),
     }
 }
+
+// ─── 第三批补充测试（非 ignored，秒级，真实本机 PG）─────────────────────
+//
+// 安全边界：不触发真实数据同步（create_sync_task 只测参数校验早退分支）；
+// 写库仅限 data_sync_task 的 zzz_test_ 前缀独占任务行（前置+结尾精确键清理）。
+
+#[cfg(test)]
+mod third_batch {
+    use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    async fn test_state() -> Arc<crate::AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db: test_db().await,
+            tushare: quant_data::tushare::client::TushareClient::from_env()
+                .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)"),
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    async fn resp_json(resp: impl IntoResponse) -> serde_json::Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    /// 精确键清理测试任务行（禁 LIKE 宽前缀，防并行竞态）
+    async fn cleanup_task(db: &sqlx::PgPool, task_id: &str) {
+        let _ = sqlx::query("DELETE FROM data_sync_task WHERE task_id = $1")
+            .bind(task_id)
+            .execute(db)
+            .await;
+    }
+
+    // ── 请求反序列化默认值 ──
+
+    #[test]
+    fn data_sync_task_req_defaults_source_to_tushare() {
+        // dataset 必填，其余字段全部有安全默认值
+        let req: DataSyncTaskReq =
+            serde_json::from_str(r#"{"dataset":"zzz_test"}"#).expect("minimal req");
+        assert_eq!(req.dataset, "zzz_test");
+        assert_eq!(req.source, "tushare");
+        assert_eq!(req.mode, None);
+        assert!(req.symbols.is_empty());
+        assert!(!req.background);
+        assert!(!req.quality_check);
+        assert!(!req.create_data_version);
+        assert_eq!(req.retry_of_task_id, None);
+
+        // 缺 dataset → 反序列化失败（axum 层 400）
+        assert!(serde_json::from_str::<DataSyncTaskReq>(r#"{}"#).is_err());
+    }
+
+    // ── create_sync_task 参数校验早退（零写入）──
+
+    #[tokio::test]
+    async fn create_sync_task_rejects_non_yyyymmdd_dates_before_db_write() {
+        let state = test_state().await;
+        let req = DataSyncTaskReq {
+            dataset: "zzz_test".to_string(),
+            source: "tushare".to_string(),
+            mode: None,
+            symbols: vec![],
+            source_filters: vec![],
+            index_codes: vec![],
+            exchanges: vec![],
+            // register_sync_task 仅接受 YYYYMMDD；连字符格式在写库前被拒
+            start_date: Some("2026-01-01".to_string()),
+            end_date: None,
+            data_version_id: None,
+            background: false,
+            quality_check: false,
+            create_data_version: false,
+            retry_of_task_id: None,
+            reason: None,
+        };
+        let resp = create_sync_task(State(state), Json(req)).await;
+        let body = resp_json(resp).await;
+        assert_eq!(body["code"], 1, "非法日期应拒绝: {body}");
+        assert_eq!(
+            body["message"], "date must use YYYYMMDD format: 2026-01-01",
+            "错误信息应指明需要的日期格式"
+        );
+    }
+
+    // ── sync_task_status 查询 ──
+
+    #[tokio::test]
+    async fn sync_task_status_reports_missing_task() {
+        let state = test_state().await;
+        let resp = sync_task_status(
+            State(state),
+            axum::extract::Path("zzz_test_third_batch_no_such_task".to_string()),
+        )
+        .await;
+        let body = resp_json(resp).await;
+        assert_eq!(body["code"], 1);
+        assert_eq!(body["message"], "task not found");
+    }
+
+    #[tokio::test]
+    async fn sync_task_status_returns_terminal_task_without_stale_flag() {
+        let db = test_db().await;
+        let task_id = "zzz_test_third_batch_status_completed";
+        cleanup_task(&db, task_id).await;
+
+        quant_data::repository::create_sync_task_with_context(
+            &db,
+            task_id,
+            "zzz_test_dataset",
+            "tushare",
+            None,
+            None,
+            None,
+            "completed",
+            None,
+        )
+        .await
+        .expect("seed completed task");
+
+        let state = test_state().await;
+        let resp = sync_task_status(State(state), axum::extract::Path(task_id.to_string())).await;
+        let body = resp_json(resp).await;
+        // 终态任务无心跳超时判定：stale 仅对 running 状态计算
+        assert_eq!(body["code"], 0, "{body}");
+        assert_eq!(body["data"]["task_id"], task_id);
+        assert_eq!(body["data"]["task_type"], "zzz_test_dataset");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(body["data"]["stale"], false);
+
+        cleanup_task(&db, task_id).await;
+    }
+
+    // ── cancel_sync_task 状态机 ──
+
+    #[tokio::test]
+    async fn cancel_sync_task_reports_missing_task() {
+        let state = test_state().await;
+        let resp = cancel_sync_task(
+            State(state),
+            axum::extract::Path("zzz_test_third_batch_no_such_task".to_string()),
+        )
+        .await;
+        let body = resp_json(resp).await;
+        assert_eq!(body["code"], 1);
+        assert_eq!(body["message"], "task not found");
+    }
+
+    #[tokio::test]
+    async fn cancel_sync_task_refuses_terminal_completed_status() {
+        let db = test_db().await;
+        let task_id = "zzz_test_third_batch_cancel_completed";
+        cleanup_task(&db, task_id).await;
+
+        quant_data::repository::create_sync_task_with_context(
+            &db,
+            task_id,
+            "zzz_test_dataset",
+            "tushare",
+            None,
+            None,
+            None,
+            "completed",
+            None,
+        )
+        .await
+        .expect("seed completed task");
+
+        let state = test_state().await;
+        let resp = cancel_sync_task(State(state), axum::extract::Path(task_id.to_string())).await;
+        let body = resp_json(resp).await;
+        // completed 无合法取消迁移 → 拒绝并回显当前状态
+        assert_eq!(body["code"], 1, "{body}");
+        assert_eq!(
+            body["message"],
+            "task cannot be cancelled from status completed"
+        );
+        assert_eq!(body["data"]["status"], "completed");
+
+        // 任务行未被改动
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM data_sync_task WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&db)
+                .await
+                .expect("task row");
+        assert_eq!(status, "completed");
+
+        cleanup_task(&db, task_id).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_sync_task_moves_running_to_cancel_requested() {
+        let db = test_db().await;
+        let task_id = "zzz_test_third_batch_cancel_running";
+        cleanup_task(&db, task_id).await;
+
+        // running 任务注册时带 started_at/last_heartbeat_at（repository 语义）
+        quant_data::repository::create_sync_task_with_context(
+            &db,
+            task_id,
+            "zzz_test_dataset",
+            "tushare",
+            None,
+            None,
+            None,
+            "running",
+            None,
+        )
+        .await
+        .expect("seed running task");
+
+        let state = test_state().await;
+        let resp = cancel_sync_task(State(state), axum::extract::Path(task_id.to_string())).await;
+        let body = resp_json(resp).await;
+        assert_eq!(body["code"], 0, "{body}");
+        assert_eq!(body["data"]["task_id"], task_id);
+        assert_eq!(body["data"]["previous_status"], "running");
+        assert_eq!(body["data"]["status"], "cancel_requested");
+        // 任务不在本测试进程的注册表中 → tokio abort 无目标，返回 false
+        assert_eq!(body["data"]["tokio_aborted"], false);
+
+        // DB 状态确实迁移，且 error_message 兜底写入取消原因
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_message FROM data_sync_task WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&db)
+                .await
+                .expect("task row");
+        assert_eq!(status, "cancel_requested");
+        assert_eq!(error.as_deref(), Some("cancel requested by user"));
+
+        cleanup_task(&db, task_id).await;
+    }
+
+    // ── cleanup_stale_sync_tasks dry-run（只读）──
+
+    #[tokio::test]
+    async fn cleanup_stale_sync_tasks_dry_run_never_updates() {
+        let state = test_state().await;
+        let resp = cleanup_stale_sync_tasks(
+            State(state),
+            Json(CleanupStaleSyncTasksReq {
+                dry_run: true,
+                default_timeout_seconds: Some(1),
+                limit: Some(5),
+            }),
+        )
+        .await;
+        let body = resp_json(resp).await;
+        // dry-run 固定返回 dry_run=true / updated_count=0；候选数与明细一致
+        assert_eq!(body["code"], 0, "{body}");
+        assert_eq!(body["data"]["dry_run"], true);
+        assert_eq!(body["data"]["updated_count"], 0);
+        let candidates = body["data"]["candidates"].as_array().expect("candidates");
+        assert_eq!(body["data"]["candidate_count"], candidates.len());
+        // 每个候选都带终态收敛动作语义
+        for candidate in candidates {
+            assert!(candidate["cleanup_action"].is_string());
+            assert!(candidate["terminal_status"].is_string());
+        }
+    }
+}
