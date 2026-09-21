@@ -349,7 +349,10 @@ async fn compute_paper_nav_inner(
     let benchmark = req.benchmark.unwrap_or_else(|| "000300.SH".into());
 
     // Get account snapshot dates
-    let snapshots = sqlx::query_as::<_, (String, NaiveDate, i32)>(
+    // signal_count 解码为 Option（2026-09-21 修复：历史快照行 36% 该列为 NULL
+    // ——早期快照未记录 signal_count，按 i32 非 Option 解码遇 NULL 必炸
+    // "unexpected null"，由覆盖率第五批测试暴露。值本身未被使用）
+    let snapshots = sqlx::query_as::<_, (String, NaiveDate, Option<i32>)>(
         "SELECT nav_snapshot_id, snapshot_date, signal_count
          FROM paper_nav_snapshot
          WHERE paper_account_id = $1 AND snapshot_date >= $2 AND snapshot_date <= $3
@@ -1785,5 +1788,1030 @@ mod tests {
         assert_eq!(req.price, Decimal::from_i32(10).unwrap());
         assert_eq!(req.commission, Decimal::ZERO);
         assert!(req.trace_id.starts_with("trace-"));
+    }
+}
+
+// ── 第五批覆盖率测试：paper 账号域（请求归一化 / 风控全分支 / 账号-订单-成交全链路）──
+// 模式沿用 exchange_announcement.rs fourth_batch：inner 直调，跳过 axum HTTP 层；
+// 连库测试走真实本机 PG，zzz_test_ 前缀独占键 + 前置+结尾精确键清理（禁 LIKE 宽前缀）。
+#[cfg(test)]
+mod fifth_batch {
+
+    use super::*;
+
+    fn d(v: i64) -> Decimal {
+        Decimal::from(v)
+    }
+
+    /// json 中 Decimal 字段按字符串序列化（rust_decimal serde 默认），转 f64 比较。
+    fn dec_f(v: &Value) -> f64 {
+        v.as_str()
+            .unwrap_or_else(|| panic!("期望字符串数字: {v}"))
+            .parse()
+            .expect("parse decimal str")
+    }
+
+    fn fill_req(price: f64, qty: Option<f64>) -> FillPaperOrderRequest {
+        FillPaperOrderRequest {
+            price,
+            quantity: qty,
+            commission: None,
+            tax: None,
+            slippage: None,
+            operator: None,
+            trace_id: None,
+        }
+    }
+
+    fn order_req(account: &str, side: &str, qty: f64, est: Option<f64>) -> SubmitPaperOrderRequest {
+        SubmitPaperOrderRequest {
+            paper_account_id: account.into(),
+            strategy_version_id: None,
+            symbol: "000001.SZ".into(),
+            side: side.into(),
+            order_type: None,
+            quantity: qty,
+            limit_price: None,
+            estimated_price: est,
+            operator: Some("zzz 第五批".into()),
+            trace_id: None,
+        }
+    }
+
+    fn account_req(name: &str, capital: f64) -> CreatePaperAccountRequest {
+        CreatePaperAccountRequest {
+            name: name.into(),
+            initial_capital: capital,
+            base_currency: None,
+            operator: Some("  ".into()),
+            account_type: default_account_type(),
+            dingtalk_webhook_url: Some("  ".into()),
+        }
+    }
+
+    // ── 纯函数：evaluate_order_risk 剩余分支 ──
+
+    fn norm_order(side: &str, qty: f64, est: Option<f64>) -> NormalizedOrderRequest {
+        normalize_order_request(order_req("pa-1", side, qty, est)).expect("order request")
+    }
+
+    #[test]
+    fn order_risk_rejects_inactive_account_and_bad_side_and_zero_qty() {
+        // 账户非 active
+        let req = norm_order("buy", 100.0, Some(10.0));
+        let risk = evaluate_order_risk(&req, "paused", d(1_000_000));
+        assert!(!risk.passed);
+        assert_eq!(risk.reason.as_deref(), Some("account_not_active"));
+
+        // side 非 buy/sell（归一化已小写化，构造非法值）
+        let req = norm_order("hold", 100.0, Some(10.0));
+        let risk = evaluate_order_risk(&req, "active", d(1_000_000));
+        assert!(!risk.passed);
+        assert_eq!(risk.reason.as_deref(), Some("unsupported_side"));
+
+        // 数量非正
+        let req = norm_order("buy", 0.0, Some(10.0));
+        let risk = evaluate_order_risk(&req, "active", d(1_000_000));
+        assert!(!risk.passed);
+        assert_eq!(risk.reason.as_deref(), Some("non_positive_quantity"));
+    }
+
+    #[test]
+    fn order_risk_buy_without_price_rejected_and_sell_skips_cash_check() {
+        // 买入无 estimated/limit 价 → 拒绝
+        let req = norm_order("buy", 100.0, None);
+        let risk = evaluate_order_risk(&req, "active", d(1_000_000));
+        assert!(!risk.passed);
+        assert_eq!(
+            risk.reason.as_deref(),
+            Some("buy_order_requires_estimated_or_limit_price")
+        );
+
+        // 卖出不检查现金（cash=0 也放行）
+        let req = norm_order("sell", 100.0, None);
+        let risk = evaluate_order_risk(&req, "active", Decimal::ZERO);
+        assert!(risk.passed);
+        assert!(risk.reason.is_none());
+    }
+
+    // ── 纯函数：账号/订单/成交请求归一化 ──
+
+    #[test]
+    fn normalize_account_request_validates_and_defaults() {
+        // name 空 / 非正资本 / 非有限数
+        let err = normalize_account_request(account_req("  ", 100.0))
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err, "name must not be empty");
+        let err = normalize_account_request(account_req("zzz", 0.0))
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err, "initial_capital must be positive");
+        let err = normalize_account_request(account_req("zzz", f64::NAN))
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err, "initial_capital must be a finite number");
+
+        // 正常：base_currency 缺省 CNY，operator/webhook 空白串归 None
+        let req = normalize_account_request(account_req(" zzz 账号 ", 1000.0)).expect("normalize");
+        assert_eq!(req.name, "zzz 账号");
+        assert_eq!(req.initial_capital, d(1000));
+        assert_eq!(req.base_currency, "CNY");
+        assert_eq!(req.account_type, "simulated");
+        assert!(req.operator.is_none());
+        assert!(req.dingtalk_webhook_url.is_none());
+
+        // 显式 base_currency 保留（trim 后非空）
+        let mut r = account_req("zzz", 1000.0);
+        r.base_currency = Some(" USD ".into());
+        let req = normalize_account_request(r).expect("normalize");
+        assert_eq!(req.base_currency, "USD");
+    }
+
+    #[test]
+    fn normalize_order_request_validates_required_fields_and_defaults() {
+        // 必填字段逐个缺失
+        let mut r = order_req("pa-1", "buy", 100.0, Some(10.0));
+        r.paper_account_id = "   ".into();
+        assert_eq!(
+            normalize_order_request(r).map(|_| ()).unwrap_err(),
+            "paper_account_id must not be empty"
+        );
+        let mut r = order_req("pa-1", "buy", 100.0, Some(10.0));
+        r.symbol = "".into();
+        assert_eq!(
+            normalize_order_request(r).map(|_| ()).unwrap_err(),
+            "symbol must not be empty"
+        );
+        let mut r = order_req("pa-1", "BUY", 100.0, Some(10.0));
+        r.side = "  ".into();
+        assert_eq!(
+            normalize_order_request(r).map(|_| ()).unwrap_err(),
+            "side must not be empty"
+        );
+        // quantity 非有限数
+        let r = order_req("pa-1", "buy", f64::NAN, None);
+        assert_eq!(
+            normalize_order_request(r).map(|_| ()).unwrap_err(),
+            "quantity must be a finite number"
+        );
+
+        // 归一化行为：side 大写转小写、order_type 缺省 market、trace_id 自动生成
+        let r = order_req(" pa-1 ", "BUY", 100.0, Some(10.5));
+        let req = normalize_order_request(r).expect("normalize");
+        assert_eq!(req.paper_account_id, "pa-1");
+        assert_eq!(req.side, "buy");
+        assert_eq!(req.order_type, "market");
+        assert_eq!(req.estimated_price, Some(Decimal::new(105, 1)));
+        assert!(req.trace_id.starts_with("trace-"));
+        // limit_price 非有限数拒绝
+        let mut r = order_req("pa-1", "buy", 100.0, None);
+        r.limit_price = Some(f64::INFINITY);
+        assert!(normalize_order_request(r)
+            .map(|_| ())
+            .unwrap_err()
+            .contains("limit_price must be a finite number"));
+    }
+
+    #[test]
+    fn normalize_fill_request_rejects_nonpositive_and_nonfinite_price() {
+        assert_eq!(
+            normalize_fill_request(fill_req(0.0, None))
+                .map(|_| ())
+                .unwrap_err(),
+            "price must be positive"
+        );
+        assert_eq!(
+            normalize_fill_request(fill_req(-1.0, None))
+                .map(|_| ())
+                .unwrap_err(),
+            "price must be positive"
+        );
+        assert_eq!(
+            normalize_fill_request(fill_req(f64::NAN, None))
+                .map(|_| ())
+                .unwrap_err(),
+            "price must be a finite number"
+        );
+    }
+
+    #[test]
+    fn helper_fns_trim_optional_and_convert_decimal() {
+        // required_trimmed
+        assert_eq!(required_trimmed(" x ".into(), "f").unwrap(), "x");
+        assert_eq!(
+            required_trimmed("  ".into(), "f").map(|_| ()).unwrap_err(),
+            "f must not be empty"
+        );
+        // normalize_optional_string：空白 → None，正常 trim
+        assert_eq!(normalize_optional_string(Some("  ".into())), None);
+        assert_eq!(
+            normalize_optional_string(Some(" a ".into())),
+            Some("a".to_string())
+        );
+        assert_eq!(normalize_optional_string(None), None);
+        // optional_decimal：Some(NaN) 拒绝、None 直通
+        assert!(optional_decimal(Some(f64::NAN), "p").is_err());
+        assert!(optional_decimal(None, "p").unwrap().is_none());
+        // decimal_from_f64：有限数转换、无穷拒绝
+        assert_eq!(decimal_from_f64(1.5, "p").unwrap(), Decimal::new(15, 1));
+        assert!(decimal_from_f64(f64::INFINITY, "p").is_err());
+        // default_account_type
+        assert_eq!(default_account_type(), "simulated");
+    }
+
+    // ── 连库测试：真实本机 PG，zzz 独占键自造自清理 ──
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 精确清理 zzz 账户的全部关联行（含快照/审计/预测集，键精确匹配禁 LIKE）。
+    async fn cleanup_account(db: &sqlx::PgPool, account_id: &str) {
+        for sql in [
+            "DELETE FROM paper_fill WHERE paper_account_id = $1",
+            "DELETE FROM paper_order WHERE paper_account_id = $1",
+            "DELETE FROM paper_margin_trade WHERE paper_account_id = $1",
+            "DELETE FROM paper_position WHERE paper_account_id = $1",
+            "DELETE FROM paper_nav_snapshot WHERE paper_account_id = $1",
+        ] {
+            let _ = sqlx::query(sql).bind(account_id).execute(db).await;
+        }
+        let _ = sqlx::query("DELETE FROM audit_event WHERE entity_id = $1")
+            .bind(account_id)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(db)
+            .await;
+    }
+
+    /// 造 zzz 模拟账户：cash=100000，status 参数化（测非 active 分支用 paused）。
+    async fn create_zzz_account(db: &sqlx::PgPool, account_id: &str, status: &str) {
+        cleanup_account(db, account_id).await;
+        sqlx::query(
+            "INSERT INTO paper_account
+               (paper_account_id, name, initial_capital, cash, status,
+                account_type, signal_source)
+             VALUES ($1, 'zzz 第五批 paper 测试', 100000, 100000, $2, 'simulated', 'factor')",
+        )
+        .bind(account_id)
+        .bind(status)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_account");
+    }
+
+    #[tokio::test]
+    async fn create_paper_account_flow_persists_and_audits() {
+        let db = test_db().await;
+        let data = create_paper_account_inner(&db, account_req("zzz 第五批新建账户", 50_000.0))
+            .await
+            .expect("create account");
+        let account_id = data["paper_account_id"].as_str().unwrap().to_string();
+        assert!(account_id.starts_with("pa-"), "账号 id 前缀: {account_id}");
+        assert_eq!(data["status"], "active");
+        assert_eq!(dec_f(&data["initial_capital"]), 50_000.0);
+        assert_eq!(dec_f(&data["cash"]), 50_000.0);
+
+        // DB 落库：默认 CNY / simulated / cash=initial_capital
+        let (base_ccy, acct_type, cash): (String, String, Decimal) = sqlx::query_as(
+            "SELECT base_currency, account_type, cash FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(&account_id)
+        .fetch_one(&db)
+        .await
+        .expect("zzz account row");
+        assert_eq!(base_ccy, "CNY");
+        assert_eq!(acct_type, "simulated");
+        assert_eq!(cash, d(50_000));
+
+        // 审计事件已写
+        let audit_n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE entity_id = $1 AND event_type = 'paper_account.create'",
+        )
+        .bind(&account_id)
+        .fetch_one(&db)
+        .await
+        .expect("audit count");
+        assert_eq!(audit_n, 1, "创建账号应产生 1 条审计事件");
+
+        cleanup_account(&db, &account_id).await;
+    }
+
+    #[tokio::test]
+    async fn submit_paper_order_flow_risk_reject_and_submit() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_submit";
+        create_zzz_account(&db, account_id, "active").await;
+
+        // 账户不存在
+        let err = submit_paper_order_inner(
+            &db,
+            order_req("zzz_test_api5_no_such", "buy", 100.0, Some(1.0)),
+        )
+        .await
+        .expect_err("未知账户应拒绝");
+        assert_eq!(err, "paper_account not found");
+
+        // 买入无价 → 风控拒绝，订单落 rejected + 审计 risk_reject
+        let data = submit_paper_order_inner(&db, order_req(account_id, "buy", 100.0, None))
+            .await
+            .expect("submit rejected-order");
+        let order_id = data["order_id"].as_str().unwrap().to_string();
+        assert_eq!(data["status"], "rejected");
+        assert_eq!(
+            data["risk"]["reason"],
+            "buy_order_requires_estimated_or_limit_price"
+        );
+        let (status, reason): (String, Option<String>) =
+            sqlx::query_as("SELECT status, reason FROM paper_order WHERE order_id = $1")
+                .bind(&order_id)
+                .fetch_one(&db)
+                .await
+                .expect("zzz order row");
+        assert_eq!(status, "rejected");
+        assert!(reason.unwrap_or_default().contains("buy_order_requires"));
+
+        // 现金不足 → rejected insufficient_cash（100 股 × 10000 元 > 100000 现金）
+        let data =
+            submit_paper_order_inner(&db, order_req(account_id, "buy", 100.0, Some(10_000.0)))
+                .await
+                .expect("submit insufficient");
+        assert_eq!(data["status"], "rejected");
+        assert_eq!(data["risk"]["reason"], "insufficient_cash");
+
+        // 正常买入（100 股 × 10 元 = 1000 ≤ 现金）→ submitted + 审计 submit
+        let data = submit_paper_order_inner(&db, order_req(account_id, "buy", 100.0, Some(10.0)))
+            .await
+            .expect("submit ok");
+        let order_id = data["order_id"].as_str().unwrap().to_string();
+        assert_eq!(data["status"], "submitted");
+        let audit_n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE entity_id = $1 AND event_type = 'paper_order.submit'",
+        )
+        .bind(&order_id)
+        .fetch_one(&db)
+        .await
+        .expect("audit count");
+        assert_eq!(audit_n, 1);
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn fill_paper_order_flow_buy_sell_and_guards() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_fill";
+        create_zzz_account(&db, account_id, "active").await;
+
+        // 订单不存在
+        let err = fill_paper_order_inner(&db, "po-zzz-no-such", fill_req(10.0, None))
+            .await
+            .expect_err("未知订单应拒绝");
+        assert_eq!(err, "paper_order not found");
+
+        // 买单成交：100 股 @10，佣金 5 → cash 100000 - 1005
+        let data = submit_paper_order_inner(&db, order_req(account_id, "buy", 100.0, Some(10.0)))
+            .await
+            .expect("submit buy");
+        let buy_order = data["order_id"].as_str().unwrap().to_string();
+        let mut req = fill_req(10.0, Some(100.0));
+        req.commission = Some(5.0);
+        let data = fill_paper_order_inner(&db, &buy_order, req)
+            .await
+            .expect("fill buy");
+        let fill_id = data["fill_id"].as_str().unwrap().to_string();
+        assert!(fill_id.starts_with("pf-"));
+        assert_eq!(dec_f(&data["amount"]), 1000.0);
+        assert_eq!(dec_f(&data["cash_delta"]), -1005.0);
+        let (cash, status): (Decimal, String) = sqlx::query_as(
+            "SELECT (SELECT cash FROM paper_account WHERE paper_account_id = $1),
+                    (SELECT status FROM paper_order WHERE order_id = $2)",
+        )
+        .bind(account_id)
+        .bind(&buy_order)
+        .fetch_one(&db)
+        .await
+        .expect("after buy fill");
+        assert_eq!(cash, d(98_995), "买入扣减 成交额+佣金");
+        assert_eq!(status, "filled");
+
+        // 已 filled 订单重复成交 → 拒绝
+        let err = fill_paper_order_inner(&db, &buy_order, fill_req(10.0, None))
+            .await
+            .expect_err("filled 订单不可再成交");
+        assert!(err.contains("cannot be filled from status filled"), "{err}");
+
+        // 卖单成交：100 股 @11，费用 0 → cash 98995 + 1100
+        let data = submit_paper_order_inner(&db, order_req(account_id, "sell", 100.0, None))
+            .await
+            .expect("submit sell");
+        let sell_order = data["order_id"].as_str().unwrap().to_string();
+        let data = fill_paper_order_inner(&db, &sell_order, fill_req(11.0, None))
+            .await
+            .expect("fill sell");
+        assert_eq!(dec_f(&data["cash_delta"]), 1100.0, "卖出无费用全额回流");
+        let cash: Decimal =
+            sqlx::query_scalar("SELECT cash FROM paper_account WHERE paper_account_id = $1")
+                .bind(account_id)
+                .fetch_one(&db)
+                .await
+                .expect("cash after sell");
+        assert_eq!(cash, d(100_095));
+
+        // 数量守卫：fill 200 > 订单 100 → 拒绝
+        let data = submit_paper_order_inner(&db, order_req(account_id, "buy", 100.0, Some(10.0)))
+            .await
+            .expect("submit buy 2");
+        let order2 = data["order_id"].as_str().unwrap().to_string();
+        let err = fill_paper_order_inner(&db, &order2, fill_req(10.0, Some(200.0)))
+            .await
+            .expect_err("超量成交应拒绝");
+        assert!(err.contains("no greater than order quantity"), "{err}");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn account_summary_prefers_current_nav_over_cash_and_capital() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_summary";
+        create_zzz_account(&db, account_id, "active").await;
+
+        // 2026-09-09 修复回归：nav 必须取 current_nav（非 cash/initial_capital）
+        sqlx::query(
+            "UPDATE paper_account SET current_nav = 110000, peak_nav = 120000 WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .execute(&db)
+        .await
+        .expect("set nav");
+
+        let data = paper_account_summary_inner(&db, account_id)
+            .await
+            .expect("summary");
+        assert_eq!(dec_f(&data["nav"]), 110_000.0, "nav=current_nav 而非 cash");
+        assert_eq!(dec_f(&data["peak_nav"]), 120_000.0);
+        assert_eq!(data["order_count"], json!(0));
+        // total_return = (110000-100000)/100000 = 0.1（字符串形式）
+        assert!(
+            (data["total_return"]
+                .as_str()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+                - 0.1)
+                .abs()
+                < 1e-9,
+            "total_return 应为 0.1: {}",
+            data["total_return"]
+        );
+
+        // current_nav NULL → 回退 initial_capital，total_return 变 0
+        sqlx::query("UPDATE paper_account SET current_nav = NULL WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(&db)
+            .await
+            .expect("null nav");
+        let data = paper_account_summary_inner(&db, account_id)
+            .await
+            .expect("summary 2");
+        assert_eq!(dec_f(&data["nav"]), 100_000.0);
+        assert!(
+            (data["total_return"]
+                .as_str()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+                - 0.0)
+                .abs()
+                < 1e-12,
+            "回退后 total_return 应为 0: {}",
+            data["total_return"]
+        );
+
+        // 未知账户
+        let err = paper_account_summary_inner(&db, "zzz_test_api5_no_such")
+            .await
+            .expect_err("未知账户应拒绝");
+        assert_eq!(err, "paper_account not found");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn paper_metrics_counts_orders_across_statuses() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_metrics";
+        create_zzz_account(&db, account_id, "active").await;
+        // 2 submitted + 1 rejected
+        submit_paper_order_inner(&db, order_req(account_id, "buy", 100.0, Some(10.0)))
+            .await
+            .expect("o1");
+        submit_paper_order_inner(&db, order_req(account_id, "buy", 200.0, Some(10.0)))
+            .await
+            .expect("o2");
+        submit_paper_order_inner(&db, order_req(account_id, "buy", 100.0, None))
+            .await
+            .expect("o3 rejected");
+
+        let metrics = paper_metrics_inner(&db).await.expect("metrics");
+        // 全库聚合并含其它账户订单，只能断言下界（本账户贡献 2 submitted + 1 rejected）
+        assert!(
+            metrics["submitted_order_count"].as_i64().unwrap_or(0) >= 2,
+            "submitted 至少含本账户 2 笔: {}",
+            metrics["submitted_order_count"]
+        );
+        assert!(
+            metrics["rejected_order_count"].as_i64().unwrap_or(0) >= 1,
+            "rejected 至少含本账户 1 笔: {}",
+            metrics["rejected_order_count"]
+        );
+        assert!(metrics["order_count"].as_i64().unwrap_or(0) >= 3);
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    // generate_paper_signals / compute_paper_nav 连库造数 helper ──
+
+    /// 造 zzz prediction_set + 指定日期各 6 个 symbol 的预测行（score 降序）。
+    async fn create_zzz_predictions(db: &sqlx::PgPool, pred_set_id: &str, days: &[NaiveDate]) {
+        cleanup_zzz_predictions(db, pred_set_id).await;
+        // FK 前置：prediction_set.data_version_id → data_version（2026-09-21 补）
+        // FK 前置二：prediction_set.model_version_id → model_registry
+        sqlx::query(
+            "INSERT INTO model_registry \
+             (model_version_id, model_code, model_type, version, label_definition, training_window, artifact_path, artifact_hash, status) \
+             VALUES ('zzz-mv', 'zzz-model', 'zzz', 'v1', '{}', '{}', '', '', 'active') \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(db)
+        .await
+        .expect("insert zzz model_registry");
+
+        sqlx::query(
+            "INSERT INTO data_version (data_version_id, name, source, start_date, end_date, tables, snapshot_hash) \
+             VALUES ('zzz-dv', 'zzz fifth', 'zzz', '2026-06-01', '2026-06-02', '{}', '') \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(db)
+        .await
+        .expect("insert zzz dv for prediction_set");
+        sqlx::query(
+            "INSERT INTO prediction_set
+               (prediction_set_id, model_version_id, feature_set_version_id, data_version_id,
+                start_date, end_date, prediction_hash, status)
+             VALUES ($1, 'zzz-mv', 'zzz-fv', 'zzz-dv', $2, $3, 'zzz-hash', 'ready')",
+        )
+        .bind(pred_set_id)
+        .bind(days[0])
+        .bind(days[days.len() - 1])
+        .execute(db)
+        .await
+        .expect("insert zzz prediction_set");
+
+        for (di, day) in days.iter().enumerate() {
+            for i in 0..6i32 {
+                sqlx::query(
+                    "INSERT INTO model_prediction
+                       (prediction_set_id, trade_date, symbol, score, rank, available_at)
+                     VALUES ($1, $2, $3, $4, $5, $2)",
+                )
+                .bind(pred_set_id)
+                .bind(day)
+                .bind(format!("ZZZP{:02}.SH", i))
+                .bind(1.0 - (i as f64) * 0.01 - (di as f64) * 0.001)
+                .bind(i + 1)
+                .execute(db)
+                .await
+                .expect("insert zzz model_prediction");
+            }
+        }
+    }
+
+    async fn cleanup_zzz_predictions(db: &sqlx::PgPool, pred_set_id: &str) {
+        let _ = sqlx::query("DELETE FROM model_prediction WHERE prediction_set_id = $1")
+            .bind(pred_set_id)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM prediction_set WHERE prediction_set_id = $1")
+            .bind(pred_set_id)
+            .execute(db)
+            .await;
+    }
+
+    fn signals_req(
+        account: &str,
+        pred: &str,
+        start: &str,
+        end: &str,
+    ) -> GeneratePaperSignalsRequest {
+        GeneratePaperSignalsRequest {
+            paper_account_id: account.into(),
+            prediction_set_id: pred.into(),
+            start_date: start.into(),
+            end_date: end.into(),
+            top_n: None,
+            max_position_pct: Some(0.20),
+            rebalance_freq_days: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_paper_signals_validates_account_status_dates_and_scores() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_sig";
+        create_zzz_account(&db, account_id, "paused").await;
+        let pred_set = "zzz_test_api5_pred";
+
+        // 账户不存在
+        let err = generate_paper_signals_inner(
+            &db,
+            signals_req("zzz_test_api5_no_such", pred_set, "20260601", "20260630"),
+        )
+        .await
+        .expect_err("未知账户");
+        assert!(err.contains("account not found"), "{err}");
+
+        // 状态非 active
+        let err = generate_paper_signals_inner(
+            &db,
+            signals_req(account_id, pred_set, "20260601", "20260630"),
+        )
+        .await
+        .expect_err("非 active 状态");
+        assert!(err.contains("account status is paused"), "{err}");
+
+        // 激活后：start_date 坏格式
+        sqlx::query("UPDATE paper_account SET status = 'active' WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(&db)
+            .await
+            .expect("activate");
+        let err = generate_paper_signals_inner(
+            &db,
+            signals_req(account_id, pred_set, "2026-06-01", "20260630"),
+        )
+        .await
+        .expect_err("坏日期格式");
+        assert!(err.starts_with("start_date:"), "{err}");
+
+        // 空预测集
+        let err = generate_paper_signals_inner(
+            &db,
+            signals_req(account_id, pred_set, "20260601", "20260630"),
+        )
+        .await
+        .expect_err("无预测数据");
+        assert_eq!(err, "no prediction scores found for the given date range");
+
+        cleanup_account(&db, account_id).await;
+        cleanup_zzz_predictions(&db, pred_set).await;
+    }
+
+    #[tokio::test]
+    async fn generate_paper_signals_upserts_positions_and_nav_snapshot() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_sigok";
+        let pred_set = "zzz_test_api5_predok";
+        create_zzz_account(&db, account_id, "active").await;
+        let d1 = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 6, 2).unwrap();
+        create_zzz_predictions(&db, pred_set, &[d1, d2]).await;
+
+        let data = generate_paper_signals_inner(
+            &db,
+            signals_req(account_id, pred_set, "20260601", "20260602"),
+        )
+        .await
+        .expect("generate signals");
+        assert_eq!(data["trading_days"], json!(2), "两个预测日");
+        assert_eq!(data["signal_days"], json!(1), "首窗口触发一次信号");
+        assert_eq!(data["nav_updates"], json!(1));
+        assert_eq!(data["top_n"], json!(40));
+
+        // 信号持仓：6 symbol，weight = min(1/6, 0.20) = 1/6
+        let rows: Vec<(String, Decimal)> = sqlx::query_as(
+            "SELECT symbol, target_weight FROM paper_position
+             WHERE paper_account_id = $1 ORDER BY symbol",
+        )
+        .bind(account_id)
+        .fetch_all(&db)
+        .await
+        .expect("zzz positions");
+        assert_eq!(rows.len(), 6, "6 个信号标的: {rows:?}");
+        let expect_w = Decimal::from_f64_retain(1.0 / 6.0).unwrap();
+        for (sym, w) in &rows {
+            assert!(
+                (w - expect_w).abs() < Decimal::new(1, 6),
+                "{sym} weight 应为 1/6: {w}"
+            );
+        }
+
+        // NAV 快照：1 行，signal_count=6，nav=1_000_000（初始化口径）
+        let (nav, sig_count, pred): (f64, i32, String) = sqlx::query_as(
+            "SELECT nav::double precision, signal_count, prediction_set_id
+             FROM paper_nav_snapshot WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("zzz snapshot");
+        assert_eq!(nav, 1_000_000.0);
+        assert_eq!(sig_count, 6);
+        assert_eq!(pred, pred_set);
+
+        cleanup_account(&db, account_id).await;
+        cleanup_zzz_predictions(&db, pred_set).await;
+    }
+
+    #[tokio::test]
+    async fn compute_paper_nav_validates_snapshots_and_positions() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_nav";
+        create_zzz_account(&db, account_id, "active").await;
+
+        let req = |start: &str, end: &str| ComputePaperNavRequest {
+            paper_account_id: account_id.into(),
+            start_date: start.into(),
+            end_date: end.into(),
+            benchmark: Some("ZZZIDX01".into()),
+        };
+
+        // 无快照
+        let err = compute_paper_nav_inner(&db, req("20260601", "20260630"))
+            .await
+            .expect_err("无快照");
+        assert_eq!(err, "no NAV snapshots found for the given range");
+
+        // 有快照但无持仓
+        let snap = crate::routes::shared::NavSnapshot::new(
+            account_id,
+            NaiveDate::from_ymd_opt(2026, 6, 10).unwrap(),
+            100_000.0,
+        );
+        crate::routes::shared::upsert_nav_snapshot(&db, &snap)
+            .await
+            .expect("snap");
+        let err = compute_paper_nav_inner(&db, req("20260601", "20260630"))
+            .await
+            .expect_err("无持仓");
+        assert_eq!(err, "no positions found");
+
+        // 坏日期格式
+        let err = compute_paper_nav_inner(
+            &db,
+            ComputePaperNavRequest {
+                paper_account_id: account_id.into(),
+                start_date: "bad".into(),
+                end_date: "20260630".into(),
+                benchmark: None,
+            },
+        )
+        .await
+        .expect_err("坏日期");
+        assert!(err.starts_with("start_date:"), "{err}");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn compute_paper_nav_updates_snapshots_with_benchmark() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_navok";
+        create_zzz_account(&db, account_id, "active").await;
+
+        // 信号持仓：weight=1.0，信号日 6/09
+        PgPaperPositionRepo::new(&db)
+            .upsert_signal_position(
+                "pp-zzz-api5",
+                account_id,
+                "ZZZP00.SH",
+                1.0,
+                NaiveDate::from_ymd_opt(2026, 6, 9).unwrap(),
+            )
+            .await
+            .expect("signal position");
+
+        // zzz 假行情（bar + 复权因子 → adj 视图）+ zzz 指数（基准）
+        let (bar_sym, idx_sym) = ("ZZZP00.SH", "ZZZIDX01");
+        for (day, close) in [
+            (NaiveDate::from_ymd_opt(2026, 6, 9).unwrap(), 10.0),
+            (NaiveDate::from_ymd_opt(2026, 6, 10).unwrap(), 11.0),
+            (NaiveDate::from_ymd_opt(2026, 6, 11).unwrap(), 12.0),
+        ] {
+            sqlx::query(
+                "INSERT INTO market_stock_daily_bar (symbol, trade_date, close, source)
+                 VALUES ($1, $2, $3, 'zzz-test')
+                 ON CONFLICT (symbol, trade_date) DO UPDATE SET close = EXCLUDED.close",
+            )
+            .bind(bar_sym)
+            .bind(day)
+            .bind(close)
+            .execute(&db)
+            .await
+            .expect("zzz bar");
+            sqlx::query(
+                "INSERT INTO market_adjustment_factor (symbol, trade_date, adj_factor, source)
+                 VALUES ($1, $2, 1.0, 'zzz-test')
+                 ON CONFLICT (symbol, trade_date) DO UPDATE SET adj_factor = EXCLUDED.adj_factor",
+            )
+            .bind(bar_sym)
+            .bind(day)
+            .execute(&db)
+            .await
+            .expect("zzz adj factor");
+        }
+        for (day, close) in [
+            (NaiveDate::from_ymd_opt(2026, 6, 10).unwrap(), 100.0),
+            (NaiveDate::from_ymd_opt(2026, 6, 11).unwrap(), 110.0),
+        ] {
+            sqlx::query(
+                "INSERT INTO market_index_daily_bar (symbol, trade_date, close, source)
+                 VALUES ($1, $2, $3, 'zzz-test')
+                 ON CONFLICT (symbol, trade_date) DO UPDATE SET close = EXCLUDED.close",
+            )
+            .bind(idx_sym)
+            .bind(day)
+            .bind(close)
+            .execute(&db)
+            .await
+            .expect("zzz index bar");
+        }
+        // 两个快照日
+        for day in [
+            NaiveDate::from_ymd_opt(2026, 6, 10).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 11).unwrap(),
+        ] {
+            let snap = crate::routes::shared::NavSnapshot::new(account_id, day, 100_000.0);
+            crate::routes::shared::upsert_nav_snapshot(&db, &snap)
+                .await
+                .expect("snap");
+        }
+
+        let data = compute_paper_nav_inner(
+            &db,
+            ComputePaperNavRequest {
+                paper_account_id: account_id.into(),
+                start_date: "20260610".into(),
+                end_date: "20260611".into(),
+                benchmark: Some(idx_sym.into()),
+            },
+        )
+        .await
+        .expect("compute nav");
+        assert_eq!(data["nav_snapshots_updated"], json!(2));
+        // weight=1.0 → market_value/total_weight = prev_nav 恒定
+        assert_eq!(data["final_nav"], json!(100_000.0));
+        assert_eq!(data["cumulative_return"], json!(0.0));
+
+        // 6/11 快照的 benchmark_return = 110/100 - 1 = 0.1，excess = 0 - 0.1
+        let (bench_ret, excess): (Option<f64>, Option<f64>) = sqlx::query_as(
+            "SELECT benchmark_return::double precision, excess_return::double precision
+             FROM paper_nav_snapshot
+             WHERE paper_account_id = $1 AND snapshot_date = '2026-06-11'",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("zzz snapshot 6/11");
+        let bench_ret = bench_ret.expect("benchmark_return 应已计算");
+        let excess = excess.expect("excess_return 应已计算");
+        assert!((bench_ret - 0.1).abs() < 1e-9, "基准收益 10%: {bench_ret}");
+        assert!((excess - (-0.1)).abs() < 1e-9, "超额 = 0 - 0.1: {excess}");
+
+        // 清理 zzz 行情数据（精确键）
+        for sql in [
+            "DELETE FROM market_stock_daily_bar WHERE symbol = 'ZZZP00.SH' AND source = 'zzz-test'",
+            "DELETE FROM market_adjustment_factor WHERE symbol = 'ZZZP00.SH' AND source = 'zzz-test'",
+            "DELETE FROM market_index_daily_bar WHERE symbol = 'ZZZIDX01' AND source = 'zzz-test'",
+        ] {
+            let _ = sqlx::query(sql).execute(&db).await;
+        }
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn simulate_paper_nav_validates_account_and_scores() {
+        let db = test_db().await;
+        let pred_set = "zzz_test_api5_simpred";
+        create_zzz_predictions(
+            &db,
+            pred_set,
+            &[NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()],
+        )
+        .await;
+
+        // 账户不存在
+        let err = simulate_paper_nav_inner(
+            &db,
+            SimulatePaperNavRequest {
+                paper_account_id: "zzz_test_api5_no_such".into(),
+                prediction_set_id: pred_set.into(),
+                start_date: "20260601".into(),
+                end_date: "20260602".into(),
+                top_n: None,
+                rebalance_freq_days: None,
+                benchmark: None,
+                max_position_pct: None,
+                commission_pct: None,
+            },
+        )
+        .await
+        .expect_err("未知账户");
+        assert_eq!(err, "account not found");
+
+        // 有账户但预测窗口外无分数
+        let account_id = "zzz_test_api5_sim";
+        create_zzz_account(&db, account_id, "active").await;
+        let err = simulate_paper_nav_inner(
+            &db,
+            SimulatePaperNavRequest {
+                paper_account_id: account_id.into(),
+                prediction_set_id: pred_set.into(),
+                start_date: "20260701".into(),
+                end_date: "20260731".into(),
+                top_n: None,
+                rebalance_freq_days: None,
+                benchmark: None,
+                max_position_pct: None,
+                commission_pct: None,
+            },
+        )
+        .await
+        .expect_err("窗口外无分数");
+        assert_eq!(err, "no prediction scores found");
+
+        cleanup_account(&db, account_id).await;
+        cleanup_zzz_predictions(&db, pred_set).await;
+    }
+
+    #[tokio::test]
+    async fn simulate_multi_window_validates_account_and_window_dates() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_mw";
+        create_zzz_account(&db, account_id, "active").await;
+
+        let base_req = |start: &str| MultiWindowSimRequest {
+            paper_account_id: account_id.into(),
+            windows: vec![WindowConfig {
+                prediction_set_id: "zzz_test_api5_mwpred".into(),
+                start_date: start.into(),
+                end_date: "20260630".into(),
+                max_position_pct: None,
+            }],
+            top_n: None,
+            rebalance_freq_days: None,
+            benchmark: None,
+            commission_pct: None,
+        };
+
+        // 账户不存在
+        let mut req = base_req("20260601");
+        req.paper_account_id = "zzz_test_api5_no_such".into();
+        let err = simulate_multi_window_inner(&db, req)
+            .await
+            .expect_err("未知账户");
+        assert_eq!(err, "account not found");
+
+        // 窗口日期坏格式
+        let err = simulate_multi_window_inner(&db, base_req("2026-06-01"))
+            .await
+            .expect_err("坏窗口日期");
+        assert!(err.starts_with("start_date:"), "{err}");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn audit_event_writer_inserts_row() {
+        let db = test_db().await;
+        write_audit_event(
+            &db,
+            "zzz.test.event",
+            "zzz_entity",
+            "zzz_test_api5_audit",
+            Some("zzz"),
+            "第五批审计直写测试",
+            json!({"k": "v"}),
+        )
+        .await
+        .expect("write audit");
+        let (event_type, actor, summary): (String, Option<String>, String) = sqlx::query_as(
+            "SELECT event_type, actor, summary FROM audit_event WHERE entity_id = 'zzz_test_api5_audit'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("zzz audit row");
+        assert_eq!(event_type, "zzz.test.event");
+        assert_eq!(actor.as_deref(), Some("zzz"));
+        assert_eq!(summary, "第五批审计直写测试");
+        let _ = sqlx::query("DELETE FROM audit_event WHERE entity_id = 'zzz_test_api5_audit'")
+            .execute(&db)
+            .await;
     }
 }

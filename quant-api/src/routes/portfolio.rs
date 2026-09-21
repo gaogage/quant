@@ -2462,3 +2462,284 @@ mod tests {
             .contains("not found"));
     }
 }
+
+// ── 第五批覆盖率测试：MVO 实验 overlay / blueprint 报告 / 在线模拟入口的早退与数据装配 ──
+// 模式沿用 exchange_announcement.rs fourth_batch：真实本机 PG 只读 + zzz 造数精确清理；
+// 重回测路径（mvo_backtest 全量执行）跳过，只覆盖入口校验与 OOS 曲线装配。
+#[cfg(test)]
+mod fifth_batch {
+    use super::*;
+    use axum::extract::{Path, State};
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    async fn test_state() -> Arc<crate::AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let db = test_db().await;
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN)");
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    async fn resp_json(resp: impl IntoResponse) -> Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    fn overlay_req() -> MvoOverlayRequest {
+        MvoOverlayRequest {
+            etf_symbols: vec![],
+            min_stock: 0.25,
+            lookback_years: 5,
+            regime_aware: false,
+            dd_threshold: 0.0,
+            dd_scale: 1.0,
+            rebalance: "annual".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mvo_overlay_and_blueprint_reject_runs_without_oos_curves() {
+        let state = test_state().await;
+        // 未知 experiment_run：无 OOS 曲线 → code 1
+        let v = resp_json(
+            mvo_experiment_overlay(
+                State(state.clone()),
+                Path("zzz_test_api5_no_such_run".to_string()),
+                Json(overlay_req()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("No OOS equity curves"),
+            "应报无 OOS 曲线: {}",
+            v["message"]
+        );
+
+        // blueprint_report（复用 overlay 逻辑的定型参数）同路径早退
+        let v = resp_json(
+            blueprint_report(
+                State(state.clone()),
+                Path("zzz_test_api5_no_such_run".to_string()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1);
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("No OOS equity curves"),
+            "blueprint 同源早退: {}",
+            v["message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn load_oos_equity_curves_filters_empty_tasks_and_flat_curves() {
+        let db = test_db().await;
+        let run_id = "zzz_test_api5_exprun";
+        let active_task = "zzz_test_api5_oos_active";
+        let flat_task = "zzz_test_api5_oos_flat";
+
+        // 清残留（精确键）
+        for t in [active_task, flat_task] {
+            let _ = sqlx::query("DELETE FROM backtest_equity_curve WHERE task_id = $1")
+                .bind(t)
+                .execute(&db)
+                .await;
+        }
+        // FK 前置链（2026-09-21 补）：backtest_equity_curve.task_id → backtest_task →
+        // data_version，逐级先造父行（ON CONFLICT 幂等）
+        sqlx::query(
+            "INSERT INTO data_version (data_version_id, name, source, start_date, end_date, tables, snapshot_hash) \
+             VALUES ('zzz-dv-oos', 'zzz fifth', 'zzz', '2025-01-01', '2025-01-31', '{}', '') \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&db)
+        .await
+        .expect("insert zzz dv");
+        // FK 前置：strategy_version.strategy_code → strategy_definition
+        sqlx::query(
+            "INSERT INTO strategy_definition (strategy_id, strategy_code, name, strategy_type, status) \
+             VALUES (999999001, 'zzz-strategy', 'zzz 第五批', 'zzz', 'active') \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&db)
+        .await
+        .expect("insert zzz strategy_definition");
+
+        sqlx::query(
+            "INSERT INTO strategy_version \
+             (strategy_version_id, strategy_code, version, parameter_schema, default_parameters, status) \
+             VALUES ('zzz-sv-oos', 'zzz-strategy', 'v1oos', '{}', '{}', 'active') \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&db)
+        .await
+        .expect("insert zzz strategy_version");
+        for t in [active_task, flat_task] {
+            sqlx::query(
+                "INSERT INTO backtest_task \
+                 (task_id, strategy_version_id, data_version_id, benchmark_symbol, symbols, \
+                  start_date, end_date, initial_capital, rebalance_frequency, \
+                  cost_model, slippage_model, execution_rules, parameters, status) \
+                 VALUES ($1, 'zzz-sv-oos', 'zzz-dv-oos', '000300.SH', '{}', \
+                  '2025-01-01', '2025-01-31', 100000, 'monthly', '{}', '{}', '{}', '{}', 'completed') \
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(t)
+            .execute(&db)
+            .await
+            .expect("insert zzz backtest_task");
+        }
+        let _ = sqlx::query("DELETE FROM experiment_run WHERE experiment_run_id = $1")
+            .bind(run_id)
+            .execute(&db)
+            .await;
+
+        // 活跃曲线：4 点、振幅 3000（>1 且 len>2 → 收）
+        for (i, v) in [100_000.0f64, 101_000.0, 99_000.0, 102_000.0]
+            .iter()
+            .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO backtest_equity_curve (task_id, trade_date, portfolio_value, cash)
+                 VALUES ($1, $2::date + ($3 || ' days')::interval, $4, 0)",
+            )
+            .bind(active_task)
+            .bind(chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
+            .bind(i.to_string())
+            .bind(v)
+            .execute(&db)
+            .await
+            .expect("insert zzz equity");
+        }
+        // 平坦曲线：全 100000 → 被过滤
+        for i in 0..4 {
+            sqlx::query(
+                "INSERT INTO backtest_equity_curve (task_id, trade_date, portfolio_value, cash)
+                 VALUES ($1, $2::date + ($3 || ' days')::interval, 100000, 0)",
+            )
+            .bind(flat_task)
+            .bind(chrono::NaiveDate::from_ymd_opt(2025, 7, 1).unwrap())
+            .bind(i.to_string())
+            .execute(&db)
+            .await
+            .expect("insert zzz flat equity");
+        }
+
+        // experiment_run：三个窗口——活跃 / 空 task_id / 平坦
+        sqlx::query(
+            "INSERT INTO experiment_run
+               (experiment_run_id, experiment_type, config, metrics, status)
+             VALUES ($1, 'zzz-wfa', '{}', $2, 'completed')",
+        )
+        .bind(run_id)
+        .bind(serde_json::json!({
+            "windows": [
+                {"oos_backtest_task_id": "", "window": {"test_start": "2024-01-01", "test_end": "2024-06-30"}},
+                {"oos_backtest_task_id": active_task, "window": {"test_start": "2025-01-01", "test_end": "2025-06-30"}},
+                {"oos_backtest_task_id": flat_task, "window": {"test_start": "2025-07-01", "test_end": "2025-12-31"}}
+            ]
+        }))
+        .execute(&db)
+        .await
+        .expect("insert zzz experiment_run");
+
+        let curves = load_oos_equity_curves(&db, run_id).await.expect("load oos");
+        assert_eq!(curves.len(), 1, "空 task 与平坦曲线均被过滤: {curves:?}");
+        let (test_start, test_end, curve) = &curves[0];
+        assert_eq!(test_start, "2025-01-01");
+        assert_eq!(test_end, "2025-06-30");
+        assert_eq!(curve.len(), 4, "四天权益点");
+        assert_eq!(*curve.values().next().unwrap(), 100_000.0);
+
+        // 未知 run → 空集
+        let empty = load_oos_equity_curves(&db, "zzz_test_api5_no_such_run")
+            .await
+            .expect("unknown run ok");
+        assert!(empty.is_empty());
+
+        for t in [active_task, flat_task] {
+            let _ = sqlx::query("DELETE FROM backtest_equity_curve WHERE task_id = $1")
+                .bind(t)
+                .execute(&db)
+                .await;
+        }
+        let _ = sqlx::query("DELETE FROM experiment_run WHERE experiment_run_id = $1")
+            .bind(run_id)
+            .execute(&db)
+            .await;
+        for t in [active_task, flat_task] {
+            let _ = sqlx::query("DELETE FROM backtest_task WHERE task_id = $1")
+                .bind(t)
+                .execute(&db)
+                .await;
+        }
+        let _ = sqlx::query("DELETE FROM data_version WHERE data_version_id = 'zzz-dv-oos'")
+            .execute(&db)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn run_mvo_simulate_validates_account_and_strategy_resolution() {
+        let db = test_db().await;
+        let req = |account: &str, strategy: Option<&str>| MvoSimulateRequest {
+            etf_symbols: vec![],
+            mvo_lookback_months: 36,
+            min_stock: 0.08,
+            min_stock_override: None,
+            rebalance_freq: "quarterly".to_string(),
+            paper_account_id: account.to_string(),
+            strategy_id: strategy.map(|s| s.to_string()),
+            start_date: None,
+            end_date: None,
+        };
+
+        // paper_account_id 空（trim 后）→ 直接拒绝
+        let err = run_mvo_simulate(&db, "zzz_test_api5_task", &req("  ", None))
+            .await
+            .expect_err("空账户应拒绝");
+        assert_eq!(err, "在线模拟必传 paper_account_id");
+
+        // 未知账号 + 未传 strategy_id → 账号 strategy_version_id 也为空 → 拒绝
+        let err = run_mvo_simulate(
+            &db,
+            "zzz_test_api5_task",
+            &req("zzz_test_api5_no_acct", None),
+        )
+        .await
+        .expect_err("无策略可解析应拒绝");
+        assert!(err.contains("策略 ID 未指定"), "{err}");
+
+        // 传未知 strategy_id → load 失败
+        let err = run_mvo_simulate(
+            &db,
+            "zzz_test_api5_task",
+            &req("zzz_test_api5_no_acct", Some("zzz_test_api5_no_strategy")),
+        )
+        .await
+        .expect_err("未知策略应拒绝");
+        assert!(err.contains("load strategy"), "{err}");
+    }
+}

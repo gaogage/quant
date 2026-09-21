@@ -1015,3 +1015,367 @@ mod daily_report_tests {
         assert_eq!(before, after, "完整日的快照不得被重写");
     }
 }
+
+// ── 第五批覆盖率测试：快照重算/调仓后快照/日报补发/交易明细推送 ──
+// 模式沿用 trading.rs db_second_batch：真实本机 PG，zzz_test_ 前缀独占键 +
+// 前置+结尾精确键清理。钉钉推送用 loopback 无服务地址（127.0.0.1:1）触发
+// 发送失败 warn 分支，绝不外发；远未来日期（2027-06-15）确保生产账户当日在
+// 该测试视角下无快照/无成交，写入行结尾按精确键恢复原状。
+#[cfg(test)]
+mod fifth_batch {
+    use super::*;
+
+    /// 测试专用远未来日期：生产账户在该日无快照、无成交，写入可精确恢复。
+    /// 各测试用不同日期（cargo test 并行），守卫与恢复互不交叉删除。
+    const FUTURE_DAY: NaiveDate = chrono::NaiveDate::from_ymd_opt(2027, 6, 15).unwrap();
+    const FUTURE_DAY_2: NaiveDate = chrono::NaiveDate::from_ymd_opt(2027, 6, 16).unwrap();
+    const FUTURE_DAY_3: NaiveDate = chrono::NaiveDate::from_ymd_opt(2027, 6, 17).unwrap();
+    const PREV_DAY: NaiveDate = chrono::NaiveDate::from_ymd_opt(2027, 6, 14).unwrap();
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    async fn cleanup_account(db: &sqlx::PgPool, account_id: &str) {
+        for sql in [
+            "DELETE FROM paper_fill WHERE paper_account_id = $1",
+            "DELETE FROM paper_order WHERE paper_account_id = $1",
+            "DELETE FROM paper_margin_trade WHERE paper_account_id = $1",
+            "DELETE FROM paper_position WHERE paper_account_id = $1",
+            "DELETE FROM paper_nav_snapshot WHERE paper_account_id = $1",
+        ] {
+            let _ = sqlx::query(sql).bind(account_id).execute(db).await;
+        }
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(db)
+            .await;
+    }
+
+    /// 恢复远未来日的快照原状：删除非 zzz 账户在该日被本测试写入的行
+    /// （前置守卫已验证该日原本 0 行）。
+    async fn restore_future_day(db: &sqlx::PgPool, day: NaiveDate, zzz_accounts: &[&str]) {
+        let _ = sqlx::query(
+            "DELETE FROM paper_nav_snapshot
+             WHERE snapshot_date = $1
+               AND paper_account_id NOT IN (SELECT unnest($2::varchar[]))",
+        )
+        .bind(day)
+        .bind(zzz_accounts)
+        .execute(db)
+        .await;
+    }
+
+    /// 造 zzz 模拟账户：current_nav/cash 参数化，user_id/webhook 供推送路径筛选。
+    async fn create_zzz_account(
+        db: &sqlx::PgPool,
+        account_id: &str,
+        current_nav: f64,
+        cash: f64,
+        user_id: Option<&str>,
+    ) {
+        cleanup_account(db, account_id).await;
+        sqlx::query(
+            "INSERT INTO paper_account
+               (paper_account_id, name, initial_capital, cash, status, account_type,
+                signal_source, current_nav, dingtalk_webhook_url, user_id)
+             VALUES ($1, 'zzz 第五批日报测试', 100000, $2, 'active', 'simulated',
+                'factor', $3, 'http://127.0.0.1:1/zzz', $4)",
+        )
+        .bind(account_id)
+        .bind(cash)
+        .bind(current_nav)
+        .bind(user_id)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_account");
+    }
+
+    async fn insert_position(db: &sqlx::PgPool, account_id: &str, symbol: &str) {
+        sqlx::query(
+            "INSERT INTO paper_position
+               (paper_position_id, paper_account_id, symbol, quantity, avg_cost,
+                market_price, market_value)
+             VALUES ($3, $1, $2, 1000, 12, 12, 12000)
+             ON CONFLICT (paper_account_id, symbol) DO NOTHING",
+        )
+        .bind(account_id)
+        .bind(symbol)
+        .bind(format!("pp-zzz-r5-{}", symbol))
+        .execute(db)
+        .await
+        .expect("insert zzz position");
+    }
+
+    /// 造前日快照（当日收益率的 prev 基准）。
+    async fn insert_prev_snapshot(db: &sqlx::PgPool, account_id: &str, nav: f64) {
+        let mut snap = crate::routes::shared::NavSnapshot::new(account_id, PREV_DAY, nav);
+        snap.daily_return = Some(0.01);
+        crate::routes::shared::upsert_nav_snapshot(db, &snap)
+            .await
+            .expect("prev snapshot");
+    }
+
+    /// 造当日已成交订单（created_at 取 date 正午 UTC：UTC/SH 双时区视角 DATE() 一致）。
+    async fn insert_filled_order(
+        db: &sqlx::PgPool,
+        account_id: &str,
+        order_id: &str,
+        side: &str,
+        target_value: f64,
+        day: NaiveDate, // 2026-09-21 修：原写死 FUTURE_DAY，快照日为 FUTURE_DAY_2 时计数恒 0
+    ) {
+        let created: chrono::DateTime<chrono::Utc> =
+            chrono::TimeZone::from_utc_datetime(&chrono::Utc, &day.and_hms_opt(12, 0, 0).unwrap());
+        sqlx::query(
+            "INSERT INTO paper_order
+               (order_id, paper_account_id, symbol, side, order_type, quantity,
+                status, target_value, created_at)
+             VALUES ($1, $2, 'ZZZR01.SH', $3, 'market', 100, 'filled', $4, $5)",
+        )
+        .bind(order_id)
+        .bind(account_id)
+        .bind(side)
+        .bind(target_value)
+        .bind(created)
+        .execute(db)
+        .await
+        .expect("insert zzz order");
+    }
+
+    #[tokio::test]
+    async fn refresh_eod_snapshot_backfills_missing_daily_return() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_eod";
+        // 守卫：远未来日原本无任何快照（有则说明环境异常，换日期再测）
+        // 前置精确清理（2026-09-21 补：panic 残留防连锁失败，删 zzz 账户该日快照）
+        sqlx::query("DELETE FROM paper_nav_snapshot WHERE snapshot_date = '2027-06-15'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let existing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_nav_snapshot WHERE snapshot_date = '2027-06-15'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap_or(-1);
+        assert_eq!(existing, 0, "守卫失败：2027-06-15 已存在快照");
+
+        // zzz 账户：nav=110000（current_nav），前日快照 105000，持仓 1 笔
+        create_zzz_account(&db, account_id, 110_000.0, 5_000.0, None).await;
+        insert_prev_snapshot(&db, account_id, 105_000.0).await;
+        insert_position(&db, account_id, "ZZZR01.SH").await;
+
+        refresh_eod_snapshot(&db, FUTURE_DAY).await;
+
+        // 当日快照补齐：daily_return=(110000-105000)/105000，cumulative=(110000-100000)/100000
+        let (nav, daily, cum, pos_n, mv, cash): (f64, Option<f64>, Option<f64>, i32, f64, f64) =
+            sqlx::query_as(
+                "SELECT nav::double precision, daily_return::double precision,
+                    cumulative_return::double precision, position_count,
+                    market_value::double precision, cash::double precision
+             FROM paper_nav_snapshot
+             WHERE paper_account_id = $1 AND snapshot_date = '2027-06-15'",
+            )
+            .bind(account_id)
+            .fetch_one(&db)
+            .await
+            .expect("zzz snapshot row");
+        assert_eq!(nav, 110_000.0);
+        let daily = daily.expect("daily_return 应补齐");
+        assert!(
+            (daily - 5_000.0 / 105_000.0).abs() < 1e-9,
+            "日收益: {daily}"
+        );
+        assert!((cum.unwrap_or(0.0) - 0.1).abs() < 1e-9, "累计收益 10%");
+        assert_eq!(pos_n, 1);
+        assert_eq!(mv, 12_000.0);
+        assert_eq!(cash, 5_000.0);
+
+        cleanup_account(&db, account_id).await;
+        restore_future_day(&db, FUTURE_DAY, &[account_id]).await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_after_rebalance_writes_trade_count_and_returns() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_snap";
+        // 前置精确清理（2026-09-21 补：panic 残留防连锁失败，删 zzz 账户该日快照）
+        sqlx::query("DELETE FROM paper_nav_snapshot WHERE snapshot_date = '2027-06-16'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let existing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_nav_snapshot WHERE snapshot_date = '2027-06-16'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap_or(-1);
+        assert_eq!(existing, 0, "守卫失败：2027-06-16 已存在快照");
+
+        create_zzz_account(&db, account_id, 110_000.0, 5_000.0, None).await;
+        insert_prev_snapshot(&db, account_id, 100_000.0).await;
+        insert_position(&db, account_id, "ZZZR02.SH").await;
+        insert_filled_order(
+            &db,
+            account_id,
+            "po-zzz-r5-buy1",
+            "buy",
+            1_000.0,
+            FUTURE_DAY_2,
+        )
+        .await;
+        insert_filled_order(
+            &db,
+            account_id,
+            "po-zzz-r5-sell1",
+            "sell",
+            800.0,
+            FUTURE_DAY_2,
+        )
+        .await;
+
+        snapshot_positions_for_all_accounts(&db, FUTURE_DAY_2).await;
+
+        let (daily, cum, trade_n, pos_n): (Option<f64>, Option<f64>, Option<i32>, i32) =
+            sqlx::query_as(
+                "SELECT daily_return::double precision, cumulative_return::double precision,
+                        trade_count, position_count
+                 FROM paper_nav_snapshot
+                 WHERE paper_account_id = $1 AND snapshot_date = '2027-06-16'",
+            )
+            .bind(account_id)
+            .fetch_one(&db)
+            .await
+            .expect("zzz snapshot row");
+        // 调仓后即时快照：日收益恒有值（10%），成交 2 笔
+        assert!(
+            (daily.unwrap_or(0.0) - 0.1).abs() < 1e-9,
+            "日收益: {daily:?}"
+        );
+        assert!((cum.unwrap_or(0.0) - 0.1).abs() < 1e-9);
+        assert_eq!(trade_n, Some(2), "当日 filled 订单计数");
+        assert_eq!(pos_n, 1);
+
+        cleanup_account(&db, account_id).await;
+        restore_future_day(&db, FUTURE_DAY_2, &[account_id]).await;
+    }
+
+    #[tokio::test]
+    async fn resend_daily_report_handles_complete_and_incomplete_days() {
+        let db = test_db().await;
+        // 完整账户：持仓 symbol 当日有 bar → daily_return 有值
+        let acct_a = "zzz_test_api5_rsA";
+        // 不完整账户：持仓 symbol 当日无 bar → daily_return 置 NULL（次日 T+1 补发语义）
+        let acct_b = "zzz_test_api5_rsB";
+        for a in [acct_a, acct_b] {
+            cleanup_account(&db, a).await;
+        }
+        create_zzz_account(&db, acct_a, 110_000.0, 5_000.0, None).await;
+        create_zzz_account(&db, acct_b, 108_000.0, 6_000.0, None).await;
+        // v24 策略引用：composite 远未来日无数据 → 偏离计算跳过（"数据未就绪"分支）
+        sqlx::query(
+            "UPDATE paper_account SET strategy_version_id = 'v24' WHERE paper_account_id = ANY($1)",
+        )
+        .bind(vec![acct_a, acct_b])
+        .execute(&db)
+        .await
+        .expect("set strategy");
+        for a in [acct_a, acct_b] {
+            insert_prev_snapshot(&db, a, 100_000.0).await;
+        }
+        insert_position(&db, acct_a, "ZZZR03.SH").await;
+        insert_position(&db, acct_b, "ZZZR04.SH").await;
+        // acct_a 的持仓当日有日线（数据完整）；acct_b 无 → 不完整
+        sqlx::query(
+            "INSERT INTO market_stock_daily_bar (symbol, trade_date, close, source)
+             VALUES ('ZZZR03.SH', '2027-06-17', 12.5, 'zzz-test')
+             ON CONFLICT (symbol, trade_date) DO NOTHING",
+        )
+        .execute(&db)
+        .await
+        .expect("insert zzz bar");
+
+        // 补发入口：只处理指定账户（绝不触碰生产账户）
+        resend_daily_performance_report(
+            &db,
+            FUTURE_DAY_3,
+            &[acct_a.to_string(), acct_b.to_string()],
+        )
+        .await
+        .expect("resend ok");
+
+        let (daily_a, cum_a): (Option<f64>, Option<f64>) = sqlx::query_as(
+            "SELECT daily_return::double precision, cumulative_return::double precision
+             FROM paper_nav_snapshot WHERE paper_account_id = $1 AND snapshot_date = '2027-06-17'",
+        )
+        .bind(acct_a)
+        .fetch_one(&db)
+        .await
+        .expect("snapshot A");
+        assert!((daily_a.expect("完整日 daily_return 应有值") - 0.1).abs() < 1e-9);
+        assert!((cum_a.unwrap_or(0.0) - 0.1).abs() < 1e-9);
+
+        let (daily_b, cum_b): (Option<f64>, Option<f64>) = sqlx::query_as(
+            "SELECT daily_return::double precision, cumulative_return::double precision
+             FROM paper_nav_snapshot WHERE paper_account_id = $1 AND snapshot_date = '2027-06-17'",
+        )
+        .bind(acct_b)
+        .fetch_one(&db)
+        .await
+        .expect("snapshot B");
+        assert!(
+            daily_b.is_none(),
+            "日终数据不完整 → daily_return NULL（T+1 补发标记）"
+        );
+        assert!((cum_b.unwrap_or(0.0) - 0.08).abs() < 1e-9, "累计收益 8%");
+
+        for a in [acct_a, acct_b] {
+            cleanup_account(&db, a).await;
+        }
+        let _ = sqlx::query(
+            "DELETE FROM market_stock_daily_bar WHERE symbol = 'ZZZR03.SH' AND source = 'zzz-test'",
+        )
+        .execute(&db)
+        .await;
+        // report_for_accounts 开头的复权因子兜底会在该日注册 data_version 行（ZZZR03.SH
+        // 无历史因子，无 factor 实际写入），精确清掉避免残留
+        let _ = sqlx::query(
+            "DELETE FROM data_version WHERE data_version_id = 'dv-adj-report-20270617'",
+        )
+        .execute(&db)
+        .await;
+    }
+
+    #[tokio::test]
+    async fn trade_detail_notification_pushes_only_accounts_with_fills() {
+        let db = test_db().await;
+        // user 账户（推送筛选条件 user_id IS NOT NULL），webhook 指向 loopback 无服务端口
+        let acct_with = "zzz_test_api5_td1";
+        let acct_without = "zzz_test_api5_td2";
+        create_zzz_account(&db, acct_with, 110_000.0, 5_000.0, Some("admin")).await;
+        create_zzz_account(&db, acct_without, 100_000.0, 5_000.0, Some("admin")).await;
+        // 当日成交：2 买 1 卖（远未来日，生产账户当日必然无成交 → 不触发真实推送）
+        insert_filled_order(
+            &db,
+            acct_with,
+            "po-zzz-r5-td-b1",
+            "buy",
+            1_200.0,
+            FUTURE_DAY,
+        )
+        .await;
+        insert_filled_order(&db, acct_with, "po-zzz-r5-td-b2", "buy", 900.0, FUTURE_DAY).await;
+        insert_filled_order(&db, acct_with, "po-zzz-r5-td-s1", "sell", 700.0, FUTURE_DAY).await;
+
+        // 无成交账户走 continue 分支，有成交账户组装表格并推送（loopback 失败仅 warn）
+        push_dingtalk_trade_detail_notification(&db, FUTURE_DAY)
+            .await
+            .expect("trade detail ok");
+
+        cleanup_account(&db, acct_with).await;
+        cleanup_account(&db, acct_without).await;
+    }
+}

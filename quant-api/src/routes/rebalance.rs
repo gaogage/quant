@@ -1647,3 +1647,947 @@ mod tests {
         assert!((sc_slippage_pct(&sc) - 0.005).abs() < 1e-12);
     }
 }
+
+// ── 第五批覆盖率测试：调仓域（取价/预加载/盯市公司行动/成交资金流/维保门控）──
+// 模式沿用 exchange_announcement.rs fourth_batch：inner 直调，跳过 axum HTTP 层与
+// Tushare 实时取价（Intraday 仅用预取 HashMap）；连库测试走真实本机 PG，
+// zzz_test_ 前缀独占键 + 前置+结尾精确键清理（禁 LIKE 宽前缀）。
+#[cfg(test)]
+mod fifth_batch {
+    use super::*;
+
+    fn d(v: i64) -> Decimal {
+        Decimal::from(v)
+    }
+
+    fn date(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).expect("valid date")
+    }
+
+    fn zzz_strategy_config() -> StrategyConfig {
+        StrategyConfig {
+            etf_premium_gate: 0.10,
+            allocation_mode: None,
+            mu_estimation: None,
+            strategy_id: "zzz-test".into(),
+            name: "zzz 第五批调仓测试".into(),
+            etf_symbols: vec![],
+            equity_curve_task_id: String::new(),
+            min_stock: 0.0,
+            max_single: 0.0,
+            max_single_bull: 0.0,
+            momentum_blend_ratio: 0.0,
+            ga_population: 0,
+            ga_generations: 0,
+            vol_target: 0.20,
+            leverage_cap: 0.0,
+            default_weights: vec![],
+            regime_bull_min_stock: 0.0,
+            regime_bear_min_stock: 0.0,
+            deep_bear_threshold: -0.10,
+            deep_bear_exposure: 0.60,
+            signal_source: String::new(),
+            prediction_blend_weight: 0.0,
+            combo_name: String::new(),
+            top_n: 0,
+            prediction_set_id: None,
+            dynamic_target_cap: 0.0,
+            dynamic_target_floor: 0.0,
+            score_direction: String::new(),
+            candidate_tier: String::new(),
+            leverage_regime_threshold: 0.9,
+            slippage_pct: 0.0,
+            mvo_objective: "minvariance".into(),
+            kelly_fraction: 0.25,
+            score_candidate_pool_size: 200,
+            regime_policy: None,
+            regime_bear_return_threshold: -0.03,
+        }
+    }
+
+    // ── 纯函数：价格源分支 / 表名 / ETF 配置 ──
+
+    #[test]
+    fn price_source_column_and_table_mapping() {
+        // EodOpen 执行价用开盘列，其余（含盯市）一律收盘列
+        assert_eq!(exec_price_col(PriceSource::EodOpen), "open");
+        assert_eq!(exec_price_col(PriceSource::EodClose), "close");
+        assert_eq!(exec_price_col(PriceSource::Intraday), "close");
+        assert_eq!(exec_price_col(PriceSource::EodCloseAdj), "close");
+        // 日线表统一真实价空间（基准与实盘同口径）
+        for ps in [
+            PriceSource::EodClose,
+            PriceSource::Intraday,
+            PriceSource::EodCloseAdj,
+            PriceSource::EodOpen,
+        ] {
+            assert_eq!(daily_bar_table(ps), "market_stock_daily_bar");
+        }
+    }
+
+    #[test]
+    fn build_etf_allocations_adds_cash_leg_and_falls_back_to_zero() {
+        // mvo_weights 短缺：无对应权重 → 0
+        let allocs = build_etf_allocations(&[0.12], 1.0, &["518880.SH".to_string()]);
+        assert_eq!(allocs.len(), 1, "regime=1 不加现金段: {allocs:?}");
+        assert_eq!(allocs[0].0, "518880.SH");
+        assert_eq!(allocs[0].1, 0.0);
+
+        // regime < 1：追加 511880 现金段 = 1 - regime
+        let allocs = build_etf_allocations(&[0.10, 0.30], 0.6, &["518880.SH".to_string()]);
+        assert_eq!(allocs.len(), 2);
+        assert!(
+            (allocs[0].1 - 0.18).abs() < 1e-9,
+            "0.30×0.6: {}",
+            allocs[0].1
+        );
+        assert_eq!(allocs[1].0, "511880.SH");
+        assert!(
+            (allocs[1].1 - 0.4).abs() < 1e-9,
+            "现金段 1-0.6: {}",
+            allocs[1].1
+        );
+    }
+
+    // ── 连库测试：真实本机 PG ──
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 精确清理 zzz 账户全部关联行（含强平/成交流水与快照）。
+    async fn cleanup_account(db: &sqlx::PgPool, account_id: &str) {
+        for sql in [
+            "DELETE FROM paper_fill WHERE paper_account_id = $1",
+            "DELETE FROM paper_order WHERE paper_account_id = $1",
+            "DELETE FROM paper_margin_trade WHERE paper_account_id = $1",
+            "DELETE FROM paper_position WHERE paper_account_id = $1",
+            "DELETE FROM paper_nav_snapshot WHERE paper_account_id = $1",
+        ] {
+            let _ = sqlx::query(sql).bind(account_id).execute(db).await;
+        }
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(db)
+            .await;
+    }
+
+    /// 造 zzz 模拟账户（margin 路径参数化：leverage/margin/阈值）。
+    async fn create_zzz_account(
+        db: &sqlx::PgPool,
+        account_id: &str,
+        cash: Decimal,
+        leverage_enabled: bool,
+        margin: Decimal,
+    ) {
+        cleanup_account(db, account_id).await;
+        sqlx::query(
+            "INSERT INTO paper_account
+               (paper_account_id, name, initial_capital, cash, status, account_type,
+                signal_source, leverage_enabled, margin_amount, reserve_amount,
+                liquidation_threshold, warning_threshold)
+             VALUES ($1, 'zzz 第五批调仓测试', 100000, $2, 'active', 'simulated',
+                'factor', $3, $4, 0, 1.3, 1.5)",
+        )
+        .bind(account_id)
+        .bind(cash)
+        .bind(leverage_enabled)
+        .bind(margin)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_account");
+    }
+
+    /// 直插 zzz 持仓行（绕过 repo，便于控制 last_trade_date/market_value）。
+    async fn insert_position(
+        db: &sqlx::PgPool,
+        account_id: &str,
+        symbol: &str,
+        qty: Decimal,
+        price: Decimal,
+        last_trade: NaiveDate,
+    ) {
+        sqlx::query(
+            "INSERT INTO paper_position
+               (paper_position_id, paper_account_id, symbol, quantity, avg_cost,
+                market_price, market_value, last_trade_date)
+             VALUES ($1, $2, $3, $4, $5, $5, $4*$5, $6)
+             ON CONFLICT (paper_account_id, symbol) DO UPDATE SET
+                quantity = EXCLUDED.quantity, market_price = EXCLUDED.market_price,
+                market_value = EXCLUDED.market_value, last_trade_date = EXCLUDED.last_trade_date",
+        )
+        .bind(format!("pp-zzz-{}", short_id()))
+        .bind(account_id)
+        .bind(symbol)
+        .bind(qty)
+        .bind(price)
+        .bind(last_trade)
+        .execute(db)
+        .await
+        .expect("insert zzz position");
+    }
+
+    /// 造 zzz 假 bar（source='zzz-test' 标记，精确键清理）。
+    async fn insert_bar(db: &sqlx::PgPool, symbol: &str, day: NaiveDate, close: f64, open: f64) {
+        sqlx::query(
+            "INSERT INTO market_stock_daily_bar (symbol, trade_date, open, close, source)
+             VALUES ($1, $2, $3, $4, 'zzz-test')
+             ON CONFLICT (symbol, trade_date) DO UPDATE SET open = EXCLUDED.open, close = EXCLUDED.close",
+        )
+        .bind(symbol)
+        .bind(day)
+        .bind(open)
+        .bind(close)
+        .execute(db)
+        .await
+        .expect("insert zzz bar");
+    }
+
+    async fn cleanup_zzz_market_data(db: &sqlx::PgPool, symbols: &[&str]) {
+        for s in symbols {
+            let _ = sqlx::query(
+                "DELETE FROM market_stock_daily_bar WHERE symbol = $1 AND source = 'zzz-test'",
+            )
+            .bind(s)
+            .execute(db)
+            .await;
+            let _ = sqlx::query(
+                "DELETE FROM market_adjustment_factor WHERE symbol = $1 AND source = 'zzz-test'",
+            )
+            .bind(s)
+            .execute(db)
+            .await;
+            let _ = sqlx::query(
+                "DELETE FROM market_stock_dividend WHERE symbol = $1 AND source = 'zzz-test'",
+            )
+            .bind(s)
+            .execute(db)
+            .await;
+            let _ = sqlx::query("DELETE FROM market_stock WHERE symbol = $1")
+                .bind(s)
+                .execute(db)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn select_positions_reads_backtest_cross_section() {
+        let db = test_db().await;
+        let task_id = "zzz_test_api5_btcross";
+        // FK 前置：backtest_task.data_version_id → data_version（2026-09-21 补）
+        sqlx::query(
+            "INSERT INTO data_version (data_version_id, name, source, start_date, end_date, tables, snapshot_hash) \
+             VALUES ('zzz-dv', 'zzz fifth batch', 'zzz', '2026-01-01', '2026-01-31', '{}', '') \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&db)
+        .await
+        .expect("insert zzz data_version");
+        // FK 前置二：backtest_task.strategy_version_id → strategy_version
+        // FK 前置：strategy_version.strategy_code → strategy_definition
+        sqlx::query(
+            "INSERT INTO strategy_definition (strategy_id, strategy_code, name, strategy_type, status) \
+             VALUES (999999001, 'zzz-strategy', 'zzz 第五批', 'zzz', 'active') \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&db)
+        .await
+        .expect("insert zzz strategy_definition");
+
+        sqlx::query(
+            "INSERT INTO strategy_version \
+             (strategy_version_id, strategy_code, version, parameter_schema, default_parameters, status) \
+             VALUES ('zzz-sv', 'zzz-strategy', 'v1rb', '{}', '{}', 'active') \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&db)
+        .await
+        .expect("insert zzz strategy_version");
+        // 清残留（FK CASCADE 会带走 position）
+        let _ = sqlx::query("DELETE FROM backtest_task WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&db)
+            .await;
+        sqlx::query(
+            "INSERT INTO backtest_task
+               (task_id, strategy_version_id, data_version_id, benchmark_symbol, symbols,
+                start_date, end_date, initial_capital, rebalance_frequency,
+                cost_model, slippage_model, execution_rules, parameters, status)
+             VALUES ($1, 'zzz-sv', 'zzz-dv', '000300.SH', ARRAY['ZZZA01.SH'],
+                '2026-06-01', '2026-06-30', 100000, 'monthly',
+                '{}', '{}', '{}', '{}', 'completed')",
+        )
+        .bind(task_id)
+        .execute(&db)
+        .await
+        .expect("insert zzz backtest_task");
+
+        let day = date(2026, 6, 10);
+        for (sym, qty, mv) in [
+            ("ZZZA01.SH", d(1000), Decimal::new(11000, 0)),
+            ("ZZZA02.SH", d(500), Decimal::new(6000, 0)),
+            ("ZZZA03.SH", d(0), Decimal::new(0, 0)), // quantity=0 应被过滤
+        ] {
+            sqlx::query(
+                "INSERT INTO backtest_position
+                   (task_id, symbol, position_date, quantity, available_quantity,
+                    avg_cost, market_value, weight)
+                 VALUES ($1, $2, $3, $4, $4, 10, $5, 0.5)",
+            )
+            .bind(task_id)
+            .bind(sym)
+            .bind(day)
+            .bind(qty)
+            .bind(mv)
+            .execute(&db)
+            .await
+            .expect("insert zzz backtest_position");
+        }
+
+        let positions = select_positions(&db, task_id, day).await.expect("select");
+        // Position 未派生 Debug,失败消息改用 symbol 列表
+        assert_eq!(
+            positions.len(),
+            2,
+            "quantity/mv=0 的行被过滤: {:?}",
+            positions
+                .iter()
+                .map(|p| p.symbol.as_str())
+                .collect::<Vec<_>>()
+        );
+        // ORDER BY market_value DESC
+        assert_eq!(positions[0].symbol, "ZZZA01.SH");
+        assert_eq!(positions[0].quantity, d(1000));
+        assert_eq!(positions[0].market_value, Decimal::new(11000, 0));
+        assert_eq!(positions[1].symbol, "ZZZA02.SH");
+
+        // 无数据日期 → 空集（非错误）
+        let empty = select_positions(&db, task_id, date(2027, 1, 1))
+            .await
+            .expect("select empty");
+        assert!(empty.is_empty());
+
+        let _ = sqlx::query("DELETE FROM backtest_task WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&db)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn compute_leverage_mult_branches() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_lev";
+        create_zzz_account(&db, account_id, d(100_000), false, d(0)).await;
+        let sc = zzz_strategy_config();
+
+        // 未开杠杆 → ONE
+        let lev = compute_leverage_mult(&db, account_id, &sc, 1.5, false, 2.0, "fixed").await;
+        assert_eq!(lev, Decimal::ONE);
+        // regime <= 阈值(0.9) → ONE
+        let lev = compute_leverage_mult(&db, account_id, &sc, 0.9, true, 2.0, "fixed").await;
+        assert_eq!(lev, Decimal::ONE);
+        // 倍数 <= 1 → ONE
+        let lev = compute_leverage_mult(&db, account_id, &sc, 1.5, true, 1.0, "fixed").await;
+        assert_eq!(lev, Decimal::ONE);
+        // fixed 模式：直接取 multiplier
+        let lev = compute_leverage_mult(&db, account_id, &sc, 1.5, true, 2.0, "fixed").await;
+        assert_eq!(lev, d(2));
+        // vol_target 模式：zzz 账户无 snapshot（数据不足 21 条）→ 1.0
+        let lev = compute_leverage_mult(&db, account_id, &sc, 1.5, true, 2.0, "vol_target").await;
+        assert_eq!(lev, Decimal::ONE);
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn fetch_eod_price_guards_missing_and_picks_latest() {
+        let db = test_db().await;
+        let sym = "ZZZE01.SH";
+        let (d0, d1) = (date(2026, 6, 9), date(2026, 6, 10));
+        insert_bar(&db, sym, d0, 7.6, 7.5).await;
+        insert_bar(&db, sym, d1, 7.7, 7.65).await;
+
+        // 取不晚于 d1 的最近收盘
+        let p = fetch_eod_price(&db, sym, d1, PriceSource::EodClose).await;
+        assert!((p - 7.7).abs() < 1e-9, "最近收盘价: {p}");
+        // d0 当日只看到 d0
+        let p = fetch_eod_price(&db, sym, d0, PriceSource::EodClose).await;
+        assert!((p - 7.6).abs() < 1e-9, "历史日取当日收盘: {p}");
+        // EodOpen 用开盘列
+        let p = fetch_eod_price(&db, sym, d1, PriceSource::EodOpen).await;
+        assert!((p - 7.65).abs() < 1e-9, "开盘价执行口径: {p}");
+        // 无数据 → 0.0 数据门禁（旧 1.0 兜底是虚假成交路径）
+        let p = fetch_eod_price(&db, "ZZZE99.SH", d1, PriceSource::EodClose).await;
+        assert_eq!(p, 0.0, "无 bar 必须返回 0 触发跳过");
+
+        // fetch_etf_price：Intraday 用预取实时价；缺失回退 eod
+        let mut intraday = HashMap::new();
+        intraday.insert("ZZZE01.SH".to_string(), 9.9);
+        let p = fetch_etf_price(&db, "ZZZE01.SH", d1, PriceSource::Intraday, &intraday).await;
+        assert!((p - 9.9).abs() < 1e-9, "盘中价优先: {p}");
+        // 预取价缺失（或非正）→ 回退最近收盘
+        let p = fetch_etf_price(&db, "ZZZE01.SH", d1, PriceSource::Intraday, &HashMap::new()).await;
+        assert!((p - 7.7).abs() < 1e-9, "缺失回退 eod: {p}");
+        let mut bad = HashMap::new();
+        bad.insert("ZZZE01.SH".to_string(), 0.0);
+        let p = fetch_etf_price(&db, "ZZZE01.SH", d1, PriceSource::Intraday, &bad).await;
+        assert!((p - 7.7).abs() < 1e-9, "非正价回退 eod: {p}");
+
+        cleanup_zzz_market_data(&db, &[sym]).await;
+    }
+
+    #[tokio::test]
+    async fn preload_etf_eod_prices_and_listed_map() {
+        let db = test_db().await;
+        let sym = "ZZZF01.SH";
+        let (d0, d1) = (date(2026, 6, 9), date(2026, 6, 10));
+        insert_bar(&db, sym, d0, 3.0, 2.9).await;
+        insert_bar(&db, sym, d1, 3.1, 3.05).await;
+
+        // 空 symbol 列表 → 空 map（免 DB）
+        assert!(preload_etf_eod_prices(&db, &[], d1, PriceSource::EodClose)
+            .await
+            .is_empty());
+
+        let prices =
+            preload_etf_eod_prices(&db, &[sym.to_string()], d1, PriceSource::EodClose).await;
+        assert_eq!(prices.len(), 1);
+        assert!((prices[sym] - 3.1).abs() < 1e-9);
+        // EodOpen 用 open 列
+        let prices =
+            preload_etf_eod_prices(&db, &[sym.to_string()], d1, PriceSource::EodOpen).await;
+        assert!((prices[sym] - 3.05).abs() < 1e-9);
+
+        // 上市状态：list_date 有值 → 直接比较；无值 → first_bar fallback
+        sqlx::query(
+            "INSERT INTO market_stock (symbol, name, exchange, list_status, list_date)
+             VALUES ($1, 'zzz', 'SSE', 'L', $2)
+             ON CONFLICT (symbol) DO UPDATE SET list_date = EXCLUDED.list_date",
+        )
+        .bind(sym)
+        .bind(date(2020, 1, 1))
+        .execute(&db)
+        .await
+        .expect("insert zzz market_stock");
+
+        // market_stock 无记录的 symbol 不进 map
+        let listed = preload_etf_listed_map(&db, &[], d1).await;
+        assert!(listed.is_empty());
+
+        let listed = preload_etf_listed_map(&db, &[sym.to_string()], d1).await;
+        assert_eq!(listed.get(sym), Some(&true), "list_date<=date 已上市");
+
+        // list_date 晚于 date → 未上市
+        sqlx::query("UPDATE market_stock SET list_date = '2027-01-01' WHERE symbol = $1")
+            .bind(sym)
+            .execute(&db)
+            .await
+            .expect("update list_date");
+        let listed = preload_etf_listed_map(&db, &[sym.to_string()], d1).await;
+        assert_eq!(listed.get(sym), Some(&false), "list_date>date 未上市");
+
+        // list_date 置空 → first_bar(2026-06-09) <= d1 fallback true
+        sqlx::query("UPDATE market_stock SET list_date = NULL WHERE symbol = $1")
+            .bind(sym)
+            .execute(&db)
+            .await
+            .expect("null list_date");
+        let listed = preload_etf_listed_map(&db, &[sym.to_string()], d1).await;
+        assert_eq!(listed.get(sym), Some(&true), "first_bar fallback");
+
+        cleanup_zzz_market_data(&db, &[sym]).await;
+    }
+
+    #[tokio::test]
+    async fn mark_to_market_reprices_and_applies_corporate_actions() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_mtm";
+        create_zzz_account(&db, account_id, d(10_000), false, d(0)).await;
+
+        let (d0, d1) = (date(2026, 6, 9), date(2026, 6, 10));
+        // 四个 zzz 标的：纯盯市 / 现金分红 / 送转 / ETF 拆分
+        let plain = "ZZZA01.SH";
+        let cash_div_sym = "ZZZA02.SH";
+        let stk_div_sym = "ZZZA03.SH";
+        let split_etf = "599999.SH"; // 匹配 etf_mult 正则 ^5[0-9]{5}\.SH$
+        for s in [plain, cash_div_sym, stk_div_sym, split_etf] {
+            insert_bar(&db, s, d0, 10.0, 10.0).await;
+            insert_bar(&db, s, d1, 11.0, 11.0).await;
+        }
+        insert_position(&db, account_id, plain, d(1000), d(10), d0).await;
+        insert_position(&db, account_id, cash_div_sym, d(1000), d(10), d0).await;
+        insert_position(&db, account_id, stk_div_sym, d(1000), d(10), d0).await;
+        insert_position(&db, account_id, split_etf, d(500), d(10), d0).await;
+
+        // 现金分红：每股 0.5，ex_date 落在 (d0, d1]
+        sqlx::query(
+            "INSERT INTO market_stock_dividend
+               (symbol, end_date, ann_date, div_proc, available_at, cash_div,
+                ex_date, imp_ann_date, raw_payload, source)
+             VALUES ($1, $2, $2, '实施', $2, 0.5, $3, $2, '{}', 'zzz-test')",
+        )
+        .bind(cash_div_sym)
+        .bind(d0)
+        .bind(d1)
+        .execute(&db)
+        .await
+        .expect("insert zzz cash div");
+
+        // 送转：每 10 股转 1 股（stk_div=0.1），ex_date 同窗口
+        sqlx::query(
+            "INSERT INTO market_stock_dividend
+               (symbol, end_date, ann_date, div_proc, available_at, stk_div,
+                ex_date, imp_ann_date, raw_payload, source)
+             VALUES ($1, $2, $2, '实施', $2, 0.1, $3, $2, '{}', 'zzz-test')",
+        )
+        .bind(stk_div_sym)
+        .bind(d0)
+        .bind(d1)
+        .execute(&db)
+        .await
+        .expect("insert zzz stk div");
+
+        // ETF 拆分：复权因子 d0=1.0 → d1=2.0（跳变比 2，且无 fund_div 记录）
+        for (day, f) in [(d0, 1.0f64), (d1, 2.0f64)] {
+            sqlx::query(
+                "INSERT INTO market_adjustment_factor (symbol, trade_date, adj_factor, source)
+                 VALUES ($1, $2, $3, 'zzz-test')
+                 ON CONFLICT (symbol, trade_date) DO UPDATE SET adj_factor = EXCLUDED.adj_factor",
+            )
+            .bind(split_etf)
+            .bind(day)
+            .bind(f)
+            .execute(&db)
+            .await
+            .expect("insert zzz adj factor");
+        }
+
+        mark_to_market(&db, account_id, d1, PriceSource::EodClose)
+            .await
+            .expect("mark to market");
+
+        // 纯盯市：price=11、value=11000、份额不变
+        let (qty, mp, mv): (Decimal, Decimal, Decimal) = sqlx::query_as(
+            "SELECT quantity, market_price, market_value FROM paper_position
+             WHERE paper_account_id = $1 AND symbol = $2",
+        )
+        .bind(account_id)
+        .bind(plain)
+        .fetch_one(&db)
+        .await
+        .expect("plain row");
+        assert_eq!(qty, d(1000), "无公司行动份额不动");
+        assert_eq!(mp, d(11), "盯市到最新收盘价");
+        assert_eq!(mv, Decimal::new(11000, 0));
+
+        // 现金分红：份额不动 + cash += 1000×0.5
+        let (qty, mv): (Decimal, Decimal) = sqlx::query_as(
+            "SELECT quantity, market_value FROM paper_position
+             WHERE paper_account_id = $1 AND symbol = $2",
+        )
+        .bind(account_id)
+        .bind(cash_div_sym)
+        .fetch_one(&db)
+        .await
+        .expect("cash div row");
+        assert_eq!(qty, d(1000), "分红不动份额");
+        assert_eq!(mv, Decimal::new(11000, 0));
+        let cash: Decimal =
+            sqlx::query_scalar("SELECT cash FROM paper_account WHERE paper_account_id = $1")
+                .bind(account_id)
+                .fetch_one(&db)
+                .await
+                .expect("cash");
+        assert_eq!(cash, d(10_500), "现金分红入账 1000×0.5: {cash}");
+
+        // 送转：1000 × 1.1 = 1100 份 × 11
+        let (qty, mv): (Decimal, Decimal) = sqlx::query_as(
+            "SELECT quantity, market_value FROM paper_position
+             WHERE paper_account_id = $1 AND symbol = $2",
+        )
+        .bind(account_id)
+        .bind(stk_div_sym)
+        .fetch_one(&db)
+        .await
+        .expect("stk div row");
+        assert_eq!(qty, d(1100), "送转份额 ×(1+stk_div)");
+        assert_eq!(mv, Decimal::new(12100, 0), "1100×11");
+
+        // ETF 拆分：500 × 2 = 1000 份 × 11
+        let (qty, mv): (Decimal, Decimal) = sqlx::query_as(
+            "SELECT quantity, market_value FROM paper_position
+             WHERE paper_account_id = $1 AND symbol = $2",
+        )
+        .bind(account_id)
+        .bind(split_etf)
+        .fetch_one(&db)
+        .await
+        .expect("split etf row");
+        assert_eq!(qty, d(1000), "拆分份额 ×因子跳变比");
+        assert_eq!(mv, Decimal::new(11000, 0), "1000×11");
+
+        cleanup_zzz_market_data(&db, &[plain, cash_div_sym, stk_div_sym, split_etf]).await;
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn apply_fill_cash_buys_within_cash_and_scales_when_short() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_fillcash";
+        create_zzz_account(&db, account_id, d(10_000), false, d(0)).await;
+        let day = date(2026, 6, 10);
+
+        // 足额买入 1000 股 @10：cash 10000 → 0
+        let ok = apply_fill_cash(&db, account_id, "ZZZB01.SH", "buy", d(1000), d(10), day).await;
+        assert!(ok, "足额买入应成功");
+        let (qty, avg): (Decimal, Decimal) = sqlx::query_as(
+            "SELECT quantity, avg_cost FROM paper_position
+             WHERE paper_account_id = $1 AND symbol = $2",
+        )
+        .bind(account_id)
+        .bind("ZZZB01.SH")
+        .fetch_one(&db)
+        .await
+        .expect("position row");
+        assert_eq!(qty, d(1000));
+        assert_eq!(avg, d(10));
+        let cash: Decimal =
+            sqlx::query_scalar("SELECT cash FROM paper_account WHERE paper_account_id = $1")
+                .bind(account_id)
+                .fetch_one(&db)
+                .await
+                .expect("cash");
+        assert_eq!(cash, d(0));
+        let margin: Decimal = sqlx::query_scalar(
+            "SELECT margin_amount FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("margin");
+        assert_eq!(margin, d(0), "无杠杆账户不得产生融资");
+
+        // cash=0 再买 → 拒绝（false，不写持仓）
+        let ok = apply_fill_cash(&db, account_id, "ZZZB02.SH", "buy", d(100), d(10), day).await;
+        assert!(!ok, "cash=0 买入应跳过");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_position WHERE paper_account_id = $1 AND symbol = 'ZZZB02.SH'",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("count");
+        assert_eq!(n, 0);
+
+        // 现金 5500 买 600 股（6000）→ 缩减到 500 股（整手）
+        sqlx::query("UPDATE paper_account SET cash = 5500 WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(&db)
+            .await
+            .expect("set cash");
+        let ok = apply_fill_cash(&db, account_id, "ZZZB03.SH", "buy", d(600), d(10), day).await;
+        assert!(ok, "缩减后仍应成交");
+        let (qty, cash): (Decimal, Decimal) = sqlx::query_as(
+            "SELECT (SELECT quantity FROM paper_position WHERE paper_account_id = $1 AND symbol = 'ZZZB03.SH'),
+                    (SELECT cash FROM paper_account WHERE paper_account_id = $1)",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("scaled row");
+        assert_eq!(qty, d(500), "按 100 股整手缩减");
+        assert_eq!(cash, d(500), "5500 - 500×10");
+
+        // 卖出（昨日持仓）：T+1 放行，300 股 @11 → cash += 3300
+        let prev = date(2026, 6, 9);
+        insert_position(&db, account_id, "ZZZB04.SH", d(400), d(10), prev).await;
+        let ok = apply_fill_cash(&db, account_id, "ZZZB04.SH", "sell", d(300), d(11), day).await;
+        assert!(ok, "昨日持仓卖出应成功");
+        let (qty, cash): (Decimal, Decimal) = sqlx::query_as(
+            "SELECT (SELECT quantity FROM paper_position WHERE paper_account_id = $1 AND symbol = 'ZZZB04.SH'),
+                    (SELECT cash FROM paper_account WHERE paper_account_id = $1)",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("sell row");
+        assert_eq!(qty, d(100), "400-300");
+        assert_eq!(cash, d(3800), "500 + 300×11");
+
+        // T+1 拦截：当日买入的持仓不可卖
+        insert_position(&db, account_id, "ZZZB05.SH", d(100), d(10), day).await;
+        let ok = apply_fill_cash(&db, account_id, "ZZZB05.SH", "sell", d(100), d(11), day).await;
+        assert!(!ok, "当日买入 T+1 不可卖");
+        let qty: Decimal = sqlx::query_scalar(
+            "SELECT quantity FROM paper_position WHERE paper_account_id = $1 AND symbol = 'ZZZB05.SH'",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("t1 row");
+        assert_eq!(qty, d(100), "T+1 拦截后份额不动");
+
+        // 全仓清零后行删除
+        insert_position(&db, account_id, "ZZZB06.SH", d(200), d(10), prev).await;
+        let ok = apply_fill_cash(&db, account_id, "ZZZB06.SH", "sell", d(200), d(11), day).await;
+        assert!(ok);
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_position WHERE paper_account_id = $1 AND symbol = 'ZZZB06.SH'",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("count zero");
+        assert_eq!(n, 0, "清零行删除");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn apply_fill_margin_borrows_shortfall_automatically() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_fillmar";
+        create_zzz_account(&db, account_id, d(1000), true, d(0)).await;
+        let day = date(2026, 6, 10);
+
+        // 买 500 股 @10（5000 > cash 1000）：不缩减，缺口自动融资
+        let ok = apply_fill_margin(&db, account_id, "ZZZC01.SH", "buy", d(500), d(10), day).await;
+        assert!(ok, "杠杆账户买入不缩减");
+        let (cash, margin): (Decimal, Decimal) = sqlx::query_as(
+            "SELECT cash, margin_amount FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("balances");
+        assert_eq!(cash, d(0), "cash 扣到 0");
+        assert_eq!(margin, d(4000), "缺口 4000 自动融资: {margin}");
+        let qty: Decimal = sqlx::query_scalar(
+            "SELECT quantity FROM paper_position WHERE paper_account_id = $1 AND symbol = 'ZZZC01.SH'",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("qty");
+        assert_eq!(qty, d(500));
+
+        // 卖出 200 @11 → cash += 2200
+        let ok = apply_fill_margin(
+            &db,
+            account_id,
+            "ZZZC01.SH",
+            "sell",
+            d(200),
+            d(11),
+            date(2026, 6, 9),
+        )
+        .await;
+        assert!(ok, "隔日卖出成功");
+        let (cash, qty): (Decimal, Decimal) = sqlx::query_as(
+            "SELECT (SELECT cash FROM paper_account WHERE paper_account_id = $1),
+                    (SELECT quantity FROM paper_position WHERE paper_account_id = $1 AND symbol = 'ZZZC01.SH')",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("after sell");
+        assert_eq!(cash, d(2200));
+        assert_eq!(qty, d(300));
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn mark_fill_skipped_flags_order_and_fill() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api5_skip";
+        create_zzz_account(&db, account_id, d(0), false, d(0)).await;
+        // 手工造 order + fill（skipped 场景的调用方前置状态）
+        let order_id = format!("po-zzz-{}", short_id());
+        sqlx::query(
+            "INSERT INTO paper_order
+               (order_id, paper_account_id, symbol, side, order_type, quantity, status)
+             VALUES ($1, $2, 'ZZZD01.SH', 'buy', 'market', 100, 'filled')",
+        )
+        .bind(&order_id)
+        .bind(account_id)
+        .execute(&db)
+        .await
+        .expect("insert zzz order");
+        sqlx::query(
+            "INSERT INTO paper_fill
+               (fill_id, order_id, paper_account_id, symbol, fill_time, side,
+                quantity, price, amount)
+             VALUES ($1, $2, $3, 'ZZZD01.SH', now(), 'buy', 100, 10, 1000)",
+        )
+        .bind(format!("pf-zzz-{}", short_id()))
+        .bind(&order_id)
+        .bind(account_id)
+        .execute(&db)
+        .await
+        .expect("insert zzz fill");
+
+        mark_fill_skipped(&db, &order_id).await;
+        let (order_status, fill_status): (String, String) = sqlx::query_as(
+            "SELECT (SELECT status FROM paper_order WHERE order_id = $1),
+                    (SELECT fill_status FROM paper_fill WHERE order_id = $1)",
+        )
+        .bind(&order_id)
+        .fetch_one(&db)
+        .await
+        .expect("statuses");
+        assert_eq!(order_status, "skipped_no_cash");
+        assert_eq!(fill_status, "skipped_no_cash");
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn maintenance_ratio_and_check_maintenance_gates() {
+        let db = test_db().await;
+        let sc = zzz_strategy_config();
+
+        // 无融资：margin=0 → ∞（不限制）
+        let account_id = "zzz_test_api5_maint0";
+        create_zzz_account(&db, account_id, d(10_000), true, d(0)).await;
+        let r = maintenance_ratio(&db, account_id).await;
+        assert!(r.is_infinite(), "margin=0 维保 ∞");
+        // 账户不存在 → ∞
+        let r = maintenance_ratio(&db, "zzz_test_api5_no_such").await;
+        assert!(r.is_infinite());
+        // check_maintenance_gate：账户不存在 → false（不拦截）
+        let gate = check_maintenance_gate(&db, account_id, date(2026, 6, 10), &sc).await;
+        assert!(!gate, "无融资不拦截");
+        let gate =
+            check_maintenance_gate(&db, "zzz_test_api5_no_such", date(2026, 6, 10), &sc).await;
+        assert!(!gate, "账户不存在不拦截");
+        // check_maintenance_after_mark：无杠杆账户 → (0, false)
+        let (n, warn) = check_maintenance_after_mark(&db, account_id, date(2026, 6, 10), 0.0)
+            .await
+            .expect("check");
+        assert_eq!((n, warn), (0, false));
+        cleanup_account(&db, account_id).await;
+
+        // 警戒区间：margin=10000，市值+cash=14000 → 维保 1.4 ∈ [1.3, 1.5) → 禁买不强平
+        let account_id = "zzz_test_api5_maintwarn";
+        create_zzz_account(&db, account_id, d(4_000), true, d(10_000)).await;
+        insert_position(
+            &db,
+            account_id,
+            "ZZZW01.SH",
+            d(1000),
+            d(10),
+            date(2026, 6, 9),
+        )
+        .await;
+        let r = maintenance_ratio(&db, account_id).await;
+        assert!((r - 1.4).abs() < 1e-9, "维保 1.4: {r}");
+        let (n, warn) = check_maintenance_after_mark(&db, account_id, date(2026, 6, 10), 0.0)
+            .await
+            .expect("check warn");
+        assert_eq!(n, 0, "警戒区间不强平");
+        assert!(warn, "维保 < 警戒线应禁买");
+        let gate = check_maintenance_gate(&db, account_id, date(2026, 6, 10), &sc).await;
+        assert!(gate, "警戒区间 gate=true");
+        cleanup_account(&db, account_id).await;
+
+        // 平仓线以下：margin=10000，市值+cash=12000 → 维保 1.2 < 1.3 → 强平
+        let account_id = "zzz_test_api5_maintliq";
+        create_zzz_account(&db, account_id, d(0), true, d(10_000)).await;
+        insert_position(
+            &db,
+            account_id,
+            "ZZZW02.SH",
+            d(1000),
+            d(12),
+            date(2026, 6, 9),
+        )
+        .await;
+        let (n, warn) = check_maintenance_after_mark(&db, account_id, date(2026, 6, 10), 0.0)
+            .await
+            .expect("check liq");
+        assert!(n >= 1, "维保 < 平仓线应触发强平（实际 {n} 笔）");
+        assert!(warn, "强平后仍低于警戒线则禁买（回补到 1.55 之上则 false）");
+        let margin_after: Decimal = sqlx::query_scalar(
+            "SELECT margin_amount FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("margin after");
+        assert!(
+            margin_after < d(10_000),
+            "强平应主动还款降低融资余额: {margin_after}"
+        );
+        let qty_after: Decimal = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(quantity), 0) FROM paper_position WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .expect("qty after");
+        assert!(qty_after < d(1000), "强平减仓: {qty_after}");
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn rebalance_account_rejects_missing_account_and_nonpositive_nav() {
+        let db = test_db().await;
+        dotenv::dotenv().ok();
+        let tushare = TushareClient::from_env()
+            .expect("Tushare client init（dotenv 加载 quant/.env 后需 TUSHARE_TOKEN）");
+        let mvo_cache = Arc::new(Mutex::new(None));
+        let day = date(2026, 6, 10);
+
+        // 用现成 composite 策略（含 mvo 配置，resolved_to_legacy_sc 可桥接）
+        let rs = crate::routes::strategy::load_resolved_strategy(&db, "v24")
+            .await
+            .expect("load v24 strategy");
+
+        // 账号不存在：nav query 早退（远在取价/建仓之前，无 ETF 副作用）
+        let err = rebalance_account(
+            &db,
+            "zzz_test_api5_no_such",
+            &rs,
+            day,
+            "zzz_test_api5_no_task",
+            PriceSource::EodClose,
+            &mvo_cache,
+            &tushare,
+            false,
+            1.0,
+            "fixed",
+            None,
+            None,
+        )
+        .await
+        .expect_err("账号不存在应拒绝");
+        assert!(err.contains("不存在"), "报错应说明账号不存在: {err}");
+
+        // preloaded_nav 非正：current_nav<=0 拒绝建仓
+        let account_id = "zzz_test_api5_rej";
+        create_zzz_account(&db, account_id, d(0), false, d(0)).await;
+        let err = rebalance_account(
+            &db,
+            account_id,
+            &rs,
+            day,
+            "zzz_test_api5_no_task",
+            PriceSource::EodClose,
+            &mvo_cache,
+            &tushare,
+            false,
+            1.0,
+            "fixed",
+            Some(-1.0),
+            None,
+        )
+        .await
+        .expect_err("nav<=0 应拒绝");
+        assert!(err.contains("current_nav<=0"), "报错应说明 nav 非正: {err}");
+
+        cleanup_account(&db, account_id).await;
+    }
+}
