@@ -921,3 +921,307 @@ mod tests {
         }
     }
 }
+
+// ══ 第六批覆盖专项(2026-09-22, 调度域·信号导出) ══
+// 靶点: 通道配置三分支(load_channel) / 交易日历取日(next_trading_day /
+// latest_trading_day) / run-factor 请求体构造(build_run_factor_body 默认值
+// 全量 + WFA 参数合并与风控键透传) / 物化新鲜度门禁相等边界。不直调:
+// run_ptrade_signal_export(空参会向生产钉钉群发告警)、export_signal_for_account
+// (HTTP 自调用 8080 生产容器 + scp 外推 + 写生产信号文件)、run_factor_task(触发
+// 真实回测)、scp_push(外部网络 + 45s 级超时分支)。
+#[cfg(test)]
+mod sixth_batch {
+    use super::*;
+
+    async fn test_db() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 测试用 StrategyConfig 字面量(与 scheduler.rs tests 模块同款,
+    /// 避免触发 panic 版 Default)。
+    fn sc_literal() -> StrategyConfig {
+        StrategyConfig {
+            etf_premium_gate: 0.10,
+            allocation_mode: None,
+            mu_estimation: None,
+            strategy_id: "zzz_test_sixth".into(),
+            name: "zzz_test_sixth".into(),
+            etf_symbols: vec![],
+            equity_curve_task_id: String::new(),
+            min_stock: 0.0,
+            max_single: 0.0,
+            max_single_bull: 0.0,
+            momentum_blend_ratio: 0.0,
+            ga_population: 0,
+            ga_generations: 0,
+            vol_target: 0.0,
+            leverage_cap: 0.0,
+            default_weights: vec![],
+            regime_bull_min_stock: 0.0,
+            regime_bear_min_stock: 0.0,
+            deep_bear_threshold: -0.10,
+            deep_bear_exposure: 0.60,
+            signal_source: String::new(),
+            prediction_blend_weight: 0.0,
+            combo_name: String::new(),
+            top_n: 0,
+            prediction_set_id: None,
+            dynamic_target_cap: 0.0,
+            dynamic_target_floor: 0.0,
+            score_direction: String::new(),
+            candidate_tier: String::new(),
+            leverage_regime_threshold: 0.9,
+            slippage_pct: 0.002,
+            mvo_objective: "minvariance".into(),
+            kelly_fraction: 0.25,
+            score_candidate_pool_size: 200,
+            regime_policy: None,
+            regime_bear_return_threshold: -0.03,
+        }
+    }
+
+    /// 通道配置独占键清理(前/后置, 仅删本测试行)。
+    async fn cleanup_channel(db: &PgPool) {
+        let _ = sqlx::query("DELETE FROM ptrade_channel_config WHERE paper_account_id = $1")
+            .bind("zzz_test_sixth_channel_acct")
+            .execute(db)
+            .await;
+    }
+
+    /// 通道配置三分支: 无配置行拒绝(防误发) / 停用拒绝 / 启用原样返回。
+    #[tokio::test]
+    async fn load_channel_missing_disabled_and_enabled_branches() {
+        let db = test_db().await;
+        // 前置 + 结尾精确清理(仅删本测试独占键行)
+        cleanup_channel(&db).await;
+
+        // 分支1: 无配置行 → 拒绝(未配通道目录, 防误发)
+        let err = load_channel(&db, "zzz_test_sixth_channel_acct")
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("无 ptrade_channel_config 配置"), "{err}");
+
+        // 分支2: enabled=false → 拒绝
+        sqlx::query(
+            "INSERT INTO ptrade_channel_config (paper_account_id, channel_name, scp_target, enabled)
+             VALUES ($1, 'zzz_test_channel', 'zzz_test_host:/tmp/zzz', false)
+             ON CONFLICT (paper_account_id) DO UPDATE
+               SET enabled = false, channel_name = EXCLUDED.channel_name,
+                   scp_target = EXCLUDED.scp_target",
+        )
+        .bind("zzz_test_sixth_channel_acct")
+        .execute(&db)
+        .await
+        .expect("insert disabled channel");
+        let err = load_channel(&db, "zzz_test_sixth_channel_acct")
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("已停用"), "{err}");
+
+        // 分支3: enabled=true → 原样返回
+        sqlx::query("UPDATE ptrade_channel_config SET enabled = true WHERE paper_account_id = $1")
+            .bind("zzz_test_sixth_channel_acct")
+            .execute(&db)
+            .await
+            .expect("enable channel");
+        let channel = load_channel(&db, "zzz_test_sixth_channel_acct")
+            .await
+            .expect("启用通道应返回配置");
+        assert_eq!(channel.channel_name, "zzz_test_channel");
+        assert_eq!(channel.scp_target, "zzz_test_host:/tmp/zzz");
+        assert!(channel.enabled);
+
+        cleanup_channel(&db).await;
+    }
+
+    /// 交易日历取日: 下一交易日跳过周末 / 超出日历视野报错 / 最近已到交易日
+    /// 必须开市且不晚于今天。
+    #[tokio::test]
+    async fn trading_day_helpers_wrap_calendar_and_error_beyond_horizon() {
+        let db = test_db().await;
+        // 2026-09-18(周五)开市 → 下一交易日为 2026-09-21(周一), 周末被跳过
+        let next = next_trading_day(&db, chrono::NaiveDate::from_ymd_opt(2026, 9, 18).unwrap())
+            .await
+            .expect("2026-09-18 后必有下一交易日");
+        assert_eq!(next, chrono::NaiveDate::from_ymd_opt(2026, 9, 21).unwrap());
+
+        // 日历只配到 2026 年末 → 2100 年无未来交易日(错误路径)
+        let err = next_trading_day(&db, chrono::NaiveDate::from_ymd_opt(2100, 1, 1).unwrap())
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("无未来交易日"), "{err}");
+
+        // 最近已到交易日(<= today): 动态断言, 数据增长/任意日期运行均不失效
+        let latest = latest_trading_day(&db).await.expect("交易日历应有数据");
+        let today = chrono::Local::now().date_naive();
+        assert!(
+            latest <= today,
+            "最近交易日不应晚于今天: {latest} > {today}"
+        );
+        let is_open: Option<bool> = sqlx::query_scalar(
+            "SELECT is_open FROM market_trade_calendar WHERE trade_date = $1 LIMIT 1",
+        )
+        .bind(latest)
+        .fetch_optional(&db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+        assert_eq!(is_open, Some(true), "最近已到交易日必须开市: {latest}");
+    }
+
+    /// WFA 参数行独占键清理(前/后置)。
+    async fn cleanup_wfa_row(db: &PgPool) {
+        let _ = sqlx::query(
+            "DELETE FROM wfa_strategy_params WHERE experiment_run_id = 'zzz_test_sixth_exp'",
+        )
+        .execute(db)
+        .await;
+    }
+
+    /// WFA 窗口外日期 → 全部字段回落默认值, 风控可选键不写入。
+    #[tokio::test]
+    async fn build_run_factor_body_defaults_when_wfa_out_of_window() {
+        let db = test_db().await;
+        let sc = StrategyConfig {
+            combo_name: "zzz_test_sixth_combo".into(),
+            top_n: 12,
+            ..sc_literal()
+        };
+        // 2010 年远早于 wfa_strategy_params 覆盖窗(2019-01 起) → wfa 空
+        let date = chrono::NaiveDate::from_ymd_opt(2010, 1, 1).unwrap();
+        let body = build_run_factor_body(&db, &sc, date).await;
+
+        assert_eq!(body["combo_name"], "zzz_test_sixth_combo");
+        assert_eq!(body["version"], "1.0.0");
+        assert_eq!(body["strategy_version_id"], "phase7-professional-v1");
+        assert_eq!(body["top_n"].as_u64(), Some(12));
+        assert_eq!(body["rebalance"], "40");
+        assert_eq!(body["max_position_pct"].as_f64(), Some(0.10));
+        assert_eq!(body["max_gross_exposure"].as_f64(), Some(0.95));
+        assert_eq!(body["score_direction"], "descending");
+        assert_eq!(body["portfolio_method"], "heuristic");
+        assert_eq!(body["benchmark"], "000300.SH");
+        assert_eq!(body["skip_top_pct"].as_f64(), Some(0.0));
+        assert_eq!(body["entry_delay"].as_i64(), Some(1));
+        assert_eq!(body["universe_profile"], "main_board_non_st");
+        // 窗口: 当日截面往前 180 天(与模拟盘 [ALIGN] 口径一致)
+        assert_eq!(
+            body["start_date"],
+            (date - chrono::Duration::days(180))
+                .format("%Y%m%d")
+                .to_string()
+        );
+        assert_eq!(body["end_date"], date.format("%Y%m%d").to_string());
+        // data_version_id 动态取最新, 只断言非空
+        assert!(
+            body["data_version_id"]
+                .as_str()
+                .is_some_and(|v| !v.is_empty()),
+            "data_version_id 不应为空"
+        );
+        // WFA 未命中 → 风控可选键一律不写入
+        for key in [
+            "stop_loss_pct",
+            "event_gate_combo_name",
+            "candidate_risk_filter",
+            "max_pairwise_correlation",
+            "portfolio_volatility_control",
+        ] {
+            assert!(body.get(key).is_none(), "未命中 WFA 不应写 {key}");
+        }
+    }
+
+    /// WFA 命中 → combo/top_n/rebalance 覆盖默认值, 字符串型风控参数按原样
+    /// 透传(执行端自行解析), WFA 未覆盖的键回落默认。
+    #[tokio::test]
+    async fn build_run_factor_body_merges_wfa_params_and_risk_passthrough() {
+        let db = test_db().await;
+        cleanup_wfa_row(&db).await;
+        // 生产覆盖窗止于 2026-01-28, 2026-03 窗口为空档 → zzz 行独占命中;
+        // score 置 999 保证即便生产补了同窗行也以本行为准
+        sqlx::query(
+            "INSERT INTO wfa_strategy_params (experiment_run_id, window_index, test_start,
+                 test_end, parameters, score)
+             VALUES ('zzz_test_sixth_exp', 0, '2026-03-01', '2026-03-31', $1, 999.0)
+             ON CONFLICT (experiment_run_id, window_index) DO UPDATE
+               SET parameters = EXCLUDED.parameters, score = EXCLUDED.score",
+        )
+        .bind(serde_json::json!({
+            "combo_name": "zzz_test_sixth_wfa_combo",
+            "top_n": 7,
+            "rebalance": "20",
+            "max_position_pct": "0.25",
+            "stop_loss_pct": "0.08",
+            "max_pairwise_correlation": "0.5"
+        }))
+        .execute(&db)
+        .await
+        .expect("insert zzz wfa row");
+
+        let sc = StrategyConfig {
+            combo_name: "zzz_test_sixth_combo".into(),
+            top_n: 12,
+            ..sc_literal()
+        };
+        let body = build_run_factor_body(
+            &db,
+            &sc,
+            chrono::NaiveDate::from_ymd_opt(2026, 3, 15).unwrap(),
+        )
+        .await;
+
+        assert_eq!(body["combo_name"], "zzz_test_sixth_wfa_combo");
+        assert_eq!(body["top_n"].as_u64(), Some(7));
+        assert_eq!(body["rebalance"], "20");
+        // 字符串数值字段: 解析为 f64 后写入
+        assert_eq!(body["max_position_pct"].as_f64(), Some(0.25));
+        // 纯透传字段: 保持字符串形态(与 scheduler 模拟盘段一致)
+        assert_eq!(body["stop_loss_pct"], "0.08");
+        assert_eq!(body["max_pairwise_correlation"], "0.5");
+        // WFA 未覆盖的键回落默认
+        assert_eq!(body["max_gross_exposure"].as_f64(), Some(0.95));
+
+        cleanup_wfa_row(&db).await;
+    }
+
+    /// 物化新鲜度门禁相等边界: 写入时刻 == 回填完成时刻在语义上仍是
+    /// 「回填完成前写入」(<=) → 拒绝(任务71 定版语义的边界锁定)。
+    #[test]
+    fn combo_materialization_freshness_equal_boundary_rejects() {
+        use chrono::TimeZone;
+        let t = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 21, 14, 30, 0)
+            .unwrap();
+        let err = verify_combo_materialization_freshness(
+            (10, Some(t)),
+            Some(t),
+            "zzz_test_combo",
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 21).unwrap(),
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert!(err.contains("旧因子物化"), "相等时刻应拒绝: {err}");
+    }
+
+    /// 本地留存目录按账户分子目录(根目录可被 PTRADE_SIGNAL_DIR 覆盖,
+    /// 只对账户段断言避免环境耦合)。
+    #[test]
+    fn local_signal_dir_segments_by_account_id() {
+        let path = local_signal_dir("zzz_test_sixth_acct");
+        assert!(path.ends_with("zzz_test_sixth_acct"), "{path:?}");
+    }
+
+    /// Decimal → f64 换算: 正常值精确换算, 零值保持零。
+    #[test]
+    fn leverage_d_f64_converts_decimal() {
+        let d = rust_decimal::Decimal::new(125, 2); // 1.25
+        assert!((leverage_d_f64(&d) - 1.25).abs() < 1e-12);
+        assert_eq!(leverage_d_f64(&rust_decimal::Decimal::ZERO), 0.0);
+    }
+}

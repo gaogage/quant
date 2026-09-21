@@ -571,3 +571,187 @@ pub(crate) async fn execute_sync_task(
         other => Err(format!("unsupported dataset: {}", other)),
     }
 }
+
+// ── 第六批覆盖率测试：execute_sync_task 参数校验与早退分支 ──
+// 模式沿用 coverage_batches.rs fourth_batch：直调 inner 函数，仅覆盖
+// 空 symbols / full_market 守卫 / 缺日期 / 未知 dataset 等校验早退分支，
+// 这些分支在触碰数据库与 Tushare 客户端之前返回，不产生任何写库副作用。
+#[cfg(test)]
+mod sixth_batch {
+    use super::*;
+
+    /// 构造真实本机 PG 连接（DATABASE_URL 缺省 postgres://gaocheng@localhost/quant）。
+    /// 早退分支不使用 db/tushare，但函数签名要求完整 AppState。
+    async fn test_app_state() -> crate::AppState {
+        dotenv::dotenv().ok();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare: quant_data::tushare::client::TushareClient::from_env()
+                .expect("Tushare client init（dotenv 加载 quant/.env 后需 TUSHARE_TOKEN）"),
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        }
+    }
+
+    /// DataSyncTaskReq 无 Default derive，手工列全字段构造测试请求。
+    fn make_req(dataset: &str) -> DataSyncTaskReq {
+        DataSyncTaskReq {
+            dataset: dataset.to_string(),
+            source: super::default_source(),
+            mode: None,
+            symbols: Vec::new(),
+            source_filters: Vec::new(),
+            index_codes: Vec::new(),
+            exchanges: Vec::new(),
+            start_date: None,
+            end_date: None,
+            data_version_id: None,
+            background: false,
+            quality_check: false,
+            create_data_version: false,
+            retry_of_task_id: None,
+            reason: None,
+        }
+    }
+
+    /// 早退分支不落库，task_id 仅作返回值标识，仍用 zzz_test_ 前缀保持卫生。
+    const TEST_TASK_ID: &str = "zzz_test_sixth_bounded_early_exit";
+
+    #[tokio::test]
+    async fn execute_daily_and_stock_daily_require_nonempty_symbols() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        for dataset in ["daily", "stock_daily"] {
+            let req = make_req(dataset);
+            let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), req)
+                .await
+                .expect_err("daily 空 symbols 必须拒绝");
+            assert!(
+                error.contains("symbols must not be empty for daily sync"),
+                "dataset={dataset} 实际错误: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_adj_factor_and_financial_require_nonempty_symbols() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        let adj_req = make_req("adj_factor");
+        let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), adj_req)
+            .await
+            .expect_err("adj_factor 空 symbols 必须拒绝");
+        assert!(
+            error.contains("symbols must not be empty for adj_factor sync"),
+            "实际错误: {error}"
+        );
+
+        let fin_req = make_req("financial");
+        let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), fin_req)
+            .await
+            .expect_err("financial 空 symbols 必须拒绝");
+        assert!(
+            error.contains("symbols must not be empty for financial sync"),
+            "实际错误: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_index_daily_requires_codes_from_either_field() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        // index_codes 与 symbols 双空 → 明确报错
+        let empty_req = make_req("index_daily");
+        let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), empty_req)
+            .await
+            .expect_err("index_daily 双空必须拒绝");
+        assert!(
+            error.contains("index_codes must not be empty for index_daily sync"),
+            "实际错误: {error}"
+        );
+
+        // index_codes 有值 → 通过 codes 校验后在日期校验早退（不触 Tushare）
+        let mut req = make_req("index_daily");
+        req.index_codes = vec!["000001.SH".to_string()];
+        let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), req)
+            .await
+            .expect_err("index_daily 缺日期必须拒绝");
+        assert_eq!(error, "start_date is required");
+
+        // symbols 兜底：仅提供 symbols 同样通过 codes 校验
+        let mut fallback_req = make_req("index_daily");
+        fallback_req.symbols = vec!["000300.SH".to_string()];
+        let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), fallback_req)
+            .await
+            .expect_err("index_daily 仅 symbols 时缺日期必须拒绝");
+        assert_eq!(error, "start_date is required");
+    }
+
+    #[tokio::test]
+    async fn execute_optional_sources_guard_empty_symbols_behind_full_market_mode() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        for dataset in ["cashflow", "dividend", "repurchase", "share_float"] {
+            // 无 mode：空 symbols 直接拒绝
+            let req = make_req(dataset);
+            let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), req)
+                .await
+                .expect_err("可选源空 symbols 必须拒绝");
+            assert!(
+                error.contains(&format!(
+                    "symbols must not be empty for {dataset} sync unless mode=full_market is set"
+                )),
+                "dataset={dataset} 实际错误: {error}"
+            );
+
+            // mode=full_market：守卫放行，推进到日期校验早退
+            let mut full_market_req = make_req(dataset);
+            full_market_req.mode = Some("full_market".to_string());
+            let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), full_market_req)
+                .await
+                .expect_err("full_market 放行后缺日期必须拒绝");
+            assert_eq!(
+                error, "start_date is required",
+                "dataset={dataset} 实际错误: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_range_bound_datasets_validate_date_presence() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        // daily_basic：symbols 非空但缺 start_date
+        let mut missing_start = make_req("daily_basic");
+        missing_start.symbols = vec!["600000.SH".to_string()];
+        let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), missing_start)
+            .await
+            .expect_err("缺 start_date 必须拒绝");
+        assert_eq!(error, "start_date is required");
+
+        // moneyflow：补 start 后缺 end_date
+        let mut missing_end = make_req("moneyflow");
+        missing_end.symbols = vec!["600000.SH".to_string()];
+        missing_end.start_date = Some("20240101".into());
+        let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), missing_end)
+            .await
+            .expect_err("缺 end_date 必须拒绝");
+        assert_eq!(error, "end_date is required");
+
+        // margin：市场级数据集同样走 require_range 守卫
+        let mut margin_req = make_req("margin");
+        margin_req.start_date = Some("20240101".into());
+        let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), margin_req)
+            .await
+            .expect_err("margin 缺 end_date 必须拒绝");
+        assert_eq!(error, "end_date is required");
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_unknown_dataset_before_any_sync() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        let req = make_req("zzz_unknown_dataset");
+        let error = execute_sync_task(state.clone(), TEST_TASK_ID.to_string(), req)
+            .await
+            .expect_err("未知 dataset 必须拒绝");
+        assert_eq!(error, "unsupported dataset: zzz_unknown_dataset");
+    }
+}

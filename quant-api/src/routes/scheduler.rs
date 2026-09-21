@@ -3230,3 +3230,445 @@ mod forecast_daily_tests {
         }
     }
 }
+
+// ══ 第六批覆盖专项(2026-09-22, 调度域) ══
+// 靶点: 167091e 新增的 wait_for_factor_backfill 轮询终态判定 + WFA 参数提取链
+// (try_extract_wfa_params 全分支 / check_and_trigger_wfa 已有参数早退) + ML 训练
+// 依赖检查(verify_training_dependencies) + compute_mvo_weights_for_date(fixed
+// 模式纯计算路径)。不直调: run_tick / run_scheduled_tasks / trigger_v24_backfill_routes
+// / validate_pre_trade_data / ensure_prediction_coverage / rebuild_full_universe_
+// prediction_set——涉及 HTTP 自调用(8080 是生产容器)、真实 Tushare 同步、或以
+// 生产 ID 写 prediction_set(详见批次报告)。
+#[cfg(test)]
+mod sixth_batch {
+    use super::*;
+
+    async fn test_db() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 测试用 StrategyConfig 字面量(与 tests 模块同款, 避免触发 panic 版 Default)。
+    fn sc_literal() -> StrategyConfig {
+        StrategyConfig {
+            etf_premium_gate: 0.10,
+            allocation_mode: None,
+            mu_estimation: None,
+            strategy_id: "zzz_test_sixth".into(),
+            name: "zzz_test_sixth".into(),
+            etf_symbols: vec![],
+            equity_curve_task_id: String::new(),
+            min_stock: 0.0,
+            max_single: 0.0,
+            max_single_bull: 0.0,
+            momentum_blend_ratio: 0.0,
+            ga_population: 0,
+            ga_generations: 0,
+            vol_target: 0.0,
+            leverage_cap: 0.0,
+            default_weights: vec![],
+            regime_bull_min_stock: 0.0,
+            regime_bear_min_stock: 0.0,
+            deep_bear_threshold: -0.10,
+            deep_bear_exposure: 0.60,
+            signal_source: String::new(),
+            prediction_blend_weight: 0.0,
+            combo_name: String::new(),
+            top_n: 0,
+            prediction_set_id: None,
+            dynamic_target_cap: 0.0,
+            dynamic_target_floor: 0.0,
+            score_direction: String::new(),
+            candidate_tier: String::new(),
+            leverage_regime_threshold: 0.9,
+            slippage_pct: 0.002,
+            mvo_objective: "minvariance".into(),
+            kelly_fraction: 0.25,
+            score_candidate_pool_size: 200,
+            regime_policy: None,
+            regime_bear_return_threshold: -0.03,
+        }
+    }
+
+    #[test]
+    fn self_api_base_always_points_to_localhost() {
+        // 不读写 PORT 环境变量(进程级全局状态, 并行测试互扰), 只断言形态:
+        // scheduler 内部自调用必须始终落在 localhost, 防止误改为外部地址。
+        let base = self_api_base();
+        assert!(base.starts_with("http://localhost:"), "形态异常: {base}");
+        let port: u16 = base["http://localhost:".len()..]
+            .parse()
+            .expect("端口部分必须是数字");
+        assert!(port > 0);
+    }
+
+    // ── wait_for_factor_backfill(任务71 新增): 轮询终态判定 ──
+    // since 与 zzz 行 created_at 全部取未来时刻, 生产表不可能存在未来行 →
+    // 计数结果完全由 zzz_test 行决定, 测试不依赖生产 data_sync_task 当时状态。
+
+    const DST_PREFIX: &str = "zzz_test_sixth_dst";
+
+    async fn cleanup_dst_rows(db: &PgPool) {
+        let _ = sqlx::query("DELETE FROM data_sync_task WHERE task_id LIKE $1")
+            .bind(format!("{}%", DST_PREFIX))
+            .execute(db)
+            .await;
+    }
+
+    async fn insert_dst_row(
+        db: &PgPool,
+        suffix: &str,
+        task_type: &str,
+        status: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        sqlx::query(
+            "INSERT INTO data_sync_task (task_id, task_type, source, status, created_at)
+             VALUES ($1, $2, 'tushare', $3, $4)
+             ON CONFLICT (task_id) DO UPDATE
+               SET status = EXCLUDED.status, created_at = EXCLUDED.created_at,
+                   task_type = EXCLUDED.task_type",
+        )
+        .bind(format!("{}_{}", DST_PREFIX, suffix))
+        .bind(task_type)
+        .bind(status)
+        .bind(created_at)
+        .execute(db)
+        .await
+        .expect("insert zzz_test data_sync_task");
+    }
+
+    /// 全部终态(completed/failed/partial/timeout/cancelled)不计入轮询;
+    /// 非 backfill 类型的 pending 行也不计入 → 应零等待立即返回。
+    #[tokio::test]
+    async fn wait_for_factor_backfill_returns_at_once_when_all_terminal() {
+        let db = test_db().await;
+        cleanup_dst_rows(&db).await;
+        let since = chrono::Utc::now() + chrono::Duration::minutes(60);
+        let at = since + chrono::Duration::minutes(10);
+        for (suffix, status) in [
+            ("completed", "completed"),
+            ("failed", "failed"),
+            ("partial", "partial"),
+            ("timeout", "timeout"),
+            ("cancelled", "cancelled"),
+        ] {
+            insert_dst_row(&db, suffix, "zzz_test_sixth_fc_backfill", status, at).await;
+        }
+        // 非 backfill 的未终态行: task_type 不含 backfill 子串, 必须被过滤
+        insert_dst_row(&db, "eod_pending", "zzz_test_sixth_eod_sync", "pending", at).await;
+
+        let t0 = std::time::Instant::now();
+        wait_for_factor_backfill(&db, since, std::time::Duration::from_secs(60)).await;
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "全终态应立即返回, 实际耗时 {:?}",
+            t0.elapsed()
+        );
+        cleanup_dst_rows(&db).await;
+    }
+
+    /// pending/running/cancel_requested 三种未终态均计入; timeout=0 时首轮命中
+    /// deadline 分支立即放行(不 sleep 30s)——超时后继续后续步骤由物化门禁兜底。
+    #[tokio::test]
+    async fn wait_for_factor_backfill_zero_timeout_bails_out_with_pending_rows() {
+        let db = test_db().await;
+        cleanup_dst_rows(&db).await;
+        let since = chrono::Utc::now() + chrono::Duration::minutes(60);
+        let at = since + chrono::Duration::minutes(10);
+        for (suffix, status) in [
+            ("pending", "pending"),
+            ("running", "running"),
+            ("cancel_requested", "cancel_requested"),
+        ] {
+            insert_dst_row(&db, suffix, "zzz_test_sixth_fc_backfill", status, at).await;
+        }
+
+        let t0 = std::time::Instant::now();
+        wait_for_factor_backfill(&db, since, std::time::Duration::ZERO).await;
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "零超时应经 deadline 分支立即返回(若误入 30s sleep 说明 deadline 判定回归), 实际 {:?}",
+            t0.elapsed()
+        );
+        cleanup_dst_rows(&db).await;
+    }
+
+    /// created_at 早于 since 的未终态回填行不计入(只等 since 之后创建的任务)。
+    #[tokio::test]
+    async fn wait_for_factor_backfill_ignores_rows_created_before_since() {
+        let db = test_db().await;
+        cleanup_dst_rows(&db).await;
+        let since = chrono::Utc::now() + chrono::Duration::minutes(60);
+        let before = since - chrono::Duration::minutes(10);
+        insert_dst_row(
+            &db,
+            "stale_pending",
+            "zzz_test_sixth_fc_backfill",
+            "pending",
+            before,
+        )
+        .await;
+
+        let t0 = std::time::Instant::now();
+        wait_for_factor_backfill(&db, since, std::time::Duration::from_secs(60)).await;
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "since 之前的行应被过滤, 立即返回, 实际 {:?}",
+            t0.elapsed()
+        );
+        cleanup_dst_rows(&db).await;
+    }
+
+    // ── WFA 参数提取链: try_extract_wfa_params / check_and_trigger_wfa ──
+
+    const WFA_EXP_ID: &str = "zzz_test_sixth_wfa_exp";
+
+    async fn cleanup_wfa_fixtures(db: &PgPool) {
+        // 顺序: 参数行 → 任务行(CASCADE 级联删 trial) → 实验行
+        let _ = sqlx::query("DELETE FROM wfa_strategy_params WHERE experiment_run_id = $1")
+            .bind(WFA_EXP_ID)
+            .execute(db)
+            .await;
+        let _ = sqlx::query(
+            "DELETE FROM optimization_task WHERE optimization_task_id LIKE 'zzz_test_sixth_opt%'",
+        )
+        .execute(db)
+        .await;
+        let _ = sqlx::query("DELETE FROM experiment_run WHERE experiment_run_id = $1")
+            .bind(WFA_EXP_ID)
+            .execute(db)
+            .await;
+    }
+
+    /// 从最近 completed 实验提取最优 trial 参数: 仅带完整 test_start/test_end
+    /// 的窗口入库; 每窗口取分最高 trial; 缺日期/无 trial 的窗口跳过; 二次调用
+    /// 幂等(already>0 早退)。
+    #[tokio::test]
+    async fn try_extract_wfa_params_from_completed_experiment_best_trial_only() {
+        let db = test_db().await;
+        cleanup_wfa_fixtures(&db).await;
+
+        // FK 引用真实存在的策略/数据版本行(仅引用, 不写这两张表)
+        let sv: String =
+            sqlx::query_scalar("SELECT strategy_version_id FROM strategy_version LIMIT 1")
+                .fetch_one(&db)
+                .await
+                .expect("strategy_version 应有数据行供 FK 引用");
+        let dv: String = sqlx::query_scalar("SELECT data_version_id FROM data_version LIMIT 1")
+            .fetch_one(&db)
+            .await
+            .expect("data_version 应有数据行供 FK 引用");
+
+        // 最新 completed 实验: completed_at 置未来 2 分钟, 压过生产任何已完成实验
+        sqlx::query(
+            "INSERT INTO experiment_run (experiment_run_id, experiment_type, config, status, completed_at)
+             VALUES ($1, 'phase7_oos_walk_forward_discovery', '{}', 'completed', now() + interval '2 minutes')",
+        )
+        .bind(WFA_EXP_ID)
+        .execute(&db)
+        .await
+        .expect("insert zzz_test experiment_run");
+
+        // 窗口1: 完整日期 + 两个 completed trial(分低/分高) → 入库分高者
+        sqlx::query(
+            "INSERT INTO optimization_task (optimization_task_id, strategy_version_id,
+                 data_version_id, search_method, search_space, objective,
+                 walk_forward_config, status)
+             VALUES ($1, $2, $3, 'grid_search', '{}'::jsonb, '{}'::jsonb, $4::jsonb, 'completed')",
+        )
+        .bind("zzz_test_sixth_opt_w1")
+        .bind(&sv)
+        .bind(&dv)
+        .bind(serde_json::json!({
+            "experiment_run_id": WFA_EXP_ID,
+            "window_index": 1,
+            "test_start": "2026-02-10",
+            "test_end": "2026-02-28"
+        }))
+        .execute(&db)
+        .await
+        .expect("insert optimization_task w1");
+        for (trial_id, idx, combo, score) in [
+            ("zzz_test_sixth_trial_w1_lo", 0i32, "zzz_test_worst", 1.1f64),
+            ("zzz_test_sixth_trial_w1_hi", 1, "zzz_test_best", 2.5),
+        ] {
+            sqlx::query(
+                "INSERT INTO optimization_trial (trial_id, optimization_task_id, trial_index,
+                     parameters, score, status)
+                 VALUES ($1, 'zzz_test_sixth_opt_w1', $2, $3::jsonb, $4, 'completed')",
+            )
+            .bind(trial_id)
+            .bind(idx)
+            .bind(serde_json::json!({ "combo_name": combo, "top_n": 9 }))
+            .bind(rust_decimal::Decimal::from_f64_retain(score))
+            .execute(&db)
+            .await
+            .expect("insert optimization_trial");
+        }
+
+        // 窗口2: walk_forward_config 缺 test_start/test_end → 有 best trial 也不入库
+        sqlx::query(
+            "INSERT INTO optimization_task (optimization_task_id, strategy_version_id,
+                 data_version_id, search_method, search_space, objective,
+                 walk_forward_config, status)
+             VALUES ($1, $2, $3, 'grid_search', '{}'::jsonb, '{}'::jsonb, $4::jsonb, 'completed')",
+        )
+        .bind("zzz_test_sixth_opt_w2")
+        .bind(&sv)
+        .bind(&dv)
+        .bind(serde_json::json!({
+            "experiment_run_id": WFA_EXP_ID,
+            "window_index": 2
+        }))
+        .execute(&db)
+        .await
+        .expect("insert optimization_task w2");
+        sqlx::query(
+            "INSERT INTO optimization_trial (trial_id, optimization_task_id, trial_index,
+                 parameters, score, status)
+             VALUES ($1, 'zzz_test_sixth_opt_w2', 0, $2::jsonb, 3.5, 'completed')",
+        )
+        .bind("zzz_test_sixth_trial_w2")
+        .bind(serde_json::json!({ "combo_name": "zzz_test_no_dates" }))
+        .execute(&db)
+        .await
+        .expect("insert optimization_trial w2");
+
+        // 窗口3: 无任何 trial → 跳过
+        sqlx::query(
+            "INSERT INTO optimization_task (optimization_task_id, strategy_version_id,
+                 data_version_id, search_method, search_space, objective,
+                 walk_forward_config, status)
+             VALUES ($1, $2, $3, 'grid_search', '{}'::jsonb, '{}'::jsonb, $4::jsonb, 'completed')",
+        )
+        .bind("zzz_test_sixth_opt_w3")
+        .bind(&sv)
+        .bind(&dv)
+        .bind(serde_json::json!({
+            "experiment_run_id": WFA_EXP_ID,
+            "window_index": 3,
+            "test_start": "2026-03-10",
+            "test_end": "2026-03-20"
+        }))
+        .execute(&db)
+        .await
+        .expect("insert optimization_task w3");
+
+        // 首次提取: 仅窗口1 入库, 参数取分高 trial
+        try_extract_wfa_params(&db).await.expect("首次提取应成功");
+        let rows: Vec<(i32, NaiveDate, NaiveDate, serde_json::Value, Option<f64>)> =
+            sqlx::query_as(
+                "SELECT window_index, test_start, test_end, parameters, score
+                 FROM wfa_strategy_params WHERE experiment_run_id = $1 ORDER BY window_index",
+            )
+            .bind(WFA_EXP_ID)
+            .fetch_all(&db)
+            .await
+            .expect("查询提取结果");
+        assert_eq!(
+            rows.len(),
+            1,
+            "仅窗口1入库(窗口2缺日期/窗口3无trial): {rows:?}"
+        );
+        assert_eq!(rows[0].0, 1, "window_index: {rows:?}");
+        assert_eq!(rows[0].1, NaiveDate::from_ymd_opt(2026, 2, 10).unwrap());
+        assert_eq!(rows[0].2, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap());
+        assert_eq!(
+            rows[0].3["combo_name"], "zzz_test_best",
+            "应取分最高 trial: {rows:?}"
+        );
+        assert!(
+            (rows[0].4.expect("score 应非空") - 2.5).abs() < 1e-9,
+            "score 应为最高分 trial: {rows:?}"
+        );
+
+        // 二次提取: already>0 幂等早退, 行数不变
+        try_extract_wfa_params(&db)
+            .await
+            .expect("二次提取应成功(幂等)");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wfa_strategy_params WHERE experiment_run_id = $1",
+        )
+        .bind(WFA_EXP_ID)
+        .fetch_one(&db)
+        .await
+        .expect("计数提取结果");
+        assert_eq!(n, 1, "幂等: 二次提取不应新增行");
+
+        cleanup_wfa_fixtures(&db).await;
+    }
+
+    /// 当季已有覆盖日期的 WFA 参数 → 直接跳过(不查实验/不发 HTTP)。
+    #[tokio::test]
+    async fn check_and_trigger_wfa_skips_when_quarter_params_already_exist() {
+        let db = test_db().await;
+        // 生产 wfa_strategy_params 覆盖 2019-01-31~2026-01-28, 取窗口内日期验证早退
+        let inside = NaiveDate::from_ymd_opt(2025, 6, 30).unwrap();
+        let r = check_and_trigger_wfa(&db, 65535, "2025-Q3", inside).await;
+        assert_eq!(r, Ok(None), "已有该季度参数应跳过: {r:?}");
+    }
+
+    /// ML 训练依赖检查: 新鲜数据全通过 / 未知 combo / 远未来日期三态。
+    #[tokio::test]
+    async fn verify_training_dependencies_fresh_missing_combo_and_far_future() {
+        let db = test_db().await;
+        // 正例日期动态取该 combo PIT 口径最新截面日(数据增长不失效)
+        let mfv_max: Option<NaiveDate> = sqlx::query_scalar(
+            "SELECT MAX(trade_date) FROM multi_factor_value
+             WHERE combo_name = 'full_pit_icir_indneutral_val_v1'
+               AND COALESCE(available_at, trade_date) <= trade_date",
+        )
+        .fetch_one(&db)
+        .await
+        .ok()
+        .flatten();
+        let date = mfv_max.expect("v24 combo 应有物化数据");
+        assert!(
+            verify_training_dependencies(&db, date, "full_pit_icir_indneutral_val_v1").await,
+            "日线/复权/因子三依赖均新鲜时应通过(date={date})"
+        );
+        // 反例1: 未知 combo → factor_ok=false
+        assert!(
+            !verify_training_dependencies(&db, date, "zzz_test_no_such_combo").await,
+            "未知 combo 应判依赖缺失"
+        );
+        // 反例2: 远未来日期 → 日线/因子窗口全空, 复权因子超 60 天
+        assert!(
+            !verify_training_dependencies(
+                &db,
+                NaiveDate::from_ymd_opt(2030, 1, 1).unwrap(),
+                "full_pit_icir_indneutral_val_v1"
+            )
+            .await,
+            "远未来日期应判依赖缺失"
+        );
+    }
+
+    /// compute_mvo_weights_for_date: fixed 分配模式绕过 MVO 管线,
+    /// default_weights 按比例归一原样返回(该路径不触 DB 计算查询)。
+    #[tokio::test]
+    async fn compute_mvo_weights_for_date_fixed_mode_returns_configured_weights() {
+        let db = test_db().await;
+        let sc = StrategyConfig {
+            allocation_mode: Some("fixed".into()),
+            etf_symbols: vec!["518880.SH".into(), "511010.SH".into(), "513100.SH".into()],
+            default_weights: vec![0.30, 0.20, 0.20, 0.30],
+            ..sc_literal()
+        };
+        let date = NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+        let weights = compute_mvo_weights_for_date(&db, date, &sc).await;
+        assert_eq!(weights.len(), 4, "A股 + 3 ETF: {weights:?}");
+        for (got, want) in weights.iter().zip([0.30, 0.20, 0.20, 0.30]) {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "fixed 模式权重应按配置比例返回: {weights:?}"
+            );
+        }
+        assert!(
+            (weights.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+            "权重和应归一为 1: {weights:?}"
+        );
+    }
+}
