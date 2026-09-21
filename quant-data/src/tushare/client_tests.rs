@@ -1419,3 +1419,88 @@ async fn index_member_dispatches_level_param_by_code_prefix() {
 
     mock.shutdown();
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 第五批：收尾冲刺——fund_adj 直测 + 分页 offset-without-limit 分支。
+//
+// fund_adj 是唯一无 client 直测的薄封装（sync_tests 仅间接覆盖成功路径）；
+// daily_basic/moneyflow/forecast 的分页组装在 offset 有、limit 无时走
+// owned[0] 索引分支（idx=0），既有测试均传 limit+offset 成对，该分支未走。
+// ═══════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn fund_adj_passes_code_and_window_params() {
+    let mock = single_route("fund_adj", MockResponse::EmptyOk).await;
+    let client = client_for(&mock.base_url);
+
+    client
+        .fund_adj("ZZZSYNC60.SH", Some("20250101"), Some("20251231"))
+        .await
+        .expect("fund_adj 应成功");
+
+    // ts_code 必填 + start/end 窗口；空 fields 序列化为 Some([])（非 null）
+    assert_thin_call(
+        &mock,
+        "fund_adj",
+        &[
+            ("ts_code", json!("ZZZSYNC60.SH")),
+            ("start_date", json!("20250101")),
+            ("end_date", json!("20251231")),
+        ],
+        &[],
+        None,
+    );
+
+    mock.shutdown();
+}
+
+#[tokio::test]
+async fn pagination_offset_without_limit_takes_index_zero_branch() {
+    let mock = spawn_mock_tushare(vec![
+        ("daily_basic", MockResponse::EmptyOk),
+        ("moneyflow", MockResponse::EmptyOk),
+        ("forecast", MockResponse::EmptyOk),
+    ])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    // 三接口均只传 offset 不传 limit：owned 向量只有 offset 一项，
+    // 组装走 idx=0 分支——offset 正确透传且不误发 limit 参数
+    client
+        .daily_basic(None, Some("20260511"), None, None, None, Some(700))
+        .await
+        .expect("daily_basic 仅 offset 应成功");
+    assert_thin_call(
+        &mock,
+        "daily_basic",
+        &[("trade_date", json!("20260511")), ("offset", json!("700"))],
+        &["ts_code", "limit"],
+        Some(11),
+    );
+
+    client
+        .moneyflow(None, Some("20260511"), None, None, None, Some(900))
+        .await
+        .expect("moneyflow 仅 offset 应成功");
+    assert_thin_call(
+        &mock,
+        "moneyflow",
+        &[("trade_date", json!("20260511")), ("offset", json!("900"))],
+        &["ts_code", "limit"],
+        Some(20),
+    );
+
+    client
+        .forecast(None, None, None, None, None, None, None, Some(300))
+        .await
+        .expect("forecast 仅 offset 应成功");
+    assert_thin_call(
+        &mock,
+        "forecast",
+        &[("offset", json!("300"))],
+        &["ts_code", "limit"],
+        Some(11),
+    );
+
+    mock.shutdown();
+}

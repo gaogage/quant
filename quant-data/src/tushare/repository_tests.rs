@@ -6,11 +6,13 @@
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use serde_json::json;
 use sqlx::PgPool;
 
 use crate::model::entities::{
     MarketAdjustmentFactor, MarketFundNav, MarketStock, MarketStockDailyBar, MarketStockDailyBasic,
-    MarketStockMoneyflow, MarketTradeCalendar,
+    MarketStockDisclosureDate, MarketStockExpress, MarketStockForecast, MarketStockMoneyflow,
+    MarketTradeCalendar,
 };
 use crate::repository;
 
@@ -952,4 +954,272 @@ async fn moneyflow_single_row_upsert_roundtrip() {
 
     cleanup_syms(&pool, &[ZZZ_MF2]).await;
     cleanup_dv(&pool, ZZZ_DV_MF2).await;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 第五批：单行版 upsert 三件套补覆盖。
+//
+// upsert_forecast / upsert_express / upsert_disclosure_date 是与 batch 版
+// 独立实现的单行 INSERT（workspace 无生产调用方，纯 pub API 0 覆盖），
+// 直测幂等与字段回读。键位续用 ZZZTST 系列（L/M/N 起）。
+// ═══════════════════════════════════════════════════════════════
+
+/// forecast 单条 upsert 专用键
+const ZZZ_FCST: &str = "ZZZTSTL.SH";
+const ZZZ_DV_FCST: &str = "zzz-test-dv-fcst";
+/// express 单条 upsert 专用键
+const ZZZ_EXP: &str = "ZZZTSTM.SH";
+const ZZZ_DV_EXP: &str = "zzz-test-dv-exp";
+/// disclosure_date 单条 upsert 专用键
+const ZZZ_DSC: &str = "ZZZTSTN.SH";
+const ZZZ_DV_DSC: &str = "zzz-test-dv-dsc";
+
+/// 清理第五批三张表（只动传入键，并行安全）
+async fn cleanup_fifth_batch(pool: &PgPool, table: &str, sym: &str) {
+    let _ = sqlx::query(&format!("DELETE FROM {} WHERE symbol = $1", table))
+        .bind(sym)
+        .execute(pool)
+        .await;
+}
+
+#[tokio::test]
+async fn single_row_upsert_forecast_roundtrip() {
+    let pool = local_pool().await;
+    cleanup_fifth_batch(&pool, "market_stock_forecast", ZZZ_FCST).await;
+    cleanup_dv(&pool, ZZZ_DV_FCST).await;
+
+    repository::create_data_version(
+        &pool,
+        ZZZ_DV_FCST,
+        "zzz test dv",
+        "tushare",
+        &["market_stock_forecast"],
+        d(2026, 1, 1),
+        d(2026, 1, 31),
+    )
+    .await
+    .expect("create dv");
+
+    let row = MarketStockForecast {
+        symbol: ZZZ_FCST.to_string(),
+        ann_date: d(2026, 1, 10),
+        end_date: d(2025, 12, 31),
+        forecast_type: "预增".to_string(),
+        p_change_min: Some(dec(50.0)),
+        p_change_max: Some(dec(80.0)),
+        net_profit_min: Some(dec(12000.5)),
+        net_profit_max: Some(dec(15000.25)),
+        first_ann_date: d(2026, 1, 9),
+        available_at: d(2026, 1, 10),
+        summary: Some("预计净利润同向上升".to_string()),
+        change_reason: None,
+        raw_payload: json!({"ts_code": ZZZ_FCST, "type": "预增"}),
+    };
+
+    repository::upsert_forecast(&pool, &row, ZZZ_DV_FCST, "tushare:forecast")
+        .await
+        .expect("单条 forecast");
+
+    let (p_min, np_max, first_ann, summary, source): (
+        Option<Decimal>,
+        Option<Decimal>,
+        NaiveDate,
+        Option<String>,
+        String,
+    ) = sqlx::query_as(
+        "SELECT p_change_min, net_profit_max, first_ann_date, summary, source \
+         FROM market_stock_forecast WHERE symbol = $1",
+    )
+    .bind(ZZZ_FCST)
+    .fetch_one(&pool)
+    .await
+    .expect("行应存在");
+    assert_eq!(p_min, Some(dec(50.0)));
+    assert_eq!(np_max, Some(dec(15000.25)));
+    assert_eq!(
+        first_ann,
+        d(2026, 1, 9),
+        "first_ann_date 独立于 ann_date 落库"
+    );
+    assert_eq!(summary.as_deref(), Some("预计净利润同向上升"));
+    assert_eq!(source, "tushare:forecast");
+
+    // 幂等覆盖：同 uk 键改 p_change_max + summary → 行数不增、新值胜出
+    let mut row2 = row;
+    row2.p_change_max = Some(dec(99.0));
+    row2.summary = Some("二次修订".to_string());
+    repository::upsert_forecast(&pool, &row2, ZZZ_DV_FCST, "tushare:forecast")
+        .await
+        .expect("幂等重写");
+    let (count, p_max, summary): (i64, Option<Decimal>, Option<String>) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(p_change_max), MAX(summary) FROM market_stock_forecast \
+         WHERE symbol = $1",
+    )
+    .bind(ZZZ_FCST)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(p_max, Some(dec(99.0)), "二次写入覆盖取最新");
+    assert_eq!(summary.as_deref(), Some("二次修订"));
+
+    cleanup_fifth_batch(&pool, "market_stock_forecast", ZZZ_FCST).await;
+    cleanup_dv(&pool, ZZZ_DV_FCST).await;
+}
+
+#[tokio::test]
+async fn single_row_upsert_express_roundtrip() {
+    let pool = local_pool().await;
+    cleanup_fifth_batch(&pool, "market_stock_express", ZZZ_EXP).await;
+    cleanup_dv(&pool, ZZZ_DV_EXP).await;
+
+    repository::create_data_version(
+        &pool,
+        ZZZ_DV_EXP,
+        "zzz test dv",
+        "tushare",
+        &["market_stock_express"],
+        d(2026, 1, 1),
+        d(2026, 1, 31),
+    )
+    .await
+    .expect("create dv");
+
+    let row = MarketStockExpress {
+        symbol: ZZZ_EXP.to_string(),
+        ann_date: d(2026, 1, 20),
+        end_date: d(2025, 12, 31),
+        revenue: Some(dec(88000.5)),
+        n_income: Some(dec(9800.25)),
+        yoy_sales: Some(dec(15.5)),
+        yoy_dedu_np: Some(dec(22.25)),
+        diluted_eps: Some(dec(0.85)),
+        diluted_roe: Some(dec(11.2)),
+        is_audit: Some(1),
+        available_at: d(2026, 1, 20),
+        perf_summary: Some("营业收入稳定增长".to_string()),
+        remark: None,
+        raw_payload: json!({"ts_code": ZZZ_EXP}),
+    };
+
+    repository::upsert_express(&pool, &row, ZZZ_DV_EXP, "tushare:express")
+        .await
+        .expect("单条 express");
+
+    let (revenue, eps, is_audit, perf): (
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<i32>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT revenue, diluted_eps, is_audit, perf_summary \
+             FROM market_stock_express WHERE symbol = $1",
+    )
+    .bind(ZZZ_EXP)
+    .fetch_one(&pool)
+    .await
+    .expect("行应存在");
+    assert_eq!(revenue, Some(dec(88000.5)));
+    // 0.85 的 from_f64_retain 是二进制近似，落库 numeric(18,6) 舍入后需容差比较
+    let eps = eps.expect("diluted_eps 应有值");
+    assert_dec_close(eps, 0.85, "diluted_eps");
+    assert_eq!(is_audit, Some(1));
+    assert_eq!(perf.as_deref(), Some("营业收入稳定增长"));
+
+    // 幂等覆盖：改 n_income + is_audit → 行数不增、新值胜出
+    let mut row2 = row;
+    row2.n_income = Some(dec(9999.75));
+    row2.is_audit = None;
+    repository::upsert_express(&pool, &row2, ZZZ_DV_EXP, "tushare:express")
+        .await
+        .expect("幂等重写");
+    let (count, n_income, is_audit): (i64, Option<Decimal>, Option<i32>) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(n_income), MAX(is_audit) FROM market_stock_express WHERE symbol = $1",
+    )
+    .bind(ZZZ_EXP)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(n_income, Some(dec(9999.75)), "二次写入覆盖取最新");
+    assert_eq!(is_audit, None, "None 覆盖为 NULL");
+
+    cleanup_fifth_batch(&pool, "market_stock_express", ZZZ_EXP).await;
+    cleanup_dv(&pool, ZZZ_DV_EXP).await;
+}
+
+#[tokio::test]
+async fn single_row_upsert_disclosure_date_roundtrip() {
+    let pool = local_pool().await;
+    cleanup_fifth_batch(&pool, "market_stock_disclosure_date", ZZZ_DSC).await;
+    cleanup_dv(&pool, ZZZ_DV_DSC).await;
+
+    repository::create_data_version(
+        &pool,
+        ZZZ_DV_DSC,
+        "zzz test dv",
+        "tushare",
+        &["market_stock_disclosure_date"],
+        d(2026, 1, 1),
+        d(2026, 1, 31),
+    )
+    .await
+    .expect("create dv");
+
+    let row = MarketStockDisclosureDate {
+        symbol: ZZZ_DSC.to_string(),
+        end_date: d(2025, 12, 31),
+        ann_date: d(2026, 3, 20),
+        pre_date: Some(d(2026, 3, 12)),
+        actual_date: Some(d(2026, 3, 21)),
+        modify_date: None,
+        available_at: d(2026, 3, 20),
+        raw_payload: json!({"ts_code": ZZZ_DSC}),
+    };
+
+    repository::upsert_disclosure_date(&pool, &row, ZZZ_DV_DSC, "tushare:disclosure_date")
+        .await
+        .expect("单条 disclosure_date");
+
+    let (ann, pre, actual, modify, avail): (
+        NaiveDate,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
+        NaiveDate,
+    ) = sqlx::query_as(
+        "SELECT ann_date, pre_date, actual_date, modify_date, available_at \
+         FROM market_stock_disclosure_date WHERE symbol = $1",
+    )
+    .bind(ZZZ_DSC)
+    .fetch_one(&pool)
+    .await
+    .expect("行应存在");
+    assert_eq!(ann, d(2026, 3, 20));
+    assert_eq!(pre, Some(d(2026, 3, 12)));
+    assert_eq!(actual, Some(d(2026, 3, 21)));
+    assert_eq!(modify, None);
+    assert_eq!(avail, d(2026, 3, 20), "available_at 默认取 ann_date 语义");
+
+    // 幂等覆盖：actual_date 改期 + modify_date 补值 → 行数不增、新值胜出
+    let mut row2 = row;
+    row2.actual_date = Some(d(2026, 3, 28));
+    row2.modify_date = Some(d(2026, 3, 25));
+    repository::upsert_disclosure_date(&pool, &row2, ZZZ_DV_DSC, "tushare:disclosure_date")
+        .await
+        .expect("幂等重写");
+    let (count, actual, modify): (i64, Option<NaiveDate>, Option<NaiveDate>) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(actual_date), MAX(modify_date) \
+         FROM market_stock_disclosure_date WHERE symbol = $1",
+    )
+    .bind(ZZZ_DSC)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(actual, Some(d(2026, 3, 28)), "二次写入覆盖取最新");
+    assert_eq!(modify, Some(d(2026, 3, 25)));
+
+    cleanup_fifth_batch(&pool, "market_stock_disclosure_date", ZZZ_DSC).await;
+    cleanup_dv(&pool, ZZZ_DV_DSC).await;
 }

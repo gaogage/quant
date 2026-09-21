@@ -4844,3 +4844,385 @@ async fn main_board_universe_query_excludes_growth_st_and_unlisted() {
 
     cleanup_zzz_tables(&pool, &all_keys).await;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 第五批：收尾冲刺——sync.rs 尾部剩余 0 覆盖链与大函数错误分支。
+//
+// - derive_suspension_from_daily_absence（仅参数校验：主链 SQL 对真实
+//   窗口必写入 13 只长期停牌真实股的派生行，污染生产数据，见测试注释）
+// - backfill_suspension_completion_markers（含内部
+//   backfill_event_sync_completion_markers 通用 CTE 链）
+// - get_suspended_symbols（suspend_type='S' 过滤）
+// - sync_equity_pledge_pressure 逐只 pledge_stat 错误路径（任务 partial 中断）
+// - sync_financial_data_with_task 三接口全败路径（attempt failed + 任务 partial）
+//
+// 键位续用 ZZZSYNC 系列（56 起步）；事件日期选真实数据边界之外
+// （suspension 任务/数据 max=2026-09-20，2026-12-21~24 与 2027-02-15 零碰撞）。
+// ═══════════════════════════════════════════════════════════════
+
+/// get_suspended_symbols：停牌类型 'S' 行入选
+const ZZZ_SUSP_G1: &str = "ZZZSYNC56.SH";
+/// get_suspended_symbols：非 'S' 类型行（复牌标记形态）不入选
+const ZZZ_SUSP_G2: &str = "ZZZSYNC57.SH";
+/// sync_equity_pledge_pressure 失败分支独占键
+const ZZZ_PLG_FAIL: &str = "ZZZSYNC58.SH";
+/// sync_financial_data 三接口全败分支独占键
+const ZZZ_FIN_FAIL: &str = "ZZZSYNC59.SH";
+
+/// 清理 suspension 两键 + 对应完成标记任务行
+async fn cleanup_suspension_keys(pool: &PgPool, days: &[&str]) {
+    for day in days {
+        let _ = sqlx::query("DELETE FROM market_stock_suspension WHERE trade_date = $1")
+            .bind(NaiveDate::parse_from_str(day, "%Y%m%d").unwrap())
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM data_sync_task WHERE task_id = $1")
+            .bind(format!("suspension_daily-{}", day))
+            .execute(pool)
+            .await;
+    }
+    for sym in [ZZZ_SUSP_G1, ZZZ_SUSP_G2] {
+        let _ = sqlx::query("DELETE FROM market_stock_suspension WHERE symbol = $1")
+            .bind(sym)
+            .execute(pool)
+            .await;
+    }
+}
+
+// ─── derive_suspension_from_daily_absence ────────────────────────
+//
+// 主链 SQL（派生 + 完成标记两段 CTE）不带 symbol 过滤参数：expected CTE 按
+// ^[036][0-9]{5}\.(SH|SZ)$ 扫全市场，本机真实库任何近月开市窗口 dry-run 均
+// 有 13 只长期停牌真实股（无 adj bar 且无 suspension 行）会被写入派生停牌
+// ——测试会污染生产数据，故只覆盖参数校验分支（与 run_quality_check 的
+// duplicates>0 分支同性质的"主键/全表语义不可构造"约束）。
+
+#[tokio::test]
+async fn derive_suspension_rejects_bad_windows_and_dates() {
+    let pool = local_pool().await;
+
+    let err = sync::derive_suspension_from_daily_absence(&pool, "20261230", "20261228")
+        .await
+        .expect_err("倒置窗口应报错");
+    assert!(err.contains("不能晚于"), "实际: {}", err);
+
+    let err = sync::derive_suspension_from_daily_absence(&pool, "not-a-date", "20261230")
+        .await
+        .expect_err("非法 start 日期应报错");
+    assert!(err.contains("start_date解析"), "实际: {}", err);
+
+    let err = sync::derive_suspension_from_daily_absence(&pool, "20261201", "bad-end")
+        .await
+        .expect_err("非法 end 日期应报错");
+    assert!(err.contains("end_date解析"), "实际: {}", err);
+}
+
+// ─── backfill_suspension_completion_markers ──────────────────────
+
+#[tokio::test]
+async fn backfill_suspension_markers_write_completed_tasks_for_open_days() {
+    let pool = local_pool().await;
+    // 窗口 12-21~24 与 limit 版 backfill 测试同形状（4 个开市日），
+    // 但任务键前缀 suspension_daily- 与 limit_daily- 互不重叠，可并行
+    let days = ["20261221", "20261222", "20261223", "20261224"];
+    cleanup_suspension_keys(&pool, &days).await;
+
+    // 参数校验分支
+    let err = sync::backfill_suspension_completion_markers(&pool, "20261224", "20261221")
+        .await
+        .expect_err("倒置窗口应报错");
+    assert!(err.contains("不能晚于"), "实际: {}", err);
+
+    let n = sync::backfill_suspension_completion_markers(&pool, "20261221", "20261224")
+        .await
+        .expect("补齐停牌完成标记应成功");
+    assert_eq!(n, 4, "四个开市日各补一条任务");
+
+    // 每个开市日一条 completed 任务；source 固定 derived:susp_existing 透传；
+    // suspension 表该未来窗口无行 → COALESCE 0
+    let rows: Vec<(String, String, i32)> = sqlx::query_as(
+        "SELECT task_id, source, total_count FROM data_sync_task \
+         WHERE task_id IN ('suspension_daily-20261221', 'suspension_daily-20261222', \
+                           'suspension_daily-20261223', 'suspension_daily-20261224') \
+         ORDER BY task_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 4);
+    for (task_id, source, total) in &rows {
+        assert!(
+            task_id.starts_with("suspension_daily-2026122"),
+            "{}",
+            task_id
+        );
+        assert_eq!(source, "derived:susp_existing");
+        assert_eq!(*total, 0, "suspension 表该窗口无行 → COALESCE 0");
+    }
+
+    // 幂等：重跑仍 4 行（upsert 不增行）
+    let n_again = sync::backfill_suspension_completion_markers(&pool, "20261221", "20261224")
+        .await
+        .expect("二次补齐应成功");
+    assert_eq!(n_again, 4);
+    let cnt: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM data_sync_task WHERE task_id LIKE 'suspension_daily-2026122%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cnt, 4, "upsert 幂等不增行");
+
+    cleanup_suspension_keys(&pool, &days).await;
+}
+
+// ─── get_suspended_symbols ───────────────────────────────────────
+
+#[tokio::test]
+async fn get_suspended_symbols_returns_only_type_s_rows() {
+    let pool = local_pool().await;
+    // 2027-02-15 在真实 suspension 数据（max=2026-09-20）之外，全表该日
+    // 只有自家两键 → 可精确断言
+    cleanup_suspension_keys(&pool, &["20270215"]).await;
+
+    sqlx::query(
+        "INSERT INTO market_stock_suspension (symbol, trade_date, suspend_type) VALUES \
+         ($1, '2027-02-15', 'S'), ($2, '2027-02-15', 'R')",
+    )
+    .bind(ZZZ_SUSP_G1)
+    .bind(ZZZ_SUSP_G2)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let syms = sync::get_suspended_symbols(&pool, d(2027, 2, 15))
+        .await
+        .expect("停牌查询应成功");
+    assert_eq!(syms, vec![ZZZ_SUSP_G1.to_string()], "只含 'S' 类型行");
+
+    // 无数据日期 → 空列表
+    let empty = sync::get_suspended_symbols(&pool, d(2027, 2, 16))
+        .await
+        .expect("空日查询应成功");
+    assert!(empty.is_empty());
+
+    cleanup_suspension_keys(&pool, &["20270215"]).await;
+}
+
+// ─── sync_equity_pledge_pressure 错误路径 ────────────────────────
+
+#[tokio::test]
+async fn sync_equity_pledge_error_fails_task_with_attempt() {
+    let pool = local_pool().await;
+    cleanup_symbol_tables(&pool, &["market_stock_pledge_stat"], ZZZ_PLG_FAIL).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-plg-err").await;
+    cleanup_attempt_by_task(&pool, "zzz-test-sync-plg-err").await;
+
+    // 逐只路径：pledge_stat 一击 ApiErr → attempt failed + 任务 partial + Err 上抛
+    let mock = spawn_mock_tushare(vec![(
+        "pledge_stat",
+        MockResponse::ApiErr {
+            code: 40101,
+            msg: "权限不足".to_string(),
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let err = sync::sync_equity_pledge_pressure(
+        &pool,
+        &client,
+        "zzz-test-sync-plg-err",
+        &[ZZZ_PLG_FAIL.to_string()],
+        "20260105",
+        "20260131",
+    )
+    .await
+    .expect_err("pledge_stat 失败应中断整链");
+    assert!(
+        err.to_string().contains("pledge_stat") && err.to_string().contains("权限不足"),
+        "实际: {}",
+        err
+    );
+
+    let (status, _, _, failed) = task_state(&pool, "zzz-test-sync-plg-err").await;
+    assert_eq!(status, "partial");
+    assert_eq!(failed, 1);
+
+    // attempt 记账：equity_pledge_stat_symbol 维度 failed + 错误消息透传
+    let (attempt_status, attempt_err): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, error_message FROM data_sync_attempt \
+         WHERE task_id = $1 AND source = 'equity_pledge_stat_symbol' AND symbol = $2",
+    )
+    .bind("zzz-test-sync-plg-err")
+    .bind(ZZZ_PLG_FAIL)
+    .fetch_one(&pool)
+    .await
+    .expect("failed attempt 行应存在");
+    assert_eq!(attempt_status, "failed");
+    assert!(
+        attempt_err.as_deref().unwrap_or("").contains("权限不足"),
+        "实际: {:?}",
+        attempt_err
+    );
+
+    mock.shutdown();
+    cleanup_symbol_tables(&pool, &["market_stock_pledge_stat"], ZZZ_PLG_FAIL).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-plg-err").await;
+    cleanup_attempt_by_task(&pool, "zzz-test-sync-plg-err").await;
+}
+
+// ─── sync_financial_data_with_task 全败路径 ──────────────────────
+
+#[tokio::test]
+async fn sync_financial_data_all_apis_fail_marks_attempt_and_partial() {
+    let pool = local_pool().await;
+    cleanup_ts_code_tables(
+        &pool,
+        &["market_financial_statement", "market_financial_indicator"],
+        ZZZ_FIN_FAIL,
+    )
+    .await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-fin-fail").await;
+    cleanup_attempt_by_task(&pool, "zzz-test-sync-fin-fail").await;
+
+    // 三接口（income/balancesheet/fina_indicator）全 ApiErr：
+    // 逐只不中段，symbol_failed 累计 → attempt failed（错误消息拼接）+ 任务 partial
+    let api_err = || MockResponse::ApiErr {
+        code: 40101,
+        msg: "权限不足".to_string(),
+    };
+    let mock = spawn_mock_tushare(vec![
+        ("income", api_err()),
+        (
+            "balancesheet",
+            MockResponse::ApiErr {
+                code: 40101,
+                msg: "余额表权限不足".to_string(),
+            },
+        ),
+        (
+            "fina_indicator",
+            MockResponse::ApiErr {
+                code: 40101,
+                msg: "指标权限不足".to_string(),
+            },
+        ),
+    ])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let (stmt_count, ind_count) = sync::sync_financial_data_with_task(
+        &pool,
+        &client,
+        &[ZZZ_FIN_FAIL.to_string()],
+        "zzz-test-sync-fin-fail",
+    )
+    .await
+    .expect("全败仍整体 Ok 返回 (0, 0)");
+    assert_eq!((stmt_count, ind_count), (0, 0));
+
+    let (status, total, ok, failed) = task_state(&pool, "zzz-test-sync-fin-fail").await;
+    assert_eq!(status, "partial", "有失败标的 → partial");
+    assert_eq!((total, ok, failed), (1, 0, 1));
+
+    // attempt 行：failed + 三段错误消息经 append_symbol_error 拼接（; 分隔）
+    let (attempt_status, attempt_err): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, error_message FROM data_sync_attempt \
+         WHERE task_id = $1 AND symbol = $2",
+    )
+    .bind("zzz-test-sync-fin-fail")
+    .bind(ZZZ_FIN_FAIL)
+    .fetch_one(&pool)
+    .await
+    .expect("failed attempt 行应存在");
+    assert_eq!(attempt_status, "failed");
+    let msg = attempt_err.unwrap_or_default();
+    assert!(
+        msg.contains("权限不足") && msg.contains("; "),
+        "拼接消息: {}",
+        msg
+    );
+
+    // 零写入断言：两表无该 ts_code 行
+    let stmt_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM market_financial_statement WHERE ts_code = $1")
+            .bind(ZZZ_FIN_FAIL)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stmt_rows, 0);
+
+    mock.shutdown();
+    cleanup_ts_code_tables(
+        &pool,
+        &["market_financial_statement", "market_financial_indicator"],
+        ZZZ_FIN_FAIL,
+    )
+    .await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-fin-fail").await;
+    cleanup_attempt_by_task(&pool, "zzz-test-sync-fin-fail").await;
+}
+
+// ─── sync_shareholder_structure 错误路径 ─────────────────────────
+
+#[tokio::test]
+async fn sync_shareholder_structure_error_fails_task_with_all_scope_attempt() {
+    let pool = local_pool().await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-shs-err").await;
+    cleanup_attempt_by_task(&pool, "zzz-test-sync-shs-err").await;
+
+    // 只选 holder_number 源（全局 __ALL__ 拉取，不查 universe）：
+    // stk_holdernumber 一击 ApiErr → attempt failed + 任务 partial + Err 上抛
+    let mock = spawn_mock_tushare(vec![(
+        "stk_holdernumber",
+        MockResponse::ApiErr {
+            code: 40101,
+            msg: "权限不足".to_string(),
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let err = sync::sync_shareholder_structure(
+        &pool,
+        &client,
+        "zzz-test-sync-shs-err",
+        &[],
+        &["holder_number".to_string()],
+        "20260105",
+        "20260131",
+    )
+    .await
+    .expect_err("holder_number 失败应中断整链");
+    assert!(
+        err.to_string().contains("holder_number") && err.to_string().contains("权限不足"),
+        "实际: {}",
+        err
+    );
+
+    let (status, _, _, failed) = task_state(&pool, "zzz-test-sync-shs-err").await;
+    assert_eq!(status, "partial");
+    assert_eq!(failed, 1);
+
+    // attempt 记账：全局 __ALL__ 维度 failed + 错误消息透传
+    let (attempt_status, attempt_err): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, error_message FROM data_sync_attempt \
+         WHERE task_id = $1 AND source = 'shareholder_holder_number_ann_date' \
+           AND symbol = '__ALL__'",
+    )
+    .bind("zzz-test-sync-shs-err")
+    .fetch_one(&pool)
+    .await
+    .expect("failed attempt 行应存在");
+    assert_eq!(attempt_status, "failed");
+    assert!(
+        attempt_err.as_deref().unwrap_or("").contains("权限不足"),
+        "实际: {:?}",
+        attempt_err
+    );
+
+    mock.shutdown();
+    cleanup_task_and_dv(&pool, "zzz-test-sync-shs-err").await;
+    cleanup_attempt_by_task(&pool, "zzz-test-sync-shs-err").await;
+}
