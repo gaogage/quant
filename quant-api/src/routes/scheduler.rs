@@ -672,6 +672,12 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
             "[scheduler] 定时任务触发: {} ({}) cron={}",
             name, task_type, cron_expr
         );
+        // 未知 task_type 标记（2026-09-21 修复）：兜底臂原为 `_ => {}` 静默空转，
+        // 而末尾状态硬编码 last_status='success'——新注册任务若运行在尚无对应分派
+        // 分支的旧二进制上，会"绿着什么都不做"。实锤：rolling_pit_eval_weekly
+        // 11:39:02 注册、11:39:44 被 catch-up 执行记 success，但当时镜像无该分派，
+        // factor_evaluation 零新增（与 PIT 保鲜静默空转同一类缺陷）。
+        let mut unhandled_task_type = false;
         match task_type.as_str() {
             "data_quality_check" => {
                 crate::routes::data_quality::run_data_quality_check(db).await;
@@ -1067,7 +1073,17 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                     }
                 }
             }
-            _ => {}
+            _ => {
+                // 无匹配分派分支：多为「DB 注册了新 task_type，但运行中的二进制还没
+                // 这个分支」（新功能注册与部署之间的窗口），也可能是 task_type 拼写错。
+                // 必须显式告警并把状态记成 unhandled，不能静默记 success。
+                unhandled_task_type = true;
+                warn!(
+                    "[scheduler] ⚠️ 任务 {} 的 task_type='{}' 无对应分派分支——本次未执行任何动作。\
+                     若该类型是新增功能，检查当前镜像是否已部署对应代码；否则检查 task_type 拼写",
+                    name, task_type
+                );
+            }
         }
 
         // 根据 CRON 表达式计算下次运行时间
@@ -1083,10 +1099,19 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
             }
         };
         let next_at = next.unwrap_or_else(|| now + chrono::Duration::days(1));
+        // 状态必须如实反映本次分派结果：无分派分支时记 unhandled，避免「绿着空转」
+        // 掩盖问题（历史教训：rolling_pit_eval 注册后 42s 被 catch-up 执行并记
+        // success，实际当时镜像没有该分支，什么都没做）。
+        let status = if unhandled_task_type {
+            "unhandled"
+        } else {
+            "success"
+        };
         let _ = sqlx::query(
             "UPDATE scheduled_task_config SET last_run_at = NOW(), run_count = run_count + 1,
-             last_status = 'success', next_run_at = $1 WHERE task_name = $2",
+             last_status = $1, next_run_at = $2 WHERE task_name = $3",
         )
+        .bind(status)
         .bind(next_at)
         .bind(name)
         .execute(db)
