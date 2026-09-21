@@ -671,8 +671,13 @@ pub async fn sync_eod_data(
         warn!("[scheduler] ⚠ ML预测数据补齐失败, v16将降级为纯因子选股");
     }
 
-    // 数据完整性检查
-    crate::routes::data_quality::run_data_quality_check(db).await;
+    // 数据完整性检查(任务71: EOD 尾 22:01 时点因子回填尚未跑, 因子滞缓用 T-1 基准——
+    // T 基准的"信号前哨兵"检查由夜间链收尾(second run)负责, 见 nightly_signal_prep)。
+    crate::routes::data_quality::run_data_quality_check(
+        db,
+        crate::routes::data_quality::FactorFreshnessBaseline::PreviousTradeDate,
+    )
+    .await;
 
     // 夜间信号预备链已迁移为独立定时任务 nightly_signal_prep(22:10 触发,
     // 见 scheduled_task_config)——原 EOD 尾部 spawn 依赖主链完成时点,主链被

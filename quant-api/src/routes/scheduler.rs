@@ -140,6 +140,48 @@ async fn trigger_v24_backfill_routes(db: &PgPool, start_date: &str, end_date: &s
     let _ = db;
 }
 
+/// 等待 `since` 之后创建的因子回填任务全部到达终态(任务71, 2026-09-21)。
+///
+/// 依赖编排修复: 原 nightly_signal_prep 对回填路由 fire-and-forget(POST /background
+/// 受理即返回), PIT 物化紧随其后执行, 吃到的是未回填的 factor_value——实锤
+/// 2026-09-21: multi_factor_value T 日行 created_at=22:11:25 早于全部 12 类回填
+/// 完成(22:12~22:35), 每晚信号截面实际由 T-1 交易日因子合成(静默滞后一天)。
+///
+/// 轮询 data_sync_task 中 `since` 后创建的 `*backfill*` 任务直至全部终态
+/// (completed/failed/partial/timeout/cancelled); 超时硬上限防链悬挂——超时后
+/// 照常继续后续步骤, 残缺物化由 ptrade_signal_export 的物化新鲜度门禁兜底拒发。
+async fn wait_for_factor_backfill(
+    db: &PgPool,
+    since: chrono::DateTime<chrono::Utc>,
+    timeout: std::time::Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let pending: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM data_sync_task
+             WHERE created_at >= $1 AND task_type LIKE '%backfill%'
+               AND status IN ('pending','running','cancel_requested')",
+        )
+        .bind(since)
+        .fetch_one(db)
+        .await
+        .unwrap_or((0,));
+        if pending.0 == 0 {
+            info!("[夜间预备] 因子回填全部终态(等待至 {})", chrono::Local::now().format("%H:%M:%S"));
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            warn!(
+                "[夜间预备] 因子回填等待超时({}s), 仍有 {} 个未终态任务, 继续后续步骤(物化门禁兜底)",
+                timeout.as_secs(),
+                pending.0
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
 /// 获取最新 EOD 数据版本（动态，确保回测使用最新数据而非硬编码的旧版本）
 pub(crate) async fn get_latest_data_version(db: &PgPool) -> String {
     // R11: 转调 PgDataVersionRegistry 集中化（原内联 SQL 收敛到 versioning 模块）。
@@ -680,7 +722,13 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
         let mut unhandled_task_type = false;
         match task_type.as_str() {
             "data_quality_check" => {
-                crate::routes::data_quality::run_data_quality_check(db).await;
+                // 手动触发口径: 调用者意图是"现在检查", 因子基准取 T 日(最严格)。
+                // 若在回填前时段手动触发而想看回填前状态, 误报可由告警文案"基准T日"自明。
+                crate::routes::data_quality::run_data_quality_check(
+                    db,
+                    crate::routes::data_quality::FactorFreshnessBaseline::LatestTradeDate,
+                )
+                .await;
             }
             "equity_curve_update" => {
                 // 自动同步所有活跃账号关联策略的权益曲线(combo 去重)。
@@ -782,8 +830,12 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                 // 夜间信号预备链(2026-09-11): 22:10 独立触发,不等 EOD 主链(主链被
                 // forecast 拖到 00:00 的历史教训)。bar 22:01 入库即满足前置。
                 // 链: phase7 因子回补(~67m) → PIT 物化增量 → sleeve 曲线更新
-                //      → fund_nav 净值增量(2026-09-17, ETF 溢价门禁数据源)。
+                //      → fund_nav 净值增量(2026-09-17, ETF 溢价门禁数据源)
+                //      → 收尾质量检查(T日基准, 任务71 2026-09-21)。
                 // 预计 23:20 完成,为 23:30 信号生成与日终通知留窗。幂等,失败告警。
+                // 任务71 依赖编排修正: 回补由 fire-and-forget 改为等待终态后再物化
+                // (原实现在回填完成前物化, T 日 combo 行由 T-1 因子合成, 信号截面
+                // 静默滞后一交易日——multi_factor_value created_at 实锤)。
                 let db2 = db.clone();
                 let tushare2 = tushare.clone();
                 let date = chrono::Local::now().date_naive();
@@ -793,7 +845,18 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                         .format("%Y%m%d")
                         .to_string();
                     let ed = date.format("%Y%m%d").to_string();
+                    let trigger_started = chrono::Utc::now();
                     trigger_v24_backfill_routes(&db2, &sd, &ed).await;
+                    // 受理→任务行落库毫秒级, 但防末条路由尚未落库时 COUNT=0 提前返回
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    // 超时上限 95m(22:10+95m=23:45): 正常 25m 内完成; 超时继续走
+                    // 物化, 信号侧物化新鲜度门禁拒发残缺截面(宁缺毋假)。
+                    wait_for_factor_backfill(
+                        &db2,
+                        trigger_started,
+                        std::time::Duration::from_secs(95 * 60),
+                    )
+                    .await;
                     info!(
                         "[夜间预备] phase7 因子回补完成 累计{}s",
                         t0.elapsed().as_secs()
@@ -883,6 +946,18 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                         ),
                         Err(e) => warn!("[夜间预备] fund_div 分红同步失败(ETF分红不入账): {}", e),
                     }
+                    // 收尾哨兵(任务71): 因子回填+物化后的全量质量检查, T日基准——
+                    // 22:01 EOD 尾那次是 T-1 基准(回填前时点), 真正的"信号前哨兵"
+                    // 在这里: 真滞缓在此报出, 23:30 信号前留人工处置窗。
+                    crate::routes::data_quality::run_data_quality_check(
+                        &db2,
+                        crate::routes::data_quality::FactorFreshnessBaseline::LatestTradeDate,
+                    )
+                    .await;
+                    info!(
+                        "[夜间预备] 链收尾质量检查完成(T日基准) 累计{}s",
+                        t0.elapsed().as_secs()
+                    );
                 });
             }
             "ptrade_signal_export" => {

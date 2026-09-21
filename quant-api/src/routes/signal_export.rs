@@ -149,6 +149,49 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
     .await
     .map_err(|e| format!("数据门禁未通过: {}", e))?;
 
+    // 2b. 物化新鲜度门禁(任务71, 2026-09-21): T 日 combo 截面必须由今晚
+    // (回填完成后)的物化产生。夜间链 fire-and-forget 时期物化吃 T-1 因子,
+    // 信号截面静默滞后一交易日(multi_factor_value created_at 实锤)——本门禁
+    // 是依赖编排(wait_for_factor_backfill)失效时的兜底: 物化先于回填完成/
+    // 未物化/链未跑, 三种残缺一律拒绝导出(宁缺毋假, 与截面空拒绝同哲学)。
+    let (combo_cnt, combo_min_created): (i64, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT COUNT(*), MIN(created_at) FROM multi_factor_value
+             WHERE combo_name = $1 AND trade_date = $2",
+        )
+        .bind(&sc.combo_name)
+        .bind(date)
+        .fetch_one(db)
+        .await
+        .map_err(|e| format!("combo 截面查询: {}", e))?;
+    let today_local = chrono::Local::now().date_naive();
+    let day_start_utc = today_local
+        .and_hms_opt(0, 0, 0)
+        .and_then(|nd| {
+            use chrono::TimeZone;
+            chrono::Local
+                .from_local_datetime(&nd)
+                .single()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        })
+        .ok_or_else(|| "时区转换失败(物化门禁)".to_string())?;
+    let backfill_done: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT MAX(completed_at) FROM data_sync_task
+         WHERE task_type LIKE '%backfill%' AND created_at >= $1
+           AND completed_at IS NOT NULL",
+    )
+    .bind(day_start_utc)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("回填任务查询: {}", e))?
+    .flatten();
+    verify_combo_materialization_freshness(
+        (combo_cnt, combo_min_created),
+        backfill_done,
+        &sc.combo_name,
+        date,
+    )?;
+
     // 3. run-factor 当日截面(夜间预备链 23:20 已就绪因子; 与模拟盘 T 日 09:35 同数据日)
     let body = build_run_factor_body(db, &sc, date).await;
     let task_id = run_factor_task(&body).await?;
@@ -394,6 +437,43 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
 
 // ── 内部组件 ──────────────────────────────────────────────────────
 
+/// 物化新鲜度判定的纯逻辑(任务71): 与 DB 查询分离以便单测三分支。
+/// - 截面日无 combo 行 → 拒绝(夜间链未物化)
+/// - 当日无已完成回填任务 → 拒绝(夜间链未跑, 截面新鲜度无从谈起)
+/// - combo 行最早写入时刻 <= 回填完成时刻 → 拒绝(物化先于回填完成=旧因子物化,
+///   即 fire-and-forget 时期每晚的真实形态)
+pub(crate) fn verify_combo_materialization_freshness(
+    combo_row: (i64, Option<chrono::DateTime<chrono::Utc>>),
+    backfill_done: Option<chrono::DateTime<chrono::Utc>>,
+    combo_name: &str,
+    date: chrono::NaiveDate,
+) -> Result<(), String> {
+    let (combo_cnt, combo_min_created) = combo_row;
+    let min_created = combo_min_created.ok_or_else(|| {
+        format!(
+            "combo {} 截面日 {} 无物化行(夜间链物化未覆盖), 拒绝导出",
+            combo_name, date
+        )
+    })?;
+    let _ = combo_cnt; // 行数为 0 时 MIN 必为 None, 上面已拦截; 计数仅日志价值
+    let backfill_at = backfill_done.ok_or_else(|| {
+        format!(
+            "当日无已完成因子回填任务(夜间链未跑?), combo {} 截面新鲜度无法确认, 拒绝导出",
+            combo_name
+        )
+    })?;
+    if min_created <= backfill_at {
+        return Err(format!(
+            "combo {} 截面 {} 行写入({})早于因子回填完成({})=旧因子物化, 拒绝导出",
+            combo_name,
+            date,
+            min_created.format("%Y-%m-%d %H:%M"),
+            backfill_at.format("%H:%M")
+        ));
+    }
+    Ok(())
+}
+
 /// quant 内部 .SH 后缀 → PTrade .SS; .SZ 不变。(契约: §3.1 symbol 统一 PTrade 风格)
 pub(crate) fn to_ptrade_symbol(sym: &str) -> String {
     if let Some(code) = sym.strip_suffix(".SH") {
@@ -612,6 +692,53 @@ mod tests {
         assert_eq!(to_ptrade_symbol("600519.SH"), "600519.SS");
         assert_eq!(to_ptrade_symbol("159915.SZ"), "159915.SZ");
         assert_eq!(to_ptrade_symbol("000001.SZ"), "000001.SZ");
+    }
+
+    /// 物化新鲜度门禁三分支(任务71): 2026-09-21 事故实锤时间线复刻——
+    /// 物化 22:11:25 落库, 回填 22:12~22:35 完成, 旧序下 combo 写入早于回填
+    /// 完成 → 必拒; 修正编排后(等待回填→物化) → 必过。
+    #[test]
+    fn combo_materialization_freshness_gate_branches() {
+        use chrono::TimeZone;
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
+        let mat_at = chrono::Utc.with_ymd_and_hms(2026, 9, 21, 14, 11, 25).unwrap(); // 22:11:25 +08
+        let backfill_at = chrono::Utc.with_ymd_and_hms(2026, 9, 21, 14, 35, 33).unwrap(); // 22:35:33 +08
+
+        // 分支1: 截面日无物化行(MIN=NULL) → 拒
+        let err =
+            verify_combo_materialization_freshness((0, None), Some(backfill_at), "c1", date)
+                .unwrap_err();
+        assert!(err.contains("无物化行"), "分支1 文案: {}", err);
+
+        // 分支2: 当日无已完成回填任务 → 拒
+        let err = verify_combo_materialization_freshness(
+            (5919, Some(mat_at)),
+            None,
+            "c1",
+            date,
+        )
+        .unwrap_err();
+        assert!(err.contains("夜间链未跑"), "分支2 文案: {}", err);
+
+        // 分支3: 事故形态——物化(22:11:25)早于回填完成(22:35:33) → 拒
+        let err = verify_combo_materialization_freshness(
+            (5919, Some(mat_at)),
+            Some(backfill_at),
+            "c1",
+            date,
+        )
+        .unwrap_err();
+        assert!(err.contains("旧因子物化"), "分支3 文案: {}", err);
+
+        // 分支4: 修正编排后——物化(22:36:10)晚于回填完成(22:35:33) → 过
+        let fixed_mat = chrono::Utc.with_ymd_and_hms(2026, 9, 21, 14, 36, 10).unwrap();
+        assert!(verify_combo_materialization_freshness(
+            (5919, Some(fixed_mat)),
+            Some(backfill_at),
+            "c1",
+            date
+        )
+        .is_ok());
     }
 
     /// blocked_side 协议字段参与 checksum 的双端对齐(2026-09-17 方向感知门禁):

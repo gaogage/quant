@@ -23,15 +23,57 @@ const EVENT_DRIVEN_FACTOR_SOURCES: &[(&str, &str, &str, i64)] = &[
     ("block_trade_", "market_stock_block_trade", "trade_date", 14),
 ];
 
+/// v24 因子滞缓判定的期望覆盖基准(任务71, 2026-09-21)。
+/// 因子 T 日值由 22:10 夜间链回填: 检查跑在回填前还是后, 期望不同——
+/// 22:01 EOD 尾(回填前)因子本就只应到 T-1, 用 T 基准恒定误报"7/14 滞缓";
+/// 夜间链收尾(回填后)才应到 T。调用方按时点显式选择, 不做时刻魔法推断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactorFreshnessBaseline {
+    /// 因子应覆盖到最近已收盘交易日(夜间回填完成后口径)
+    LatestTradeDate,
+    /// 因子应覆盖到上一交易日(回填前时点口径, 如 EOD 尾 22:01)
+    PreviousTradeDate,
+}
+
+impl FactorFreshnessBaseline {
+    /// 解析期望覆盖日。日历残缺时退化为最近交易日(宁可漏报不误报)。
+    async fn resolve(self, db: &PgPool, latest_td: NaiveDate) -> NaiveDate {
+        match self {
+            Self::LatestTradeDate => latest_td,
+            Self::PreviousTradeDate => {
+                sqlx::query_as::<_, (NaiveDate,)>(
+                    "SELECT trade_date FROM market_trade_calendar
+                     WHERE is_open = true AND trade_date < $1
+                     ORDER BY trade_date DESC LIMIT 1",
+                )
+                .bind(latest_td)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten()
+                .map(|(d,)| d)
+                .unwrap_or(latest_td)
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::LatestTradeDate => "T日",
+            Self::PreviousTradeDate => "T-1",
+        }
+    }
+}
+
 /// 盘后数据质量校验：扫描全量数据缺口并告警。
 ///
 /// 检查项：
 /// - A 股 / ETF 日线交易日 gap
 /// - 复权因子 / ML 预测日历缺口
-/// - v24 14 活跃因子滞后与覆盖率骤降
+/// - v24 14 活跃因子滞后与覆盖率骤降（`factor_baseline` 按调用时点选基准）
 /// - 活跃策略所需数据是否有自动同步任务
 /// - 定时任务依赖顺序
-pub async fn run_data_quality_check(db: &PgPool) {
+pub async fn run_data_quality_check(db: &PgPool, factor_baseline: FactorFreshnessBaseline) {
     let today = chrono::Utc::now().date_naive();
 
     // 计算 A 股日线的交易日 gap
@@ -129,6 +171,7 @@ pub async fn run_data_quality_check(db: &PgPool) {
         .ok()
         .flatten();
         if let Some((latest_td,)) = latest_trade {
+            let baseline_td = factor_baseline.resolve(db, latest_td).await;
             let mut stale_factors: Vec<String> = Vec::new();
             for code in V24_FACTOR_CODES {
                 let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
@@ -141,9 +184,9 @@ pub async fn run_data_quality_check(db: &PgPool) {
                 .ok()
                 .flatten();
                 match max_row {
-                    Some((factor_max,)) if factor_max >= latest_td => {}
+                    Some((factor_max,)) if factor_max >= baseline_td => {}
                     Some((factor_max,)) => {
-                        let gap = (latest_td - factor_max).num_days();
+                        let gap = (baseline_td - factor_max).num_days();
                         stale_factors.push(format!("{}(最新{}天前)", code, gap));
                     }
                     None => {
@@ -153,8 +196,9 @@ pub async fn run_data_quality_check(db: &PgPool) {
             }
             if !stale_factors.is_empty() {
                 gaps.push(format!(
-                    "v24因子滞缓({}/14): {}",
+                    "v24因子滞缓({}/14, 基准{}): {}",
                     stale_factors.len(),
+                    factor_baseline.label(),
                     stale_factors.join(", ")
                 ));
             }
@@ -335,17 +379,41 @@ pub async fn run_data_quality_check(db: &PgPool) {
 
     if !gaps.is_empty() {
         let msg = format!(
-            "[数据质量] 发现 {} 个缺口:\n{}",
+            "[数据质量] 发现 {} 个缺口(因子基准={}):\n{}",
             gaps.len(),
+            factor_baseline.label(),
             gaps.join("\n")
         );
         warn!("{}", msg);
         send_quality_alert(db, &gaps).await;
     } else {
-        info!("[数据质量] 全部数据完整, 检查日期={}", today);
+        info!(
+            "[数据质量] 全部数据完整, 检查日期={}(因子基准={})",
+            today,
+            factor_baseline.label()
+        );
     }
 
     let _ = sqlx::query(
         "INSERT INTO data_quality_config (config_key, config_value, description) VALUES ('last_quality_check', $1, '最后质量检查日期') ON CONFLICT (config_key) DO UPDATE SET config_value = EXCLUDED.config_value, updated_at = NOW()"
     ).bind(today.format("%Y-%m-%d").to_string()).execute(db).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 基准枚举语义锁定(任务71): 两个变体分别对应"回填后/回填前"时点期望,
+    /// label 用于告警文案自我说明。防止未来重构时含义漂移。
+    #[test]
+    fn factor_freshness_baseline_semantics() {
+        assert_eq!(FactorFreshnessBaseline::LatestTradeDate.label(), "T日");
+        assert_eq!(FactorFreshnessBaseline::PreviousTradeDate.label(), "T-1");
+        // EOD 尾调用点必须传 T-1(回填前时点), 夜间链收尾必须传 T(回填后)——
+        // 这是消除"7/14 滞缓"恒定误报的关键口径, 改动需评审两处调用方。
+        assert_ne!(
+            FactorFreshnessBaseline::LatestTradeDate,
+            FactorFreshnessBaseline::PreviousTradeDate
+        );
+    }
 }
