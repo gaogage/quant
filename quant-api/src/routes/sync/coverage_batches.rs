@@ -1928,3 +1928,392 @@ pub(crate) fn phase7_financial_uncovered_symbols_sql() -> &'static str {
     OFFSET $3 LIMIT $4
     "#
 }
+
+// ── 第四批覆盖率测试：coverage 批次构建/autopilot 域纯函数与 plan_only 只读路径 ──
+// 模式沿用 phase7_audit.rs third_batch：inner 直调，跳过 axum HTTP 层；
+// 本批只覆盖 plan_only/显式符号/验证早退分支，不触发 execute_sync_task 与后台 spawn。
+#[cfg(test)]
+mod fourth_batch {
+    use super::*;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+    }
+
+    /// 构造真实本机 PG 连接（DATABASE_URL 缺省 postgres://gaocheng@localhost/quant）。
+    async fn test_app_state() -> crate::AppState {
+        dotenv::dotenv().ok();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        crate::AppState {
+            start_time: Utc::now(),
+            db,
+            tushare: quant_data::tushare::client::TushareClient::from_env()
+                .expect("Tushare client init（dotenv 加载 quant/.env 后需 TUSHARE_TOKEN）"),
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        }
+    }
+
+    // ── 纯函数：bounded sync 请求构造 ──
+
+    #[test]
+    fn bounded_sync_req_builds_tushare_bounded_symbols_request() {
+        let req = build_phase7_bounded_sync_req(
+            "cashflow",
+            vec!["600000.SH".to_string()],
+            "20240101",
+            "20240131",
+            "dv-test-cashflow-b001",
+            "test reason",
+        );
+        assert_eq!(req.dataset, "cashflow");
+        assert_eq!(req.source, "tushare");
+        assert_eq!(req.mode.as_deref(), Some("bounded_symbols"));
+        assert_eq!(req.symbols, vec!["600000.SH".to_string()]);
+        assert_eq!(req.start_date.as_deref(), Some("20240101"));
+        assert_eq!(req.end_date.as_deref(), Some("20240131"));
+        assert_eq!(
+            req.data_version_id.as_deref(),
+            Some("dv-test-cashflow-b001")
+        );
+        // bounded 子任务恒为同步执行（background 由父级编排控制）
+        assert!(!req.background);
+        assert!(!req.quality_check);
+        assert!(req.create_data_version);
+        assert_eq!(req.reason.as_deref(), Some("test reason"));
+        assert!(req.retry_of_task_id.is_none());
+    }
+
+    // ── 符号解析：显式请求纯早退 + 连库只读 ──
+
+    #[tokio::test]
+    async fn permission_smoke_symbols_explicit_request_short_circuits_without_db_query() {
+        let state = test_app_state().await;
+        // trim + 大写 + 去重 + 去空；上限 3（PHASE7_PERMISSION_SMOKE_MAX_SYMBOLS）
+        let resolved = resolve_phase7_permission_smoke_symbols(
+            &state,
+            &[
+                " 600000.sh ".to_string(),
+                "600000.SH".to_string(),
+                "b".to_string(),
+                "".to_string(),
+            ],
+        )
+        .await
+        .expect("explicit symbols");
+        assert_eq!(resolved, vec!["600000.SH".to_string(), "B".to_string()]);
+
+        let four: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            resolve_phase7_permission_smoke_symbols(&state, &four)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_smoke_symbols_resolves_sample_list_from_db_when_missing() {
+        let state = test_app_state().await;
+        // 空请求 → 查 market_stock 首选样本（只读）；库里无股票时报错也是合法结果
+        match resolve_phase7_permission_smoke_symbols(&state, &[]).await {
+            Ok(resolved) => {
+                assert!(!resolved.is_empty());
+                assert!(resolved.len() <= 3);
+            }
+            Err(error) => {
+                assert!(error.contains("no sample symbols"), "实际错误: {error}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_source_sync_symbols_explicit_request_short_circuits() {
+        let state = test_app_state().await;
+        let resolved = resolve_phase7_optional_source_sync_symbols(
+            &state,
+            "cashflow",
+            &[" 600000.sh ".to_string()],
+            date(2024, 1, 1),
+            date(2024, 1, 31),
+            20,
+            0,
+        )
+        .await
+        .expect("explicit symbols");
+        assert_eq!(resolved, vec!["600000.SH".to_string()]);
+
+        // 不支持的 source（requested 为空时才检查）→ 明确报错
+        let error = resolve_phase7_optional_source_sync_symbols(
+            &state,
+            "unsupported_source",
+            &[],
+            date(2024, 1, 1),
+            date(2024, 1, 31),
+            20,
+            0,
+        )
+        .await
+        .expect_err("unsupported source");
+        assert!(
+            error.contains("unsupported optional source"),
+            "实际错误: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_source_sync_symbols_resolves_uncovered_from_db_read_only() {
+        let state = test_app_state().await;
+        // OFFSET 超出全表 → uncovered 必为空（cashflow 表不存在时同样为空），只读返回空列表
+        let resolved = resolve_phase7_optional_source_sync_symbols(
+            &state,
+            "cashflow",
+            &[],
+            date(2024, 1, 1),
+            date(2024, 1, 31),
+            5,
+            1_000_000_000,
+        )
+        .await
+        .expect("offset beyond table returns empty list");
+        assert!(resolved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn financial_sync_symbols_resolves_bounded_list_from_db() {
+        let state = test_app_state().await;
+        // 只读 SELECT；LIMIT 3 保证结果有界
+        let symbols = resolve_phase7_financial_sync_symbols(
+            &state,
+            date(2024, 1, 1),
+            date(2024, 1, 31),
+            3,
+            0,
+        )
+        .await
+        .expect("financial symbols");
+        assert!(symbols.len() <= 3);
+    }
+
+    // ── 纯 SQL 构建器 ──
+
+    #[test]
+    fn optional_source_uncovered_symbols_sql_covers_supported_sources() {
+        for source in [
+            "cashflow",
+            "dividend",
+            "repurchase",
+            "forecast",
+            "express",
+            "disclosure_date",
+            "share_float",
+        ] {
+            let sql = phase7_optional_source_uncovered_symbols_sql(source)
+                .unwrap_or_else(|| panic!("source={source} 应有 uncovered SQL"));
+            // 统一形态：按 attempt 完成状态过滤未覆盖股票，OFFSET/LIMIT 分页
+            assert!(sql.contains("market_stock stock"), "source={source}");
+            assert!(sql.contains("data_sync_attempt attempt"), "source={source}");
+            assert!(sql.contains("OFFSET $3 LIMIT $4"), "source={source}");
+            assert!(
+                sql.contains(&format!("attempt.source = '{source}'")),
+                "source={source}"
+            );
+        }
+        assert!(phase7_optional_source_uncovered_symbols_sql("unknown_source").is_none());
+    }
+
+    #[test]
+    fn financial_uncovered_symbols_sql_targets_financial_source() {
+        let sql = phase7_financial_uncovered_symbols_sql();
+        assert!(sql.contains("market_stock stock"));
+        assert!(sql.contains("attempt.source = 'financial'"));
+        assert!(sql.contains("OFFSET $3 LIMIT $4"));
+    }
+
+    // ── plan_only 只读路径：批次构建不写库不 spawn ──
+
+    #[tokio::test]
+    async fn optional_source_coverage_sync_plan_only_plans_without_write() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        // 显式 symbols → resolve 纯早退；plan_only=true → 只输出 planned 计划
+        let req = Phase7OptionalSourceCoverageSyncReq {
+            sources: vec!["cashflow".to_string()],
+            symbols: vec!["600000.SH".to_string()],
+            start_date: Some("20240101".into()),
+            end_date: Some("20240131".into()),
+            max_symbols: Some(5),
+            offset_symbols: Some(0),
+            plan_only: Some(true),
+            background: false,
+            data_version_prefix: Some("dv-fourth-batch-plan".into()),
+        };
+        let result = build_phase7_optional_source_coverage_sync(state, req)
+            .await
+            .expect("plan_only coverage sync");
+        assert_eq!(result["mode"], "plan_only");
+        assert_eq!(result["plan_only"], true);
+        let sources = result["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["source"], "cashflow");
+        assert_eq!(sources[0]["table"], "market_stock_cashflow");
+        assert_eq!(sources[0]["status"], "planned");
+        assert_eq!(sources[0]["selected_count"], 1);
+        assert_eq!(sources[0]["selected_symbols"][0], "600000.SH");
+        // task_id 带上 data_version 前缀且经过 bounded_phase7_task_id 归一
+        assert!(sources[0]["task_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("dv-fourth-batch-plan-cashflow"));
+    }
+
+    #[tokio::test]
+    async fn optional_source_coverage_sync_skips_when_no_symbols_selected() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        // OFFSET 超出全表 → uncovered 空 → skipped_no_symbols（不触子任务）
+        let req = Phase7OptionalSourceCoverageSyncReq {
+            sources: vec!["cashflow".to_string()],
+            symbols: Vec::new(),
+            start_date: Some("20240101".into()),
+            end_date: Some("20240131".into()),
+            max_symbols: Some(5),
+            offset_symbols: Some(1_000_000_000),
+            plan_only: Some(true),
+            background: false,
+            data_version_prefix: Some("dv-fourth-batch-skip".into()),
+        };
+        let result = build_phase7_optional_source_coverage_sync(state, req)
+            .await
+            .expect("skipped coverage sync");
+        let sources = result["sources"].as_array().unwrap();
+        assert_eq!(sources[0]["status"], "skipped_no_symbols");
+        assert_eq!(sources[0]["selected_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn optional_source_coverage_sync_rejects_inverted_date_range() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        let req = Phase7OptionalSourceCoverageSyncReq {
+            sources: vec!["cashflow".to_string()],
+            symbols: vec!["600000.SH".to_string()],
+            start_date: Some("20240131".into()),
+            end_date: Some("20240101".into()),
+            max_symbols: None,
+            offset_symbols: None,
+            plan_only: Some(true),
+            background: false,
+            data_version_prefix: None,
+        };
+        let error = build_phase7_optional_source_coverage_sync(state, req)
+            .await
+            .expect_err("inverted range");
+        assert!(
+            error.contains("start_date must be <= end_date"),
+            "实际错误: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_source_coverage_batches_plan_only_lists_child_batches() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        // 2 批 × 每批 1 个符号槽：offsets = [0, 1]
+        let req = Phase7OptionalSourceCoverageBatchReq {
+            sources: vec!["cashflow".to_string()],
+            start_date: Some("20240101".into()),
+            end_date: Some("20240131".into()),
+            batch_size: Some(1),
+            batch_count: Some(2),
+            start_offset: Some(0),
+            plan_only: Some(true),
+            data_version_prefix: Some("dv-fourth-batch-batch".into()),
+        };
+        let result = build_phase7_optional_source_coverage_batches(state, req)
+            .await
+            .expect("plan_only batches");
+        assert_eq!(result["mode"], "plan_only");
+        let batches = result["batches"].as_array().unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0]["batch_index"], 1);
+        assert_eq!(batches[0]["offset_symbols"], 0);
+        assert_eq!(batches[1]["offset_symbols"], 1);
+        assert_eq!(batches[1]["status"], "planned");
+        // plan_only 恢复点 = 最后一个 offset + batch_size
+        assert_eq!(result["next_offset"], 2);
+        assert_eq!(result["planned_next_offset"], 2);
+    }
+
+    #[tokio::test]
+    async fn financial_coverage_batches_plan_only_resolves_bounded_symbols() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        // batch_size=1 + OFFSET 超出 → 唯一一批走 skipped_no_symbols（不触 execute_sync_task）
+        let result = build_phase7_financial_coverage_batches(
+            state,
+            "20240101",
+            "20240131",
+            1,
+            1,
+            true,
+            "dv-fourth-batch-financial",
+        )
+        .await
+        .expect("plan_only financial batches");
+        assert_eq!(result["mode"], "plan_only");
+        assert_eq!(result["source"], "financial");
+        assert_eq!(result["plan_only"], true);
+        let batches = result["batches"].as_array().unwrap();
+        assert_eq!(batches.len(), 1);
+        let status = batches[0]["status"].as_str().unwrap();
+        assert!(
+            status == "skipped_no_symbols" || status == "planned",
+            "plan_only 批次状态应为 skipped_no_symbols 或 planned，实际: {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn coverage_expansion_runner_plan_only_reports_audit_without_spawn() {
+        let state = std::sync::Arc::new(test_app_state().await);
+        // plan_only 默认 true、auto_continue 默认 false → 只读审计 + 计划输出，无后台 spawn
+        let req = Phase7CoverageExpansionRunnerReq {
+            profile: None,
+            sources: vec!["cashflow".to_string()],
+            start_date: Some("20240101".into()),
+            end_date: Some("20240131".into()),
+            batch_size: Some(1),
+            batch_count: Some(1),
+            plan_only: Some(true),
+            data_version_prefix: Some("dv-fourth-batch-runner".into()),
+            stop_when_readiness_at_least_partial: None,
+            auto_continue: None,
+            max_rounds: None,
+            target_coverage_ratio: None,
+        };
+        let result = build_phase7_coverage_expansion_runner(state, req)
+            .await
+            .expect("plan_only runner");
+        assert_eq!(result["mode"], "plan_only");
+        assert_eq!(result["plan_only"], true);
+        assert_eq!(result["auto_continue"], false);
+        assert_eq!(result["profile"], "local_mac_safe");
+        // cashflow 未达全覆盖时进入 planned_sources；否则进 skipped_sources——两者互补
+        let planned = result["planned_sources"].as_array().unwrap();
+        let skipped = result["skipped_sources"].as_array().unwrap();
+        assert_eq!(
+            planned.len() + skipped.len(),
+            1,
+            "requested 源必须落在 planned 或 skipped 之一"
+        );
+        // plan_only 下 max_rounds 固定为 1 轮（auto_continue=false）
+        assert_eq!(result["max_rounds"], 1);
+        assert!(result["source_readiness"].is_object());
+        assert!(result["window_completed_attempts"].is_object());
+        // plan_only 模式 optional 批次计划仍会构建（readiness 门控后可能为 null）
+        assert!(
+            result["optional_batch_plan"].is_object() || result["optional_batch_plan"].is_null()
+        );
+        assert_eq!(
+            result["coverage_target_policy"],
+            "full_available_coverage_by_default"
+        );
+    }
+}

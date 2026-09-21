@@ -825,3 +825,131 @@ async fn sync_attempt_upsert_and_success_window_filter() {
     cleanup_task(&pool, "zzz-test-task-attempt").await;
     cleanup_attempts(&pool).await;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 第四批：update_sync_task_with_error + moneyflow 单条 upsert 补覆盖。
+// 键位续用 ZZZTST 系列（K 起），dv/task 用 zzz-test- 前缀独占键。
+// ═══════════════════════════════════════════════════════════════
+
+/// moneyflow 单条 upsert 专用键
+const ZZZ_MF2: &str = "ZZZTSTK.SH";
+const ZZZ_DV_MF2: &str = "zzz-test-dv-mf2";
+
+#[tokio::test]
+async fn update_sync_task_with_error_persists_error_fields() {
+    let pool = local_pool().await;
+    cleanup_task(&pool, "zzz-test-task-err4").await;
+
+    repository::create_sync_task(&pool, "zzz-test-task-err4", "zzz_test", "running")
+        .await
+        .expect("建任务");
+
+    repository::update_sync_task_with_error(
+        &pool,
+        "zzz-test-task-err4",
+        "failed",
+        2,
+        1,
+        1,
+        "上游 40101 权限不足",
+    )
+    .await
+    .expect("带错误更新");
+
+    let row: (
+        String,
+        Option<String>,
+        i32,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "SELECT status, error_message, progress, completed_at FROM data_sync_task \
+         WHERE task_id = 'zzz-test-task-err4'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("任务行应存在");
+    assert_eq!(row.0, "failed");
+    assert_eq!(row.1.as_deref(), Some("上游 40101 权限不足"));
+    assert_eq!(row.2, 50, "progress = success*100/total = 1*100/2");
+    assert!(row.3.is_some(), "failed 终态应落 completed_at");
+
+    cleanup_task(&pool, "zzz-test-task-err4").await;
+}
+
+#[tokio::test]
+async fn moneyflow_single_row_upsert_roundtrip() {
+    let pool = local_pool().await;
+    cleanup_syms(&pool, &[ZZZ_MF2]).await;
+    cleanup_dv(&pool, ZZZ_DV_MF2).await;
+
+    repository::create_data_version(
+        &pool,
+        ZZZ_DV_MF2,
+        "zzz test dv",
+        "tushare",
+        &["market_stock_moneyflow"],
+        d(2026, 1, 1),
+        d(2026, 1, 31),
+    )
+    .await
+    .expect("create dv");
+
+    let row = MarketStockMoneyflow {
+        symbol: ZZZ_MF2.to_string(),
+        trade_date: d(2026, 1, 5),
+        buy_sm_vol: Some(dec(11.0)),
+        buy_sm_amount: Some(dec(110.0)),
+        sell_sm_vol: None,
+        sell_sm_amount: None,
+        buy_md_vol: None,
+        buy_md_amount: None,
+        sell_md_vol: None,
+        sell_md_amount: None,
+        buy_lg_vol: Some(dec(22.0)),
+        buy_lg_amount: Some(dec(220.0)),
+        sell_lg_vol: None,
+        sell_lg_amount: None,
+        buy_elg_vol: None,
+        buy_elg_amount: None,
+        sell_elg_vol: None,
+        sell_elg_amount: None,
+        net_mf_vol: Some(dec(-33.0)),
+        net_mf_amount: Some(dec(-330.0)),
+    };
+
+    // 单条 upsert：与 batch 独立实现（QueryBuilder），单独覆盖
+    repository::upsert_moneyflow(&pool, &row, ZZZ_DV_MF2, "tushare")
+        .await
+        .expect("单条 moneyflow");
+
+    let (buy_sm, net_vol, dv): (Option<Decimal>, Option<Decimal>, Option<String>) = sqlx::query_as(
+        "SELECT buy_sm_vol, net_mf_vol, data_version_id FROM market_stock_moneyflow \
+             WHERE symbol = $1 AND trade_date = '2026-01-05'",
+    )
+    .bind(ZZZ_MF2)
+    .fetch_one(&pool)
+    .await
+    .expect("行应存在");
+    assert_eq!(buy_sm, Some(dec(11.0)));
+    assert_eq!(net_vol, Some(dec(-33.0)), "负净流入走 Decimal 负值");
+    assert_eq!(dv.as_deref(), Some(ZZZ_DV_MF2));
+
+    // 幂等覆盖：改值重写，行数不增
+    let mut row2 = row;
+    row2.net_mf_vol = Some(dec(44.0));
+    repository::upsert_moneyflow(&pool, &row2, ZZZ_DV_MF2, "tushare")
+        .await
+        .expect("幂等重写");
+    let (count, net_vol): (i64, Option<Decimal>) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(net_mf_vol) FROM market_stock_moneyflow WHERE symbol = $1",
+    )
+    .bind(ZZZ_MF2)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(net_vol, Some(dec(44.0)), "二次写入覆盖取最新");
+
+    cleanup_syms(&pool, &[ZZZ_MF2]).await;
+    cleanup_dv(&pool, ZZZ_DV_MF2).await;
+}

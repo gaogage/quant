@@ -3429,3 +3429,1418 @@ async fn sync_industry_membership_syncs_both_classification_sources() {
         .await;
     cleanup_task_and_dv(&pool, "zzz-test-sync-ind").await;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 第四批：sync.rs 尾部零覆盖链补齐。
+//
+// - sync_daily_basic（逐只/全市场月度/日级回退/限流中断/checkpoint 心跳）
+// - sync_fund_basic / sync_fund_nav / sync_fund_adj / sync_index_daily
+// - run_quality_check / derive_limit_list_from_daily_bars /
+//   backfill_limit_completion_markers / get_st_symbols_at_date /
+//   get_pit_main_board_non_st_symbols
+//
+// 键位续用 ZZZSYNC 系列（33 起步）；derive 涨跌停受 ^[036][0-9]{5}\.(SH|SZ)$
+// 正则约束，用 099998/099999/369999 形态键（真实市场无此代码）。
+// 日期统一选未来开市周 2026-12-28~30（真实日历已同步到年末、真实 derive
+// 任务键未跑过，与生产数据零碰撞）；run_quality_check 用真实开市周
+// 2026-09-14~18（该周 5 天全开市，zzz symbol 行零碰撞）。
+// ═══════════════════════════════════════════════════════════════
+
+/// sync_daily_basic 逐只路径
+const ZZZ_DB1: &str = "ZZZSYNC33.SH";
+/// sync_daily_basic 全市场月度路径
+const ZZZ_DB2: &str = "ZZZSYNC34.SH";
+/// sync_daily_basic checkpoint 心跳路径（51 只共用同一 mock 行）
+const ZZZ_DB5: &str = "ZZZSYNC37.SH";
+/// sync_fund_basic 有效行
+const ZZZ_FB1: &str = "ZZZSYNC38.SH";
+/// sync_fund_basic status=D 退市跳过行
+const ZZZ_FB2: &str = "ZZZSYNC39.SH";
+/// sync_fund_nav 成功/失败/最新跳过三场景
+const ZZZ_FN1: &str = "ZZZSYNC40.SH";
+const ZZZ_FN2: &str = "ZZZSYNC41.SH";
+const ZZZ_FN3: &str = "ZZZSYNC42.SH";
+/// sync_fund_adj 成功/失败/取消
+const ZZZ_FA1: &str = "ZZZSYNC43.SH";
+const ZZZ_FA2: &str = "ZZZSYNC44.SH";
+const ZZZ_FA3: &str = "ZZZSYNC45.SH";
+/// sync_index_daily 成功/失败
+const ZZZ_IX1: &str = "ZZZSYNC46.SH";
+const ZZZ_IX2: &str = "ZZZSYNC47.SH";
+/// run_quality_check
+const ZZZ_QC: &str = "ZZZSYNC48.SH";
+/// get_st_symbols_at_date：闭区间/开区间/非 ST 行
+const ZZZ_ST1: &str = "ZZZSYNC49.SH";
+const ZZZ_ST2: &str = "ZZZSYNC50.SH";
+const ZZZ_ST3: &str = "ZZZSYNC52.SH";
+/// get_pit_main_board：主板正常/ST/创业板形态/未上市/退市
+const ZZZ_MB1: &str = "ZZZSYNC51.SH";
+const ZZZ_MB2: &str = "ZZZSYNC53.SH";
+const ZZZ_MB_FUT: &str = "ZZZSYNC54.SH";
+const ZZZ_MB_DLQ: &str = "ZZZSYNC55.SH";
+const ZZZ_GEM: &str = "300ZZZ.SZ";
+/// derive_limit_list 主链（非 ST：U/D/无涨停三天）
+const ZZZ_DL1: &str = "099999.SZ";
+/// derive_limit_list 次新股过滤（list_date 距窗口不足 5 个开市日）
+const ZZZ_DL2: &str = "099998.SZ";
+/// derive_limit_list ST 5% 板判定
+const ZZZ_DL3: &str = "369999.SH";
+
+/// daily_basic 接口的估值字段集（sync_daily_basic 行映射所需全集）
+const DAILY_BASIC_FIELDS: &[&str] = &[
+    "ts_code",
+    "trade_date",
+    "pe_ttm",
+    "pb",
+    "ps_ttm",
+    "dv_ttm",
+    "total_share",
+    "float_share",
+    "free_share",
+    "total_mv",
+    "circ_mv",
+];
+
+/// 清理第四批写过的表（按 symbol 精确键，逐表 DELETE，并行安全）
+async fn cleanup_zzz_tables(pool: &PgPool, syms: &[&str]) {
+    for sym in syms {
+        for table in [
+            "market_stock",
+            "market_stock_daily_bar",
+            "market_fund",
+            "market_fund_nav",
+            "market_adjustment_factor",
+            "market_index_daily_bar",
+            "market_stock_daily_basic",
+            "market_stock_limit",
+            "market_stock_name_history",
+        ] {
+            let _ = sqlx::query(&format!("DELETE FROM {} WHERE symbol = $1", table))
+                .bind(sym)
+                .execute(pool)
+                .await;
+        }
+    }
+}
+
+/// derive/backfill 写入的完成标记任务键（2026-12-28~30 三个开市日）
+// 实现（backfill_event_sync_completion_markers）生成 task_id = "{task_type}-{date}"，
+// derive_limit_list 传 task_type="limit_daily"、source="derived:daily_limit"——
+// task_id 与 source 的值不要搞反（原臆测 derived:* 为 task_id 已修正）
+const DERIVE_TASK_KEYS: [&str; 3] = [
+    "limit_daily-20261228",
+    "limit_daily-20261229",
+    "limit_daily-20261230",
+];
+
+async fn cleanup_derive_tasks(pool: &PgPool) {
+    for task_id in DERIVE_TASK_KEYS {
+        cleanup_task(pool, task_id).await;
+    }
+}
+
+// ─── sync_daily_basic ────────────────────────────────────────────
+
+#[tokio::test]
+async fn sync_daily_basic_per_symbol_writes_valuation_rows() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_DB1]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db1").await;
+
+    let mock = spawn_mock_tushare(vec![(
+        "daily_basic",
+        MockResponse::Rows {
+            fields: DAILY_BASIC_FIELDS.to_vec(),
+            items: vec![vec![
+                json!(ZZZ_DB1),
+                json!("20261228"),
+                json!(12.5),
+                json!(1.8),
+                json!(2.4),
+                json!(0.5),
+                json!(25000.0),
+                json!(18000.0),
+                json!(15000.0),
+                json!(950000.0),
+                json!(700000.0),
+            ]],
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let n = sync::sync_daily_basic(
+        &pool,
+        &client,
+        &[ZZZ_DB1.to_string()],
+        "20261228",
+        "20261230",
+        "zzz-test-sync-db1",
+    )
+    .await
+    .expect("逐只路径应成功");
+
+    assert_eq!(n, 1, "mock 单行估值数据");
+
+    // 请求形态：ts_code + 全窗口 start/end + 分页参数
+    let reqs = mock.requests_for("daily_basic");
+    assert_eq!(reqs.len(), 1, "单页即停");
+    assert_eq!(reqs[0].params.get("ts_code"), Some(&json!(ZZZ_DB1)));
+    assert_eq!(reqs[0].params.get("start_date"), Some(&json!("20261228")));
+    assert_eq!(reqs[0].params.get("end_date"), Some(&json!("20261230")));
+    assert_eq!(reqs[0].params.get("limit"), Some(&json!("6000")));
+    assert_eq!(reqs[0].params.get("offset"), Some(&json!("0")));
+
+    // 落库：估值字段映射 + data_version_id 关联
+    let row: (Option<Decimal>, Option<Decimal>, Option<Decimal>, String) = sqlx::query_as(
+        "SELECT pe_ttm, circ_mv, pb, data_version_id FROM market_stock_daily_basic \
+         WHERE symbol = $1 AND trade_date = '2026-12-28'",
+    )
+    .bind(ZZZ_DB1)
+    .fetch_one(&pool)
+    .await
+    .expect("估值行应落库");
+    assert_dec_close(row.0.expect("pe_ttm"), 12.5, "daily_basic pe_ttm");
+    assert_dec_close(row.1.expect("circ_mv"), 700000.0, "daily_basic circ_mv");
+    assert_dec_close(row.2.expect("pb"), 1.8, "daily_basic pb");
+    assert_eq!(row.3, "zzz-test-sync-db1");
+
+    // 任务终态：逐只路径 total/ok 按 symbol 数计
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-db1").await,
+        ("completed".to_string(), 1, 1, 0)
+    );
+
+    mock.shutdown();
+    cleanup_zzz_tables(&pool, &[ZZZ_DB1]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db1").await;
+}
+
+#[tokio::test]
+async fn sync_daily_basic_monthly_market_path_writes_rows_and_completes() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_DB2]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db2").await;
+
+    // 全市场（symbols 空）按月循环：窗口 2026-12-01~03 恰一个月块；
+    // 两行 < page_limit 6000 → 单页停止
+    let valuation_row = |day: &str| {
+        vec![
+            json!(ZZZ_DB2),
+            json!(day),
+            json!(10.0),
+            json!(1.0),
+            json!(1.5),
+            json!(0.3),
+            json!(1000.0),
+            json!(800.0),
+            json!(600.0),
+            json!(50000.0),
+            json!(40000.0),
+        ]
+    };
+    let mock = spawn_mock_tushare(vec![(
+        "daily_basic",
+        MockResponse::Paged {
+            fields: DAILY_BASIC_FIELDS.to_vec(),
+            items: vec![valuation_row("20261201"), valuation_row("20261202")],
+            page_size: 6000,
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let n = sync::sync_daily_basic(
+        &pool,
+        &client,
+        &[],
+        "20261201",
+        "20261203",
+        "zzz-test-sync-db2",
+    )
+    .await
+    .expect("全市场月度路径应成功");
+
+    assert_eq!(n, 2, "两行估值数据");
+
+    // 请求形态：月块边界 start=12-01 / end=12-03（无 ts_code）
+    let reqs = mock.requests_for("daily_basic");
+    assert_eq!(reqs.len(), 1, "单页即停");
+    assert!(!reqs[0].params.contains_key("ts_code"));
+    assert_eq!(reqs[0].params.get("start_date"), Some(&json!("20261201")));
+    assert_eq!(reqs[0].params.get("end_date"), Some(&json!("20261203")));
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM market_stock_daily_basic WHERE symbol = $1")
+            .bind(ZZZ_DB2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+
+    // 任务终态：月度路径 total/ok 按月块数计（窗口 1 个月 → 1/1）
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-db2").await,
+        ("completed".to_string(), 1, 1, 0)
+    );
+
+    mock.shutdown();
+    cleanup_zzz_tables(&pool, &[ZZZ_DB2]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db2").await;
+}
+
+#[tokio::test]
+async fn sync_daily_basic_hourly_limit_error_aborts_as_partial() {
+    let pool = local_pool().await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db3").await;
+
+    let mock = spawn_mock_tushare(vec![(
+        "daily_basic",
+        MockResponse::ApiErr {
+            code: 40203,
+            msg: "每小时最多访问该接口4000次".to_string(),
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let result = sync::sync_daily_basic(
+        &pool,
+        &client,
+        &[],
+        "20261201",
+        "20261203",
+        "zzz-test-sync-db3",
+    )
+    .await;
+
+    let err = result.expect_err("限流错误应中断返回 Err");
+    assert!(
+        err.to_string().contains("rate limited"),
+        "错误应标记限流语义，实际: {}",
+        err
+    );
+
+    // 任务先落 partial 再返回（total=月块数1, ok=0, failed=1）
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-db3").await,
+        ("partial".to_string(), 1, 0, 1)
+    );
+
+    // 零写入断言：按本测试独占 dv_id 精确计数
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM market_stock_daily_basic WHERE data_version_id = $1",
+    )
+    .bind("zzz-test-sync-db3")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0, "限流中断不应写入估值行");
+
+    mock.shutdown();
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db3").await;
+}
+
+#[tokio::test]
+async fn sync_daily_basic_daily_fallback_accumulates_failures() {
+    let pool = local_pool().await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db4").await;
+
+    // 非限流错误（40101 权限）：月度调用失败 → 逐日回退，回退也全失败
+    //（mock 按 api_name 路由，月度/日级拿到同一错误响应）
+    let mock = spawn_mock_tushare(vec![(
+        "daily_basic",
+        MockResponse::ApiErr {
+            code: 40101,
+            msg: "抱歉，您没有访问该接口的权限".to_string(),
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let n = sync::sync_daily_basic(
+        &pool,
+        &client,
+        &[],
+        "20261201",
+        "20261203",
+        "zzz-test-sync-db4",
+    )
+    .await
+    .expect("非限流错误不中断整体，走完回退后正常收尾");
+
+    assert_eq!(n, 0, "无任何成功行");
+
+    // 请求形态：1 次月度（start/end）+ 3 次日级回退（trade_date）
+    let reqs = mock.requests_for("daily_basic");
+    assert_eq!(reqs.len(), 4, "月度 1 次 + 日级 3 次");
+    let day_reqs: Vec<&Value> = reqs
+        .iter()
+        .filter_map(|r| r.params.get("trade_date"))
+        .collect();
+    assert_eq!(day_reqs.len(), 3);
+    assert!(day_reqs.contains(&&json!("20261201")));
+    assert!(day_reqs.contains(&&json!("20261202")));
+    assert!(day_reqs.contains(&&json!("20261203")));
+
+    // 回退月块收尾：ok=1（月块计 1）、failed=3（每日累计）
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-db4").await,
+        ("partial".to_string(), 1, 1, 3)
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM market_stock_daily_basic WHERE data_version_id = $1",
+    )
+    .bind("zzz-test-sync-db4")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+
+    mock.shutdown();
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db4").await;
+}
+
+#[tokio::test]
+async fn sync_daily_basic_checkpoint_heartbeats_every_50_symbols() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_DB5]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db5").await;
+
+    let mock = spawn_mock_tushare(vec![(
+        "daily_basic",
+        MockResponse::Rows {
+            fields: DAILY_BASIC_FIELDS.to_vec(),
+            items: vec![vec![
+                json!(ZZZ_DB5),
+                json!("20261228"),
+                json!(10.0),
+                json!(1.0),
+                json!(1.0),
+                json!(0.1),
+                json!(100.0),
+                json!(80.0),
+                json!(60.0),
+                json!(1000.0),
+                json!(800.0),
+            ]],
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    // 51 只：i=50 时命中 checkpoint（50 的倍数）→ 心跳分支；
+    // i=0 命中早退分支（不查库直接 false）
+    let symbols = vec![ZZZ_DB5.to_string(); 51];
+    let n = sync::sync_daily_basic(
+        &pool,
+        &client,
+        &symbols,
+        "20261228",
+        "20261230",
+        "zzz-test-sync-db5",
+    )
+    .await
+    .expect("51 只逐只同步应成功");
+
+    assert_eq!(n, 51, "每只各拿到 1 行 mock 数据");
+    assert_eq!(mock.requests_for("daily_basic").len(), 51);
+
+    // 同 (symbol, trade_date) 幂等 → 落库仅 1 行
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM market_stock_daily_basic WHERE symbol = $1")
+            .bind(ZZZ_DB5)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-db5").await,
+        ("completed".to_string(), 51, 51, 0)
+    );
+
+    mock.shutdown();
+    cleanup_zzz_tables(&pool, &[ZZZ_DB5]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-db5").await;
+}
+
+// ─── sync_fund_basic ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn sync_fund_basic_upserts_stock_and_fund_skips_delisted() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_FB1, ZZZ_FB2]).await;
+
+    let mock = spawn_mock_tushare(vec![(
+        "fund_basic",
+        MockResponse::Rows {
+            fields: vec![
+                "ts_code",
+                "name",
+                "management",
+                "custodian",
+                "fund_type",
+                "found_date",
+                "due_date",
+                "list_date",
+                "issue_date",
+                "delist_date",
+                "issue_amount",
+                "m_fee",
+                "c_fee",
+                "duration_year",
+                "p_value",
+                "min_amount",
+                "exp_return",
+                "benchmark",
+                "status",
+                "invest_type",
+                "type",
+                "trustee",
+                "purc_startdate",
+                "redm_startdate",
+                "market",
+            ],
+            items: vec![
+                vec![
+                    json!(ZZZ_FB1),
+                    json!("测试同步ETF"),
+                    json!("测试基金公司"),
+                    json!("测试托管行"),
+                    json!("ETF"),
+                    json!("20250101"),
+                    json!(""),
+                    json!("20260105"),
+                    json!(""),
+                    json!(""),
+                    json!(150000000.0),
+                    json!(0.5),
+                    json!(0.6),
+                    json!(3.5),
+                    json!(1.0),
+                    json!(1000.0),
+                    json!(""),
+                    json!(""),
+                    json!("O"),
+                    json!("被动指数型"),
+                    json!("契约型开放式"),
+                    json!(""),
+                    json!("20260110"),
+                    json!("20260111"),
+                    json!("E"),
+                ],
+                vec![
+                    json!(ZZZ_FB2),
+                    json!("退市测试ETF"),
+                    json!("x"),
+                    json!("x"),
+                    json!("ETF"),
+                    json!(""),
+                    json!(""),
+                    json!(""),
+                    json!(""),
+                    json!(""),
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    json!(""),
+                    json!(""),
+                    json!("D"),
+                    json!(""),
+                    json!(""),
+                    json!(""),
+                    json!(""),
+                    json!(""),
+                    json!("E"),
+                ],
+            ],
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let n = sync::sync_fund_basic(&pool, &client)
+        .await
+        .expect("sync_fund_basic 应成功");
+
+    // markets = [E, L] 两轮循环，每轮 1 有效行（D 行跳过）→ total=2
+    assert_eq!(n, 2, "两市场循环累计，退市行跳过");
+
+    let reqs = mock.requests_for("fund_basic");
+    assert_eq!(reqs.len(), 2, "E + L 各一次");
+    let markets: Vec<&Value> = reqs
+        .iter()
+        .map(|r| r.params.get("market").unwrap())
+        .collect();
+    assert!(markets.contains(&&json!("E")));
+    assert!(markets.contains(&&json!("L")));
+
+    // market_stock：instrument_type=etf；market 终值是循环最后一档 L
+    let stock: (String, String, Option<NaiveDate>) =
+        sqlx::query_as("SELECT name, market, list_date FROM market_stock WHERE symbol = $1")
+            .bind(ZZZ_FB1)
+            .fetch_one(&pool)
+            .await
+            .expect("market_stock 应有行");
+    assert_eq!(stock.0, "测试同步ETF");
+    assert_eq!(stock.1, "L", "市场循环终值为 L");
+    assert_eq!(stock.2, Some(d(2026, 1, 5)));
+
+    // market_fund：24 字段全量 upsert 的代表列
+    let fund: (String, String, NaiveDate) = sqlx::query_as(
+        "SELECT fund_type, management, list_date FROM market_fund WHERE symbol = $1",
+    )
+    .bind(ZZZ_FB1)
+    .fetch_one(&pool)
+    .await
+    .expect("market_fund 应有行");
+    assert_eq!(fund.0, "ETF");
+    assert_eq!(fund.1, "测试基金公司");
+    assert_eq!(fund.2, d(2026, 1, 5));
+
+    // status=D 行两表都不落
+    let (s, f): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM market_stock WHERE symbol = $1), \
+                (SELECT COUNT(*) FROM market_fund WHERE symbol = $1)",
+    )
+    .bind(ZZZ_FB2)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((s, f), (0, 0), "退市基金应被跳过");
+
+    mock.shutdown();
+    cleanup_zzz_tables(&pool, &[ZZZ_FB1, ZZZ_FB2]).await;
+}
+
+// ─── sync_fund_nav ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn sync_fund_nav_success_failure_and_up_to_date_scenarios() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_FN1, ZZZ_FN2, ZZZ_FN3]).await;
+    cleanup_attempt(&pool, ZZZ_FN1).await;
+    cleanup_attempt(&pool, ZZZ_FN2).await;
+    cleanup_attempt(&pool, ZZZ_FN3).await;
+    // task_id 按运行日生成，会覆盖当天真实 scheduler 同名任务行 → 结尾删除
+    let today = chrono::Local::now().date_naive();
+    let nav_task = format!("fund-nav-sync-{}", today.format("%Y%m%d"));
+    cleanup_task(&pool, &nav_task).await;
+    let yesterday = (today - chrono::Duration::days(1))
+        .format("%Y%m%d")
+        .to_string();
+
+    // 场景 A：成功——unit_nav 必填；ann_date 是 ISO 格式（FromStr 要求 YYYY-MM-DD）
+    let mock = spawn_mock_tushare(vec![(
+        "fund_nav",
+        MockResponse::Rows {
+            fields: vec![
+                "ts_code",
+                "ann_date",
+                "nav_date",
+                "unit_nav",
+                "accum_nav",
+                "adj_nav",
+            ],
+            items: vec![vec![
+                json!(ZZZ_FN1),
+                json!("2026-09-15"),
+                json!(yesterday),
+                json!(1.234),
+                json!(2.5),
+                json!(3.5),
+            ]],
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+    let n = sync::sync_fund_nav(&pool, &client, &[ZZZ_FN1.to_string()])
+        .await
+        .expect("场景A应成功");
+    assert_eq!(n, 1);
+    mock.shutdown();
+
+    let nav: (Decimal, Option<NaiveDate>, Option<Decimal>, String) = sqlx::query_as(
+        "SELECT unit_nav, ann_date, accum_nav, source FROM market_fund_nav WHERE symbol = $1",
+    )
+    .bind(ZZZ_FN1)
+    .fetch_one(&pool)
+    .await
+    .expect("净值行应落库");
+    assert_dec_close(nav.0, 1.234, "fund_nav unit_nav");
+    assert_eq!(nav.1, Some(d(2026, 9, 15)), "ISO ann_date → NaiveDate");
+    assert_dec_close(nav.2.expect("accum_nav"), 2.5, "fund_nav accum_nav");
+    assert_eq!(nav.3, "tushare");
+
+    let attempt: (String, i64) = sqlx::query_as(
+        "SELECT status, row_count FROM data_sync_attempt \
+         WHERE symbol = $1 AND source = 'fund_nav' AND start_date < end_date",
+    )
+    .bind(ZZZ_FN1)
+    .fetch_one(&pool)
+    .await
+    .expect("区间级 attempt 应记录");
+    assert_eq!(attempt.0, "completed");
+    assert_eq!(attempt.1, 1);
+
+    // 场景 B：单标的失败（非限流错误）→ attempt failed，不中断
+    let mock_b = spawn_mock_tushare(vec![(
+        "fund_nav",
+        MockResponse::ApiErr {
+            code: 40101,
+            msg: "抱歉，您没有访问该接口的权限".to_string(),
+        },
+    )])
+    .await;
+    let client_b = client_for(&mock_b.base_url);
+    let n = sync::sync_fund_nav(&pool, &client_b, &[ZZZ_FN2.to_string()])
+        .await
+        .expect("单标的失败不中断整体");
+    assert_eq!(n, 0, "失败标的不计行");
+    mock_b.shutdown();
+
+    let fail_attempt: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, error_message FROM data_sync_attempt \
+         WHERE symbol = $1 AND source = 'fund_nav'",
+    )
+    .bind(ZZZ_FN2)
+    .fetch_one(&pool)
+    .await
+    .expect("失败 attempt 应记录");
+    assert_eq!(fail_attempt.0, "failed");
+    assert!(
+        fail_attempt.1.as_deref().unwrap_or("").contains("40101"),
+        "错误消息应保留上游 code，实际 {:?}",
+        fail_attempt.1
+    );
+
+    // 场景 C：净值已是最新（max(nav_date)=今天）→ 增量起点溢出窗口，跳过
+    sqlx::query(
+        "INSERT INTO market_fund_nav (symbol, nav_date, unit_nav, source) VALUES ($1, $2, 1.0, 'tushare')",
+    )
+    .bind(ZZZ_FN3)
+    .bind(today)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mock_c = spawn_mock_tushare(vec![(
+        "fund_nav",
+        MockResponse::Rows {
+            fields: vec!["ts_code", "ann_date", "nav_date", "unit_nav"],
+            items: vec![],
+        },
+    )])
+    .await;
+    let client_c = client_for(&mock_c.base_url);
+    let n = sync::sync_fund_nav(&pool, &client_c, &[ZZZ_FN3.to_string()])
+        .await
+        .expect("最新跳过路径应成功");
+    assert_eq!(n, 0);
+    assert_eq!(
+        mock_c.requests_for("fund_nav").len(),
+        0,
+        "起点>今天直接 continue，不发请求"
+    );
+    mock_c.shutdown();
+
+    let cnt: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM data_sync_attempt WHERE symbol = $1 AND source = 'fund_nav'",
+    )
+    .bind(ZZZ_FN3)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cnt, 0, "跳过标的不记 attempt");
+
+    // 整体任务终态 completed
+    let status: String = sqlx::query_scalar("SELECT status FROM data_sync_task WHERE task_id = $1")
+        .bind(&nav_task)
+        .fetch_one(&pool)
+        .await
+        .expect("任务行应存在");
+    assert_eq!(status, "completed");
+
+    cleanup_zzz_tables(&pool, &[ZZZ_FN1, ZZZ_FN2, ZZZ_FN3]).await;
+    cleanup_attempt(&pool, ZZZ_FN1).await;
+    cleanup_attempt(&pool, ZZZ_FN2).await;
+    cleanup_attempt(&pool, ZZZ_FN3).await;
+    cleanup_task(&pool, &nav_task).await;
+}
+
+// ─── sync_fund_adj ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn sync_fund_adj_writes_factors_and_completes_task() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_FA1]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-fadj1").await;
+
+    let mock = spawn_mock_tushare(vec![(
+        "fund_adj",
+        MockResponse::Rows {
+            fields: vec!["trade_date", "adj_factor"],
+            items: vec![vec![json!("20261228"), json!(1.5)]],
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let n = sync::sync_fund_adj(
+        &pool,
+        &client,
+        &[ZZZ_FA1.to_string()],
+        "20261228",
+        "20261230",
+        "zzz-test-sync-fadj1",
+    )
+    .await
+    .expect("sync_fund_adj 应成功");
+
+    assert_eq!(n, 1, "ok 计数 = 有因子的标的数");
+
+    let factor: (NaiveDate, Decimal) = sqlx::query_as(
+        "SELECT trade_date, adj_factor FROM market_adjustment_factor WHERE symbol = $1",
+    )
+    .bind(ZZZ_FA1)
+    .fetch_one(&pool)
+    .await
+    .expect("复权因子行应落库");
+    assert_eq!(factor.0, d(2026, 12, 28));
+    assert_dec_close(factor.1, 1.5, "fund_adj adj_factor");
+
+    let reqs = mock.requests_for("fund_adj");
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].params.get("ts_code"), Some(&json!(ZZZ_FA1)));
+    assert_eq!(reqs[0].params.get("start_date"), Some(&json!("20261228")));
+    assert_eq!(reqs[0].params.get("end_date"), Some(&json!("20261230")));
+
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-fadj1").await,
+        ("completed".to_string(), 1, 1, 0)
+    );
+
+    mock.shutdown();
+    cleanup_zzz_tables(&pool, &[ZZZ_FA1]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-fadj1").await;
+}
+
+#[tokio::test]
+async fn sync_fund_adj_marks_partial_on_upstream_error() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_FA2]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-fadj2").await;
+
+    let mock = spawn_mock_tushare(vec![(
+        "fund_adj",
+        MockResponse::ApiErr {
+            code: 40101,
+            msg: "抱歉，您没有访问该接口的权限".to_string(),
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    // 上游失败不返回 Err：fail 计数 → partial
+    let n = sync::sync_fund_adj(
+        &pool,
+        &client,
+        &[ZZZ_FA2.to_string()],
+        "20261228",
+        "20261230",
+        "zzz-test-sync-fadj2",
+    )
+    .await
+    .expect("单标的失败不应中断");
+    assert_eq!(n, 0);
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM market_adjustment_factor WHERE symbol = $1")
+            .bind(ZZZ_FA2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0, "失败标的零写入");
+
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-fadj2").await,
+        ("partial".to_string(), 1, 0, 1)
+    );
+
+    mock.shutdown();
+    cleanup_zzz_tables(&pool, &[ZZZ_FA2]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-fadj2").await;
+}
+
+#[tokio::test]
+async fn sync_fund_adj_stops_when_cancel_requested() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_FA3]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-fadj3").await;
+
+    // SlowOk 让第一只耗时 500ms；后台延迟 150ms 再置 cancel_requested，
+    // 确保第一只的取消检查（开跑后 ~10ms 内）已通过、置位落在 SlowOk
+    // 窗口内 → 第二只循环开头查询到取消 → break → 任务终态 cancelled
+    let mock = spawn_mock_tushare(vec![("fund_adj", MockResponse::SlowOk { delay_ms: 500 })]).await;
+    let client = client_for(&mock.base_url);
+
+    let task_id = "zzz-test-sync-fadj3".to_string();
+    let canceller = {
+        let pool = pool.clone();
+        let task_id = task_id.clone();
+        tokio::spawn(async move {
+            // 延迟启动避开第一只的取消检查，再轮询直到 task 行被置为 running 后置位
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            for _ in 0..20 {
+                let n = sqlx::query(
+                    "UPDATE data_sync_task SET status = 'cancel_requested' \
+                     WHERE task_id = $1 AND status = 'running'",
+                )
+                .bind(&task_id)
+                .execute(&pool)
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+                if n > 0 {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+    };
+
+    let n = sync::sync_fund_adj(
+        &pool,
+        &client,
+        &[ZZZ_FA3.to_string(), "ZZZSYNC45B.SH".to_string()],
+        "20261228",
+        "20261230",
+        &task_id,
+    )
+    .await
+    .expect("取消路径应正常收尾");
+    canceller.await.expect("canceller join");
+
+    assert_eq!(n, 0, "SlowOk 空数据不计 ok");
+    assert_eq!(
+        mock.requests_for("fund_adj").len(),
+        1,
+        "第二只在取消检查处 break"
+    );
+
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-fadj3").await,
+        ("cancelled".to_string(), 2, 0, 0)
+    );
+
+    mock.shutdown();
+    cleanup_zzz_tables(&pool, &[ZZZ_FA3]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-fadj3").await;
+}
+
+// ─── sync_index_daily ────────────────────────────────────────────
+
+#[tokio::test]
+async fn sync_index_daily_writes_bars_and_completes_task() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_IX1]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-idx1").await;
+
+    let mock = spawn_mock_tushare(vec![(
+        "index_daily",
+        MockResponse::Rows {
+            fields: vec![
+                "trade_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "pre_close",
+                "pct_chg",
+                "vol",
+                "amount",
+            ],
+            items: vec![vec![
+                json!("20261228"),
+                json!(3900.5),
+                json!(3950.0),
+                json!(3880.0),
+                json!(3920.8),
+                json!(3899.0),
+                json!(0.56),
+                json!(123000.0),
+                json!(481500.0),
+            ]],
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let n = sync::sync_index_daily(
+        &pool,
+        &client,
+        &[ZZZ_IX1.to_string()],
+        "20261228",
+        "20261230",
+        "zzz-test-sync-idx1",
+    )
+    .await
+    .expect("sync_index_daily 应成功");
+
+    assert_eq!(n, 1);
+
+    let bar: (Decimal, Decimal, String) = sqlx::query_as(
+        "SELECT close, pct_change, data_version_id FROM market_index_daily_bar WHERE symbol = $1",
+    )
+    .bind(ZZZ_IX1)
+    .fetch_one(&pool)
+    .await
+    .expect("指数日线应落库");
+    assert_dec_close(bar.0, 3920.8, "index_daily close");
+    assert_dec_close(bar.1, 0.0056, "pct_chg 百分比 → 小数");
+    assert_eq!(bar.2, "zzz-test-sync-idx1");
+
+    let reqs = mock.requests_for("index_daily");
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].params.get("ts_code"), Some(&json!(ZZZ_IX1)));
+    assert_eq!(reqs[0].params.get("start_date"), Some(&json!("20261228")));
+    assert_eq!(reqs[0].params.get("end_date"), Some(&json!("20261230")));
+
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-idx1").await,
+        ("completed".to_string(), 1, 1, 0)
+    );
+
+    mock.shutdown();
+    cleanup_zzz_tables(&pool, &[ZZZ_IX1]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-idx1").await;
+}
+
+#[tokio::test]
+async fn sync_index_daily_marks_partial_on_upstream_error() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_IX2]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-idx2").await;
+
+    let mock = spawn_mock_tushare(vec![(
+        "index_daily",
+        MockResponse::ApiErr {
+            code: 40101,
+            msg: "抱歉，您没有访问该接口的权限".to_string(),
+        },
+    )])
+    .await;
+    let client = client_for(&mock.base_url);
+
+    let n = sync::sync_index_daily(
+        &pool,
+        &client,
+        &[ZZZ_IX2.to_string()],
+        "20261228",
+        "20261230",
+        "zzz-test-sync-idx2",
+    )
+    .await
+    .expect("上游失败不中断");
+    assert_eq!(n, 0);
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM market_index_daily_bar WHERE symbol = $1")
+            .bind(ZZZ_IX2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+
+    assert_eq!(
+        task_state(&pool, "zzz-test-sync-idx2").await,
+        ("partial".to_string(), 1, 0, 1)
+    );
+
+    mock.shutdown();
+    cleanup_zzz_tables(&pool, &[ZZZ_IX2]).await;
+    cleanup_task_and_dv(&pool, "zzz-test-sync-idx2").await;
+}
+
+// ─── run_quality_check ───────────────────────────────────────────
+
+#[tokio::test]
+async fn run_quality_check_scores_completeness_with_outliers() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_QC]).await;
+
+    // 真实开市周 2026-09-14~18（5 天）：写满 5 行，其中 1 行 close=0 是异常值
+    // score = 100 - 1/5*30 = 94
+    for (i, day) in ["20260914", "20260915", "20260916", "20260917", "20260918"]
+        .iter()
+        .enumerate()
+    {
+        let close = if i == 2 { 0.0 } else { 10.5 };
+        sqlx::query(
+            "INSERT INTO market_stock_daily_bar \
+             (symbol, trade_date, open, high, low, close, pre_close, volume, amount, source, created_at) \
+             VALUES ($1, $2, 10.0, 11.0, 9.5, $3, 10.4, 1000.0, 10500.0, 'zzz-test', now()) \
+             ON CONFLICT (symbol, trade_date) DO NOTHING",
+        )
+        .bind(ZZZ_QC)
+        .bind(NaiveDate::parse_from_str(day, "%Y%m%d").unwrap())
+        .bind(dec(close))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let report = sync::run_quality_check(&pool, &[ZZZ_QC.to_string()], "20260914", "20260918")
+        .await
+        .expect("质量检查应成功");
+
+    assert_eq!(
+        report["expected_records"].as_i64(),
+        Some(5),
+        "5 开市日 × 1 标的"
+    );
+    assert_eq!(report["actual_records"].as_i64(), Some(5));
+    assert_eq!(report["missing"].as_i64(), Some(0));
+    assert_eq!(report["duplicates"].as_i64(), Some(0));
+    assert_eq!(report["outliers"].as_i64(), Some(1), "close=0 计异常");
+    let score = report["quality_score"].as_f64().expect("score 数值");
+    assert!(
+        (score - 94.0).abs() < 0.01,
+        "100 - 30%*1/5 = 94，实际 {}",
+        score
+    );
+
+    // 检查结果落库（按返回 check_id 精确校验并清理）
+    let check_id = report["check_id"].as_str().expect("check_id").to_string();
+    let persisted: (i64, i64) = sqlx::query_as(
+        "SELECT total_records, outlier_count FROM data_quality_check WHERE check_id = $1",
+    )
+    .bind(&check_id)
+    .fetch_one(&pool)
+    .await
+    .expect("检查行应落库");
+    assert_eq!(persisted, (5, 1));
+
+    let _ = sqlx::query("DELETE FROM data_quality_check WHERE check_id = $1")
+        .bind(&check_id)
+        .execute(&pool)
+        .await;
+    cleanup_zzz_tables(&pool, &[ZZZ_QC]).await;
+}
+
+// ─── derive_limit_list_from_daily_bars ───────────────────────────
+
+/// 直插 market_stock 基础行（derive 的 stock_profile CTE 所需）
+async fn insert_stock_for_derive(pool: &PgPool, symbol: &str, list_date: &str) {
+    sqlx::query(
+        "INSERT INTO market_stock (symbol, name, exchange, market, list_status, list_date) \
+         VALUES ($1, '测试派生股', $2, '主板', 'L', $3) \
+         ON CONFLICT (symbol) DO UPDATE SET list_date = EXCLUDED.list_date",
+    )
+    .bind(symbol)
+    .bind(if symbol.ends_with(".SH") {
+        "SSE"
+    } else {
+        "SZSE"
+    })
+    .bind(NaiveDate::parse_from_str(list_date, "%Y%m%d").unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// 直插日线行（derive 的 bars CTE 所需）
+async fn insert_bar_for_derive(pool: &PgPool, symbol: &str, day: &str, close: f64, pre_close: f64) {
+    sqlx::query(
+        "INSERT INTO market_stock_daily_bar \
+         (symbol, trade_date, open, high, low, close, pre_close, volume, amount, source, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 1000.0, 10500.0, 'zzz-test', now()) \
+         ON CONFLICT (symbol, trade_date) DO NOTHING",
+    )
+    .bind(symbol)
+    .bind(NaiveDate::parse_from_str(day, "%Y%m%d").unwrap())
+    .bind(dec(close * 0.98))
+    .bind(dec(close * 1.01))
+    .bind(dec(pre_close * 0.97))
+    .bind(dec(close))
+    .bind(dec(pre_close))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn derive_limit_list_classifies_u_d_st_band_and_filters_recent_listing() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_DL1, ZZZ_DL2, ZZZ_DL3]).await;
+    cleanup_derive_tasks(&pool).await;
+
+    // 阶段一（非 ST 10% 板 + 次新过滤）：老股 U/D/无三天 + 次新股被过滤
+    insert_stock_for_derive(&pool, ZZZ_DL1, "20000101").await;
+    insert_bar_for_derive(&pool, ZZZ_DL1, "20261228", 11.0, 10.0).await; // +10% → U
+    insert_bar_for_derive(&pool, ZZZ_DL1, "20261229", 9.0, 10.0).await; // -10% → D
+    insert_bar_for_derive(&pool, ZZZ_DL1, "20261230", 10.0, 10.0).await; // 平盘 → 无
+
+    // 次新股：list_date=2026-12-22（周二），12-28 恰第 5 个开市日(22,23,24,25,28)。
+    // 实现口径 trade_seq - list_seq + 1 > 5 才判定（第 6 开市日起），第 5 日过滤 ✓。
+    // （原注释误算 12-21 起数——25 日周五也开市，28 日实为第 6 日不被过滤）
+    insert_stock_for_derive(&pool, ZZZ_DL2, "20261222").await;
+    insert_bar_for_derive(&pool, ZZZ_DL2, "20261228", 11.0, 10.0).await; // 本应 U，被过滤
+
+    let inserted = sync::derive_limit_list_from_daily_bars(&pool, "20261228", "20261230")
+        .await
+        .expect("派生涨跌停应成功");
+    assert_eq!(inserted, 2, "老股 U+D 两行，次新股被过滤");
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT trade_date::text, limit_type FROM market_stock_limit \
+         WHERE symbol = $1 ORDER BY trade_date",
+    )
+    .bind(ZZZ_DL1)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0], ("2026-12-28".to_string(), "U".to_string()));
+    assert_eq!(rows[1], ("2026-12-29".to_string(), "D".to_string()));
+
+    let recent: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM market_stock_limit WHERE symbol = $1")
+            .bind(ZZZ_DL2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(recent, 0, "上市 5 日内的涨停不落库");
+
+    // 幂等：重跑行数不增
+    let inserted_again = sync::derive_limit_list_from_daily_bars(&pool, "20261228", "20261230")
+        .await
+        .expect("二次派生应成功");
+    assert_eq!(inserted_again, 2, "upsert 幂等，仍是 2 行（覆盖计数）");
+
+    // 阶段二（ST 5% 板）：ST 区间开到无穷 → 窗口内按 5% 板判定。
+    // +5% 收 10.5：5% 板 U 阈 10.499 → U；若误按 10% 板（阈 10.999）则不落库
+    // → 有行即证明 ST 阈值生效（本阶段与阶段一同窗口串行，避免并行 inserted 计数互踩）
+    insert_stock_for_derive(&pool, ZZZ_DL3, "20000101").await;
+    sqlx::query(
+        "INSERT INTO market_stock_name_history (symbol, name, start_date, end_date, is_st) \
+         VALUES ($1, 'ST测试派生', '2026-01-01', NULL, true)",
+    )
+    .bind(ZZZ_DL3)
+    .execute(&pool)
+    .await
+    .unwrap();
+    insert_bar_for_derive(&pool, ZZZ_DL3, "20261228", 10.5, 10.0).await;
+    insert_bar_for_derive(&pool, ZZZ_DL3, "20261229", 10.96, 10.0).await; // 远超阈值的伴随 U
+
+    let inserted_st = sync::derive_limit_list_from_daily_bars(&pool, "20261228", "20261230")
+        .await
+        .expect("ST 派生应成功");
+    assert_eq!(inserted_st, 4, "本轮 upsert 命中 4 行（老股 2 + ST 股 2）");
+
+    let st_rows: Vec<String> = sqlx::query_scalar(
+        "SELECT limit_type FROM market_stock_limit WHERE symbol = $1 ORDER BY trade_date",
+    )
+    .bind(ZZZ_DL3)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        st_rows,
+        vec!["U".to_string(), "U".to_string()],
+        "5% 板两行均 U"
+    );
+
+    // 完成标记任务补齐（source=derived:daily_limit）
+    for day in ["20261228", "20261229", "20261230"] {
+        let task_id = format!("limit_daily-{}", day);
+        let (status, source): (String, String) =
+            sqlx::query_as("SELECT status, source FROM data_sync_task WHERE task_id = $1")
+                .bind(&task_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|_| panic!("完成标记 {} 应存在", task_id));
+        assert_eq!(status, "completed");
+        assert_eq!(source, "derived:daily_limit");
+    }
+
+    cleanup_zzz_tables(&pool, &[ZZZ_DL1, ZZZ_DL2, ZZZ_DL3]).await;
+    cleanup_derive_tasks(&pool).await;
+}
+
+#[tokio::test]
+async fn derive_limit_list_rejects_bad_date_windows() {
+    let pool = local_pool().await;
+
+    let err = sync::derive_limit_list_from_daily_bars(&pool, "20261230", "20261228")
+        .await
+        .expect_err("倒置窗口应报错");
+    assert!(err.contains("不能晚于"), "实际: {}", err);
+
+    let err = sync::derive_limit_list_from_daily_bars(&pool, "bad-date", "20261228")
+        .await
+        .expect_err("非法日期应报错");
+    assert!(err.contains("解析"), "实际: {}", err);
+}
+
+// ─── backfill_limit_completion_markers ───────────────────────────
+
+#[tokio::test]
+async fn backfill_limit_markers_writes_daily_completed_tasks() {
+    let pool = local_pool().await;
+    // 窗口 12-21~24 独立于 derive 测试（12-28~30）：并行时 limit 表行数断言互不污染
+    let days = ["20261221", "20261222", "20261223", "20261224"];
+    for day in days {
+        cleanup_task(&pool, &format!("limit_daily-{}", day)).await;
+    }
+
+    // 参数校验分支
+    let err =
+        sync::backfill_limit_completion_markers(&pool, "20261224", "20261221", "zzz-test-blcm")
+            .await
+            .expect_err("倒置窗口应报错");
+    assert!(err.contains("不能晚于"), "实际: {}", err);
+
+    let n = sync::backfill_limit_completion_markers(&pool, "20261221", "20261224", "zzz-test-blcm")
+        .await
+        .expect("补齐完成标记应成功");
+    assert_eq!(n, 4, "四个开市日各补一条任务");
+
+    // 每个开市日一条 completed 任务，source 透传；limit 表该窗口无行 → total=0
+    let rows: Vec<(String, String, i32)> = sqlx::query_as(
+        "SELECT task_id, source, total_count FROM data_sync_task \
+         WHERE task_id IN ('limit_daily-20261221', 'limit_daily-20261222', \
+                           'limit_daily-20261223', 'limit_daily-20261224') \
+         ORDER BY task_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 4);
+    for (task_id, source, total) in &rows {
+        assert!(task_id.starts_with("limit_daily-2026122"));
+        assert_eq!(source, "zzz-test-blcm");
+        assert_eq!(*total, 0, "limit 表该窗口无行 → COALESCE 0");
+    }
+
+    for day in days {
+        cleanup_task(&pool, &format!("limit_daily-{}", day)).await;
+    }
+}
+
+// ─── get_st_symbols_at_date / get_pit_main_board_non_st_symbols ──
+
+#[tokio::test]
+async fn st_symbol_query_uses_pit_window_semantics() {
+    let pool = local_pool().await;
+    cleanup_zzz_tables(&pool, &[ZZZ_ST1, ZZZ_ST2, ZZZ_ST3]).await;
+
+    sqlx::query(
+        "INSERT INTO market_stock_name_history (symbol, name, start_date, end_date, is_st) VALUES \
+         ($1, 'ST闭区间', '2026-01-01', '2026-06-01', true), \
+         ($2, 'ST开区间', '2026-05-01', NULL, true), \
+         ($3, '非ST行', '2026-01-01', NULL, false)",
+    )
+    .bind(ZZZ_ST1)
+    .bind(ZZZ_ST2)
+    .bind(ZZZ_ST3)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 2026-03-01：闭区间命中，开区间未开始
+    let syms = sync::get_st_symbols_at_date(&pool, d(2026, 3, 1))
+        .await
+        .expect("PIT ST 查询应成功");
+    assert!(
+        syms.contains(&ZZZ_ST1.to_string()),
+        "闭区间命中: {:?}",
+        syms
+    );
+    assert!(!syms.contains(&ZZZ_ST2.to_string()));
+    assert!(!syms.contains(&ZZZ_ST3.to_string()), "非 ST 行不入选");
+
+    // 2026-07-01：闭区间已结束，开区间仍在
+    let syms = sync::get_st_symbols_at_date(&pool, d(2026, 7, 1))
+        .await
+        .expect("PIT ST 查询 2 应成功");
+    assert!(!syms.contains(&ZZZ_ST1.to_string()), "闭区间已出窗");
+    assert!(
+        syms.contains(&ZZZ_ST2.to_string()),
+        "开区间仍在: {:?}",
+        syms
+    );
+
+    cleanup_zzz_tables(&pool, &[ZZZ_ST1, ZZZ_ST2, ZZZ_ST3]).await;
+}
+
+#[tokio::test]
+async fn main_board_universe_query_excludes_growth_st_and_unlisted() {
+    let pool = local_pool().await;
+    let all_keys = [ZZZ_MB1, ZZZ_MB2, ZZZ_GEM, ZZZ_MB_FUT, ZZZ_MB_DLQ];
+    cleanup_zzz_tables(&pool, &all_keys).await;
+
+    sqlx::query(
+        "INSERT INTO market_stock (symbol, name, exchange, list_status, list_date) VALUES \
+         ($1, '主板正常', 'SSE', 'L', '2020-01-01'), \
+         ($2, '主板ST', 'SSE', 'L', '2020-01-01'), \
+         ($3, '创业板形态', 'SZSE', 'L', '2020-01-01'), \
+         ($4, '未上市', 'SSE', 'L', '2027-01-01'), \
+         ($5, '已退市', 'SSE', 'D', '2020-01-01')",
+    )
+    .bind(ZZZ_MB1)
+    .bind(ZZZ_MB2)
+    .bind(ZZZ_GEM)
+    .bind(ZZZ_MB_FUT)
+    .bind(ZZZ_MB_DLQ)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO market_stock_name_history (symbol, name, start_date, end_date, is_st) \
+         VALUES ($1, 'ST宇宙股', '2026-01-01', NULL, true)",
+    )
+    .bind(ZZZ_MB2)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let syms = sync::get_pit_main_board_non_st_symbols(&pool, d(2026, 6, 1))
+        .await
+        .expect("主板 universe 查询应成功");
+
+    // 全市场查询（含真实股票）：只断言自家键的进出，不做全量精确比较
+    assert!(
+        syms.contains(&ZZZ_MB1.to_string()),
+        "主板正常股应入选: {:?}",
+        syms.len()
+    );
+    assert!(!syms.contains(&ZZZ_MB2.to_string()), "ST 股应被排除");
+    assert!(!syms.contains(&ZZZ_GEM.to_string()), "创业板形态应被排除");
+    assert!(
+        !syms.contains(&ZZZ_MB_FUT.to_string()),
+        "list_date 晚于 as_of 应被排除"
+    );
+    assert!(!syms.contains(&ZZZ_MB_DLQ.to_string()), "退市股应被排除");
+    // 排序不变式
+    let mut sorted = syms.clone();
+    sorted.sort();
+    assert_eq!(syms, sorted, "结果应按 symbol 有序");
+
+    // as_of 早于 ST 起点 → ST 股恢复入选（PIT 语义）
+    let syms = sync::get_pit_main_board_non_st_symbols(&pool, d(2025, 12, 31))
+        .await
+        .expect("PIT 前置查询应成功");
+    assert!(syms.contains(&ZZZ_MB1.to_string()));
+    assert!(
+        syms.contains(&ZZZ_MB2.to_string()),
+        "ST 起点前主板 ST 股应入选"
+    );
+
+    cleanup_zzz_tables(&pool, &all_keys).await;
+}

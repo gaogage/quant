@@ -70,7 +70,7 @@ fn parse_statement_timeout_ms(value: Option<&str>) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_statement_timeout_ms;
+    use super::{create_pool, parse_statement_timeout_ms, pool_from_env};
 
     #[test]
     fn statement_timeout_defaults_to_unlimited_for_research_workloads() {
@@ -83,5 +83,93 @@ mod tests {
     fn statement_timeout_accepts_positive_override() {
         assert_eq!(parse_statement_timeout_ms(Some("300000")), 300_000);
         assert_eq!(parse_statement_timeout_ms(Some(" 60000 ")), 60_000);
+    }
+
+    // ─── 第四批：连接池真实建连覆盖（本机 PG，用后即关防连接堆积）───
+    //
+    // 三测试互斥：create_pool max_connections=20，并行各建一池瞬时 60+ 连接
+    // 会打爆本机 PG max_connections（全量并行跑实锤）——static Mutex 串行化。
+    static DB_POOL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn local_url() -> String {
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@127.0.0.1/quant".to_string())
+    }
+
+    #[tokio::test]
+    async fn create_pool_connects_local_postgres() {
+        let _db_pool_guard = DB_POOL_TEST_LOCK.lock().await;
+        let pool = create_pool(&local_url()).await.expect("本机建池应成功");
+        let one: i64 = sqlx::query_scalar("SELECT 1::int8")
+            .fetch_one(&pool)
+            .await
+            .expect("连接应可查询");
+        assert_eq!(one, 1);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn pool_from_env_connects_and_queries() {
+        let _db_pool_guard = DB_POOL_TEST_LOCK.lock().await;
+        let pool = pool_from_env().await.expect("env 建池应成功");
+        let one: i64 = sqlx::query_scalar("SELECT 1::int8")
+            .fetch_one(&pool)
+            .await
+            .expect("连接应可查询");
+        assert_eq!(one, 1);
+        pool.close().await;
+    }
+
+    /// TZ / QUANT_DB_STATEMENT_TIMEOUT_MS 的 after_connect 分支矩阵。
+    /// env 修改只被 create_pool 读取（local_pool 不读），且本函数内
+    /// 串行设置-建池-断言，无并行竞争；结尾恢复环境。
+    #[tokio::test]
+    async fn create_pool_applies_session_env_matrix() {
+        let _db_pool_guard = DB_POOL_TEST_LOCK.lock().await;
+        // 合法 IANA 时区 → 会话时区跟随
+        std::env::set_var("TZ", "Asia/Shanghai");
+        let pool = create_pool(&local_url())
+            .await
+            .expect("TZ=Asia/Shanghai 建池");
+        let tz: String = sqlx::query_scalar("SELECT current_setting('TimeZone')")
+            .fetch_one(&pool)
+            .await
+            .expect("时区设置应可读");
+        assert_eq!(tz, "Asia/Shanghai", "SET TIME ZONE 应生效");
+        pool.close().await;
+
+        // 非法时区（含引号/分号等）→ 跳过 SET，连接仍成功（服务器默认）
+        std::env::set_var("TZ", "bad'tz; --");
+        let pool = create_pool(&local_url())
+            .await
+            .expect("非法 TZ 应被过滤而非失败");
+        let one: i64 = sqlx::query_scalar("SELECT 1::int8")
+            .fetch_one(&pool)
+            .await
+            .expect("连接应可查询");
+        assert_eq!(one, 1);
+        pool.close().await;
+
+        // TZ 未设置 → 保持服务器默认
+        std::env::remove_var("TZ");
+        let pool = create_pool(&local_url()).await.expect("无 TZ 建池应成功");
+        let one: i64 = sqlx::query_scalar("SELECT 1::int8")
+            .fetch_one(&pool)
+            .await
+            .expect("连接应可查询");
+        assert_eq!(one, 1);
+        pool.close().await;
+
+        // statement_timeout 环境覆盖分支（值不断言——SHOW 格式随 PG 版本变化）
+        std::env::set_var("QUANT_DB_STATEMENT_TIMEOUT_MS", "300000");
+        let pool = create_pool(&local_url()).await.expect("超时覆盖建池应成功");
+        let one: i64 = sqlx::query_scalar("SELECT 1::int8")
+            .fetch_one(&pool)
+            .await
+            .expect("连接应可查询");
+        assert_eq!(one, 1);
+        pool.close().await;
+
+        std::env::remove_var("QUANT_DB_STATEMENT_TIMEOUT_MS");
     }
 }

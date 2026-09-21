@@ -2810,3 +2810,642 @@ async fn build_broad_analyst_revision_audit(
         ]
     }))
 }
+
+// ── 第四批覆盖率测试：分析师修正 readiness 域纯函数、决策函数与只读审计路径 ──
+// 模式沿用 phase7_audit.rs third_batch：inner 直调，跳过 axum HTTP 层；
+// 外部 Python 运行时统一用不存在的路径触发 runtime_not_configured 早退，无网络无 spawn。
+#[cfg(test)]
+mod fourth_batch {
+    use super::*;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+    }
+
+    /// 构造真实本机 PG 连接（DATABASE_URL 缺省 postgres://gaocheng@localhost/quant）。
+    async fn test_app_state() -> crate::AppState {
+        dotenv::dotenv().ok();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        crate::AppState {
+            start_time: Utc::now(),
+            db,
+            tushare: quant_data::tushare::client::TushareClient::from_env()
+                .expect("Tushare client init（dotenv 加载 quant/.env 后需 TUSHARE_TOKEN）"),
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        }
+    }
+
+    fn object(pairs: &[(&str, Value)]) -> serde_json::Map<String, Value> {
+        let mut map = serde_json::Map::new();
+        for (key, value) in pairs {
+            map.insert((*key).to_string(), value.clone());
+        }
+        map
+    }
+
+    // ── 纯函数：入参归一化与限额 ──
+
+    #[test]
+    fn smoke_limit_defaults_to_five_and_clamps_to_fifty() {
+        assert_eq!(akshare_analyst_revision_smoke_limit(None), 5);
+        assert_eq!(akshare_analyst_revision_smoke_limit(Some(0)), 1);
+        assert_eq!(akshare_analyst_revision_smoke_limit(Some(10)), 10);
+        assert_eq!(akshare_analyst_revision_smoke_limit(Some(500)), 50);
+    }
+
+    #[test]
+    fn smoke_dates_defaults_to_yesterday_and_dedupes_with_cap() {
+        // 空入参 → 最近一个完整日（昨天）
+        let default = akshare_analyst_revision_smoke_dates(&[]).expect("default dates");
+        assert_eq!(default.len(), 1);
+        assert!(NaiveDate::parse_from_str(&default[0], "%Y%m%d").is_ok());
+
+        // trim + 去重 + 去空
+        let dates: Vec<String> = ["20240102", "20240102", " 20240103 ", ""]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            akshare_analyst_revision_smoke_dates(&dates).unwrap(),
+            vec!["20240102".to_string(), "20240103".to_string()]
+        );
+
+        // 上限 8 个日期（AKSHARE_ANALYST_REVISION_MAX_DATES）
+        let ten: Vec<String> = (1..=10).map(|i| format!("202401{:02}", i)).collect();
+        assert_eq!(akshare_analyst_revision_smoke_dates(&ten).unwrap().len(), 8);
+    }
+
+    #[test]
+    fn smoke_dates_rejects_non_ymd_format() {
+        let bad: Vec<String> = vec!["2024-01-02".to_string()];
+        assert!(akshare_analyst_revision_smoke_dates(&bad).is_err());
+    }
+
+    #[test]
+    fn history_dates_dedupes_and_enforces_max_sixteen() {
+        let dates: Vec<String> = ["20240102", "20240102", "20240103"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            akshare_analyst_revision_history_dates(&dates).unwrap(),
+            vec!["20240102".to_string(), "20240103".to_string()]
+        );
+
+        // 超过 16 个不同日期拒绝（AKSHARE_ANALYST_REVISION_HISTORY_MAX_DATES）
+        let many: Vec<String> = (1..=17).map(|i| format!("202401{:02}", i)).collect();
+        let error = akshare_analyst_revision_history_dates(&many).expect_err("too many dates");
+        assert!(error.contains("at most 16 dates"), "实际错误: {error}");
+
+        // 非法格式拒绝
+        let bad: Vec<String> = vec!["notadate".to_string()];
+        assert!(akshare_analyst_revision_history_dates(&bad).is_err());
+    }
+
+    #[test]
+    fn analyst_revision_symbol_strips_exchange_suffix_and_trims() {
+        assert_eq!(akshare_analyst_revision_symbol(" 600000.SH "), "600000");
+        assert_eq!(akshare_analyst_revision_symbol("000001"), "000001");
+    }
+
+    #[test]
+    fn broad_breakdown_limit_defaults_to_thirty_two_and_clamps() {
+        assert_eq!(broad_analyst_revision_breakdown_limit(None), 32);
+        assert_eq!(broad_analyst_revision_breakdown_limit(Some(0)), 1);
+        assert_eq!(broad_analyst_revision_breakdown_limit(Some(5)), 5);
+        assert_eq!(broad_analyst_revision_breakdown_limit(Some(100)), 32);
+    }
+
+    // ── 纯函数：批次边界与标签 ──
+
+    #[test]
+    fn batch_end_aligns_to_year_month_or_quarter_boundary() {
+        // year：年末
+        assert_eq!(
+            akshare_analyst_revision_batch_end(date(2024, 3, 15), "year"),
+            date(2024, 12, 31)
+        );
+        // month：月末
+        assert_eq!(
+            akshare_analyst_revision_batch_end(date(2024, 1, 15), "month"),
+            date(2024, 1, 31)
+        );
+        assert_eq!(
+            akshare_analyst_revision_batch_end(date(2024, 12, 1), "month"),
+            date(2024, 12, 31)
+        );
+        // 默认按季度：Q1/Q2/Q4 季末
+        assert_eq!(
+            akshare_analyst_revision_batch_end(date(2024, 2, 1), "quarter"),
+            date(2024, 3, 31)
+        );
+        assert_eq!(
+            akshare_analyst_revision_batch_end(date(2024, 4, 1), "anything"),
+            date(2024, 6, 30)
+        );
+        assert_eq!(
+            akshare_analyst_revision_batch_end(date(2024, 11, 30), "quarter"),
+            date(2024, 12, 31)
+        );
+    }
+
+    #[test]
+    fn batch_label_formats_year_month_and_quarter() {
+        assert_eq!(
+            akshare_analyst_revision_batch_label(date(2024, 5, 1), "year"),
+            "2024"
+        );
+        assert_eq!(
+            akshare_analyst_revision_batch_label(date(2024, 1, 1), "month"),
+            "202401"
+        );
+        assert_eq!(
+            akshare_analyst_revision_batch_label(date(2024, 11, 1), "month"),
+            "202411"
+        );
+        assert_eq!(
+            akshare_analyst_revision_batch_label(date(2024, 2, 1), "quarter"),
+            "2024Q1"
+        );
+        assert_eq!(
+            akshare_analyst_revision_batch_label(date(2024, 12, 1), "unknown"),
+            "2024Q4"
+        );
+    }
+
+    // ── 纯函数：记录字段提取 ──
+
+    #[test]
+    fn value_key_part_normalizes_scalar_variants_to_trimmed_string() {
+        let item = object(&[
+            ("s", json!(" x ")),
+            ("n", json!(1.5)),
+            ("i", json!(7)),
+            ("b", json!(true)),
+            ("null", json!(null)),
+        ]);
+        assert_eq!(akshare_value_key_part(&item, "s"), "x");
+        assert_eq!(akshare_value_key_part(&item, "n"), "1.5");
+        assert_eq!(akshare_value_key_part(&item, "i"), "7");
+        assert_eq!(akshare_value_key_part(&item, "b"), "true");
+        assert_eq!(akshare_value_key_part(&item, "null"), "");
+        assert_eq!(akshare_value_key_part(&item, "missing"), "");
+    }
+
+    #[test]
+    fn optional_string_returns_none_for_blank_values() {
+        let item = object(&[("blank", json!("   ")), ("value", json!("v"))]);
+        assert_eq!(akshare_optional_string(&item, "blank"), None);
+        assert_eq!(
+            akshare_optional_string(&item, "value"),
+            Some("v".to_string())
+        );
+        assert_eq!(akshare_optional_string(&item, "missing"), None);
+    }
+
+    #[test]
+    fn optional_decimal_parses_numbers_and_numeric_strings() {
+        let item = object(&[
+            ("num", json!(1.5)),
+            ("str", json!("2.5")),
+            ("bad", json!("abc")),
+            ("null", json!(null)),
+        ]);
+        let num = akshare_optional_decimal(&item, "num").expect("numeric json");
+        assert_eq!(num, Decimal::from_f64_retain(1.5).expect("decimal 1.5"));
+        let parsed = akshare_optional_decimal(&item, "str").expect("numeric string");
+        assert_eq!(parsed, Decimal::from_f64_retain(2.5).expect("decimal 2.5"));
+        assert_eq!(akshare_optional_decimal(&item, "bad"), None);
+        assert_eq!(akshare_optional_decimal(&item, "null"), None);
+    }
+
+    #[test]
+    fn parse_publication_date_accepts_dash_and_compact_formats() {
+        assert_eq!(
+            parse_akshare_publication_date("2024-01-02"),
+            Some(date(2024, 1, 2))
+        );
+        assert_eq!(
+            parse_akshare_publication_date(" 20240102 "),
+            Some(date(2024, 1, 2))
+        );
+        assert_eq!(
+            parse_akshare_publication_date("2024/01/02"),
+            None,
+            "斜杠格式不支持"
+        );
+        assert_eq!(parse_akshare_publication_date(""), None);
+    }
+
+    // ── 纯函数：PIT 可用性与日历 ──
+
+    #[test]
+    fn next_open_date_picks_first_later_open_date_else_next_day() {
+        let opens = vec![date(2024, 1, 8), date(2024, 1, 9)];
+        assert_eq!(
+            akshare_next_open_date(date(2024, 1, 5), &opens),
+            date(2024, 1, 8)
+        );
+        assert_eq!(
+            akshare_next_open_date(date(2024, 1, 10), &opens),
+            date(2024, 1, 11)
+        );
+        assert_eq!(
+            akshare_next_open_date(date(2024, 1, 10), &[]),
+            date(2024, 1, 11)
+        );
+    }
+
+    #[test]
+    fn source_published_at_uses_half_past_midnight_utc() {
+        // 保守口径：available_at 当日 00:30 UTC
+        let ts = akshare_source_published_at(date(2024, 1, 2));
+        assert_eq!(ts.to_rfc3339(), "2024-01-02T00:30:00+00:00");
+    }
+
+    #[test]
+    fn calendar_days_lists_inclusive_daily_range() {
+        let days = akshare_analyst_revision_calendar_days(date(2024, 1, 1), date(2024, 1, 3));
+        assert_eq!(
+            days,
+            vec![date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
+        );
+        // start > end → 空
+        assert!(
+            akshare_analyst_revision_calendar_days(date(2024, 1, 3), date(2024, 1, 1)).is_empty()
+        );
+    }
+
+    // ── 纯决策函数 ──
+
+    #[test]
+    fn probe_status_prefers_any_ok_over_runtime_and_error() {
+        let probe = |status: &str| json!({ "status": status });
+        assert_eq!(
+            akshare_analyst_revision_probe_status(&[probe("ok"), probe("error")]),
+            "available"
+        );
+        assert_eq!(
+            akshare_analyst_revision_probe_status(&[probe("ok_empty")]),
+            "available"
+        );
+        assert_eq!(
+            akshare_analyst_revision_probe_status(&[
+                probe("error"),
+                probe("runtime_not_configured")
+            ]),
+            "runtime_not_configured"
+        );
+        assert_eq!(
+            akshare_analyst_revision_probe_status(&[probe("error")]),
+            "error"
+        );
+        assert_eq!(akshare_analyst_revision_probe_status(&[]), "error");
+    }
+
+    #[test]
+    fn known_endpoint_gate_blocks_snapshot_and_parser_unstable_sources() {
+        // 快照源：无历史快照时间戳，PIT 不可重建
+        let snapshot = akshare_analyst_revision_known_endpoint_gate("stock_profit_forecast_em")
+            .expect("snapshot gate");
+        assert_eq!(snapshot["status"], "blocked_snapshot_not_pit_ready");
+        assert_eq!(snapshot["query_scope"], "current_snapshot");
+        assert_eq!(snapshot["probes"].as_array().map(Vec::len), Some(0));
+
+        // 解析不稳定端点：解析器/XML 失败史
+        for source in [
+            "stock_institute_recommend",
+            "stock_institute_recommend_detail",
+            "stock_profit_forecast_ths",
+        ] {
+            let unstable =
+                akshare_analyst_revision_known_endpoint_gate(source).expect("unstable gate");
+            assert_eq!(
+                unstable["status"], "blocked_parse_unreliable",
+                "source={source}"
+            );
+            assert_eq!(unstable["query_scope"], "parser_unstable_endpoint");
+        }
+
+        // 主候选源不受 gate 限制
+        assert!(
+            akshare_analyst_revision_known_endpoint_gate("stock_rank_forecast_cninfo").is_none()
+        );
+        assert!(akshare_analyst_revision_known_endpoint_gate("stock_research_report_em").is_none());
+    }
+
+    // ── 私有 async fetch：runtime_not_configured 早退（无网络无 spawn）──
+
+    #[tokio::test]
+    async fn full_date_fetch_reports_runtime_not_configured_without_spawning() {
+        let fetch = run_akshare_analyst_revision_full_date_fetch(
+            "/nonexistent-quant-test-python",
+            "20240102",
+        )
+        .await;
+        assert_eq!(fetch["status"], "runtime_not_configured");
+        assert_eq!(fetch["scope"], "bounded_calendar_day_raw_sync");
+        assert_eq!(fetch["request_key"], "20240102");
+        assert_eq!(fetch["permission"], "unknown_or_unavailable");
+    }
+
+    #[tokio::test]
+    async fn full_date_fetch_with_retry_does_not_retry_runtime_missing() {
+        // runtime_not_configured 不属于可重试状态（仅 timeout/error 重试）→ 首次即返回
+        let (fetch, attempts) = run_akshare_analyst_revision_full_date_fetch_with_retry(
+            "/nonexistent-quant-test-python",
+            "20240102",
+        )
+        .await;
+        assert_eq!(fetch["status"], "runtime_not_configured");
+        assert_eq!(attempts, 1);
+        assert_eq!(fetch["fetch_attempts"], 1);
+        assert_eq!(
+            fetch["max_retries"],
+            AKSHARE_ANALYST_REVISION_SYNC_MAX_RETRIES
+        );
+    }
+
+    // ── build 函数：计划与审计 ──
+
+    #[tokio::test]
+    async fn sync_plan_rejects_inverted_range_and_lists_quarter_batches() {
+        let inverted = AkshareAnalystRevisionSyncPlanReq {
+            start_date: Some("20240105".into()),
+            end_date: Some("20240101".into()),
+            batch: None,
+        };
+        let error = build_akshare_analyst_revision_sync_plan(inverted)
+            .await
+            .expect_err("inverted range");
+        assert!(
+            error.contains("start_date must be <= end_date"),
+            "实际错误: {error}"
+        );
+
+        // 91 天季度窗口：1 个 Q1 批次；estimated_api_calls = 日历天数
+        let req = AkshareAnalystRevisionSyncPlanReq {
+            start_date: Some("20240101".into()),
+            end_date: Some("20240331".into()),
+            batch: Some("quarter".into()),
+        };
+        let plan = build_akshare_analyst_revision_sync_plan(req)
+            .await
+            .expect("sync plan");
+        assert_eq!(plan["batch_mode"], "quarter");
+        assert_eq!(plan["batch_count"], 1);
+        assert_eq!(plan["batches"][0]["batch"], "2024Q1");
+        assert_eq!(plan["batches"][0]["estimated_api_calls"], 91);
+        assert_eq!(plan["date_range"]["calendar_day_count"], 91);
+        assert_eq!(plan["safe_to_run_full_range"], true, "91 天 <= 100 天上限");
+        // 计划只读：明确不建版本不建任务
+        assert_eq!(
+            plan["promotion_gate"]["bounded_sync"],
+            "enabled_for_small_batches_after_schema_apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_replay_audit_reports_runtime_errors_per_date() {
+        let state = test_app_state().await;
+        // 显式 dates 走纯解析早退（不查 market_trade_calendar）；
+        // Python 运行时不存在 → 每个日期一个 runtime_not_configured error probe
+        let req = AkshareAnalystRevisionHistoryReplayAuditReq {
+            dates: vec!["20240102".to_string(), "20240103".to_string()],
+            start_year: None,
+            end_year: None,
+            limit: Some(3),
+            python: Some("/nonexistent-quant-test-python".into()),
+        };
+        let report = build_akshare_analyst_revision_history_replay_audit(&state, req)
+            .await
+            .expect("replay audit");
+        assert_eq!(report["sample_date_count"], 2);
+        assert_eq!(report["summary"]["error_date_count"], 2);
+        assert_eq!(report["summary"]["available_date_count"], 0);
+        assert_eq!(report["row_limit_per_probe"], 3);
+        assert_eq!(report["probes"][0]["status"], "runtime_not_configured");
+        assert_eq!(
+            report["decision"]["passed"], false,
+            "运行时缺失不得判定通过"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_smoke_blocks_snapshot_endpoint_without_probe() {
+        let state = test_app_state().await;
+        // 快照端点命中 known gate：无 probe 调用直接给出 blocked 结论；
+        // 显式 symbols 避免 resolve 查库
+        let req = AkshareAnalystRevisionSmokeReq {
+            sources: vec!["stock_profit_forecast_em".to_string()],
+            dates: Vec::new(),
+            symbols: vec!["000001.SZ".to_string()],
+            limit: Some(2),
+            python: Some("/nonexistent-quant-test-python".into()),
+        };
+        let report = build_akshare_analyst_revision_permission_smoke(&state, req)
+            .await
+            .expect("smoke report");
+        let sources = report["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["source"], "stock_profit_forecast_em");
+        assert_eq!(sources[0]["status"], "blocked_snapshot_not_pit_ready");
+        assert_eq!(sources[0]["probes"].as_array().map(Vec::len), Some(0));
+        assert_eq!(report["row_limit_per_probe"], 2);
+    }
+
+    #[tokio::test]
+    async fn resolve_history_dates_rejects_inverted_and_future_years() {
+        let state = test_app_state().await;
+        // start_year > end_year 纯早退（不触库）
+        let inverted = AkshareAnalystRevisionHistoryReplayAuditReq {
+            dates: Vec::new(),
+            start_year: Some(2025),
+            end_year: Some(2024),
+            limit: None,
+            python: None,
+        };
+        let error = resolve_akshare_analyst_revision_history_dates(&state, &inverted)
+            .await
+            .expect_err("inverted years");
+        assert!(
+            error.contains("start_year must be <= end_year"),
+            "实际错误: {error}"
+        );
+
+        // 未来年份拒绝（2030 恒晚于当前年份）
+        let future = AkshareAnalystRevisionHistoryReplayAuditReq {
+            dates: Vec::new(),
+            start_year: Some(2024),
+            end_year: Some(2030),
+            limit: None,
+            python: None,
+        };
+        let error = resolve_akshare_analyst_revision_history_dates(&state, &future)
+            .await
+            .expect_err("future years");
+        assert!(
+            error.contains("cannot be in the future"),
+            "实际错误: {error}"
+        );
+
+        // 显式 dates 直接委托 history_dates（同样不触库）
+        let explicit = AkshareAnalystRevisionHistoryReplayAuditReq {
+            dates: vec!["20240102".to_string()],
+            start_year: Some(2099),
+            end_year: Some(2000),
+            limit: None,
+            python: None,
+        };
+        let dates = resolve_akshare_analyst_revision_history_dates(&state, &explicit)
+            .await
+            .expect("explicit dates bypass year validation");
+        assert_eq!(dates, vec!["20240102".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn bounded_sync_rejects_background_requests_before_any_db_access() {
+        let state = test_app_state().await;
+        let req = AkshareAnalystRevisionSyncReq {
+            start_date: None,
+            end_date: None,
+            data_version_id: None,
+            python: None,
+            background: true,
+        };
+        let error = run_akshare_analyst_revision_bounded_sync(&state, req)
+            .await
+            .expect_err("background=true");
+        assert!(
+            error.contains("requires background=false"),
+            "实际错误: {error}"
+        );
+    }
+
+    // ── 连库只读审计：真实本机 PG，只 SELECT 不写入 ──
+
+    #[tokio::test]
+    async fn readiness_audit_returns_read_only_structure() {
+        let state = test_app_state().await;
+        let req = AkshareAnalystRevisionReadinessAuditReq {
+            start_date: Some("20240101".into()),
+            end_date: Some("20240102".into()),
+        };
+        let report = build_akshare_analyst_revision_readiness_audit(&state, req)
+            .await
+            .expect("readiness audit");
+        assert_eq!(
+            report["mode"],
+            "read_only_schema_raw_pit_semantics_readiness"
+        );
+        assert_eq!(report["table"], "market_vendor_analyst_revision_raw");
+        assert_eq!(report["date_range"]["start_date"], "20240101");
+        assert_eq!(report["date_range"]["end_date"], "20240102");
+        assert!(report["table_exists"].is_boolean());
+        for field in [
+            "row_count",
+            "pit_violation_rows",
+            "missing_source_published_at_rows",
+            "missing_current_rating_rows",
+            "missing_revision_semantics_rows",
+            "duplicate_key_rows",
+        ] {
+            assert!(
+                report["summary"][field].is_i64(),
+                "summary.{field} 应为整数，实际: {}",
+                report["summary"][field]
+            );
+        }
+        assert!(report["decision"].is_object());
+        assert!(!report["prohibited"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn coverage_audit_returns_read_only_structure() {
+        let state = test_app_state().await;
+        let req = AkshareAnalystRevisionCoverageAuditReq {
+            start_date: Some("20240101".into()),
+            end_date: Some("20240102".into()),
+        };
+        let report = build_akshare_analyst_revision_coverage_audit(&state, req)
+            .await
+            .expect("coverage audit");
+        assert_eq!(
+            report["audit_version"],
+            "p3.23e-akshare-analyst-revision-full-history-coverage-quality-correlation-audit-v1"
+        );
+        assert!(report["table_exists"].is_boolean());
+        assert!(report["raw_coverage"]["row_count"].is_i64());
+        assert!(report["sync_attempts"]["coverage_ratio"].is_number());
+        assert!(report["year_breakdown"].is_array());
+        assert!(report["market_breakdown"].is_array());
+        assert!(report["correlation_audit"].is_object());
+        assert!(report["decision"].is_object());
+        // 回显
+        assert_eq!(report["date_range"]["start_date"], "20240101");
+        assert_eq!(report["date_range"]["calendar_day_count"], 2);
+    }
+
+    #[tokio::test]
+    async fn broad_audit_returns_read_only_structure_and_thresholds() {
+        let state = test_app_state().await;
+        let req = BroadAnalystRevisionAuditReq {
+            start_date: Some("20240101".into()),
+            end_date: Some("20240102".into()),
+            limit: Some(5),
+        };
+        let report = build_broad_analyst_revision_audit(&state, req)
+            .await
+            .expect("broad audit");
+        assert_eq!(
+            report["mode"],
+            "read_only_full_history_coverage_available_at_revision_semantics_audit"
+        );
+        assert!(report["passed"].is_boolean());
+        assert!(report["status"].is_string());
+        assert!(report["readiness"].is_string());
+        // 阈值常量回显（mod.rs BROAD_ANALYST_REVISION_*）
+        assert_eq!(
+            report["thresholds"]["min_union_symbol_coverage_ratio"],
+            0.50
+        );
+        assert_eq!(
+            report["thresholds"]["min_forecast_symbol_coverage_ratio"],
+            0.30
+        );
+        assert_eq!(
+            report["thresholds"]["min_revised_symbol_coverage_ratio"],
+            0.30
+        );
+        assert_eq!(
+            report["thresholds"]["min_revised_symbol_period_ratio"],
+            0.15
+        );
+        assert_eq!(report["breakdown_limit"], 5);
+        assert!(report["coverage"]["source_coverage"].is_array());
+        assert!(report["blocking_reasons"].is_array());
+        assert!(report["yearly_revision_breakdown"].is_array());
+    }
+
+    #[tokio::test]
+    async fn correlation_audit_blocks_until_raw_table_exists() {
+        let state = test_app_state().await;
+        // raw 表不存在 → 早退 blocked（不查参考表）
+        let audit = build_akshare_analyst_revision_correlation_audit(
+            &state.db,
+            date(2024, 1, 1),
+            date(2024, 1, 2),
+            false,
+        )
+        .await
+        .expect("correlation audit");
+        assert_eq!(audit["status"], "blocked_until_raw_table_exists");
+        assert_eq!(
+            audit["decision"],
+            "blocked_until_correlation_sample_available"
+        );
+        assert_eq!(audit["sample_rows"], 0);
+    }
+}

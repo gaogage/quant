@@ -213,8 +213,11 @@ impl<'a> DataVersionRegistry for PgDataVersionRegistry<'a> {
         .execute(self.pool)
         .await?;
         if result.rows_affected() == 0 {
+            // 幂等分支存在性探测（2026-09-21 修复：PG 字面量 1 是 INT4，解 (i64,)
+            // 必报 ColumnDecode——已废弃版本重复废弃曾误报 Database 错而非幂等 Ok，
+            // 由覆盖率第四批测试暴露）。显式 ::int8 对齐 i64。
             let exists: Option<(i64,)> =
-                sqlx::query_as("SELECT 1 FROM data_version WHERE data_version_id = $1")
+                sqlx::query_as("SELECT 1::int8 FROM data_version WHERE data_version_id = $1")
                     .bind(version_id.as_str())
                     .fetch_optional(self.pool)
                     .await?;
@@ -249,5 +252,205 @@ impl PgDataVersionRegistry<'_> {
         .fetch_all(self.pool)
         .await?;
         Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+}
+
+#[cfg(test)]
+mod fourth_batch_tests {
+    use super::*;
+    use crate::tushare::test_support::local_pool;
+
+    // ─── 纯函数：状态语义 / Display / 错误格式 / ID 生成 ───────────
+
+    #[test]
+    fn data_version_state_referenceability_follows_active_only() {
+        assert!(!DataVersionState::Draft.is_referenceable());
+        assert!(DataVersionState::Active.is_referenceable());
+        assert!(!DataVersionState::Deprecated.is_referenceable());
+    }
+
+    #[test]
+    fn data_version_state_display_renders_snake_case() {
+        assert_eq!(DataVersionState::Draft.to_string(), "draft");
+        assert_eq!(DataVersionState::Active.to_string(), "active");
+        assert_eq!(DataVersionState::Deprecated.to_string(), "deprecated");
+    }
+
+    #[test]
+    fn registry_error_variants_render_messages() {
+        let err = DataVersionRegistryError::NotFound("dv-x".to_string());
+        assert_eq!(err.to_string(), "data version not found: dv-x");
+
+        let err = DataVersionRegistryError::InvalidState {
+            state: DataVersionState::Deprecated,
+        };
+        assert_eq!(
+            err.to_string(),
+            "version is deprecated, cannot be referenced"
+        );
+
+        // sqlx::Error 经 #[from] 自动转入 Database 变体
+        let err: DataVersionRegistryError = sqlx::Error::RowNotFound.into();
+        assert!(err.to_string().starts_with("database error:"));
+    }
+
+    #[test]
+    fn generate_version_id_uses_timestamp_shape() {
+        let id = generate_version_id();
+        let s = id.as_str();
+        // 格式 dv-{YYYYMMDD}-{HHMMSS}{3位毫秒}：前缀 + 8 位日期 + 分隔 + 9 位数字
+        let rest = s.strip_prefix("dv-").expect("dv- 前缀");
+        let (date_part, time_part) = rest.split_once('-').expect("日期/时间以 - 分隔");
+        assert_eq!(date_part.len(), 8, "8 位日期，实际 {}", date_part);
+        assert_eq!(time_part.len(), 9, "HHMMSS+3 位毫秒，实际 {}", time_part);
+        assert!(date_part.bytes().all(|b| b.is_ascii_digit()));
+        assert!(time_part.bytes().all(|b| b.is_ascii_digit()));
+        // 唯一性（毫秒位区分）：并行下两次调用可能落在同一毫秒，单对 assert_ne
+        // 偶发脆弱——改为快速连生成多次，出现至少 2 个不同值即证毫秒位参与区分
+        let mut distinct = std::collections::HashSet::new();
+        for _ in 0..2000 {
+            distinct.insert(generate_version_id().as_str().to_string());
+        }
+        assert!(distinct.len() >= 2, "2000 次生成应跨毫秒产生不同 id");
+    }
+
+    // ─── 连库：注册中心生命周期（真实本机 PG，zzz 语义键）──────────
+
+    /// 独占键：2099-12-31 远离真实 dv-eod-{交易日} 序列，精确清理
+    const ZZZ_EOD_DV: &str = "dv-eod-20991231";
+
+    #[tokio::test]
+    async fn pg_registry_register_resolve_deprecate_lifecycle() {
+        let pool = local_pool().await;
+        let zzz_date = chrono::NaiveDate::from_ymd_opt(2099, 12, 31).unwrap();
+        let _ = sqlx::query("DELETE FROM data_version WHERE data_version_id = $1")
+            .bind(ZZZ_EOD_DV)
+            .execute(&pool)
+            .await;
+
+        let reg = PgDataVersionRegistry::new(&pool);
+
+        // 注册 → Active；重复注册幂等（同 ID ON CONFLICT DO NOTHING）
+        let id = reg
+            .register_version(zzz_date, "tushare", Some("第四批测试版本"))
+            .await
+            .expect("注册应成功");
+        assert_eq!(id.as_str(), ZZZ_EOD_DV);
+        reg.register_version(zzz_date, "tushare", None)
+            .await
+            .expect("重复注册应幂等");
+
+        assert_eq!(
+            reg.resolve_state(&id).await.expect("解析状态"),
+            DataVersionState::Active
+        );
+        assert!(reg.resolve_state(&id).await.unwrap().is_referenceable());
+
+        // 废弃 → Deprecated；重复废弃幂等
+        reg.deprecate(&id).await.expect("废弃应成功");
+        assert_eq!(
+            reg.resolve_state(&id).await.expect("解析状态 2"),
+            DataVersionState::Deprecated
+        );
+        reg.deprecate(&id).await.expect("重复废弃应幂等");
+
+        // 未注册 dv_id → NotFound
+        let missing = DataVersionId::new("dv-eod-20991231-not-exist");
+        match reg.resolve_state(&missing).await {
+            Err(DataVersionRegistryError::NotFound(dv)) => assert_eq!(dv, missing.as_str()),
+            other => panic!("应报 NotFound，实际 {:?}", other.map(|_| ())),
+        }
+        // 废弃未注册 dv_id → NotFound（而非静默成功）
+        match reg.deprecate(&missing).await {
+            Err(DataVersionRegistryError::NotFound(_)) => {}
+            other => panic!("deprecate 未注册版本应报 NotFound，实际 {:?}", other),
+        }
+
+        let _ = sqlx::query("DELETE FROM data_version WHERE data_version_id = $1")
+            .bind(ZZZ_EOD_DV)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn pg_registry_verify_registered_and_latest_eod() {
+        let pool = local_pool().await;
+        const ZZZ_V1: &str = "zzz-test-dv-vr1";
+        const ZZZ_V2: &str = "zzz-test-dv-vr2";
+        for dv in [ZZZ_V1, ZZZ_V2] {
+            let _ = sqlx::query("DELETE FROM data_version WHERE data_version_id = $1")
+                .bind(dv)
+                .execute(&pool)
+                .await;
+        }
+
+        let reg = PgDataVersionRegistry::new(&pool);
+
+        // 空入参短路：不查库直接返回空集
+        assert!(reg.verify_registered(&[]).await.unwrap().is_empty());
+
+        let span = (
+            chrono::NaiveDate::from_ymd_opt(2099, 1, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2099, 12, 31).unwrap(),
+        );
+        // create_version 幂等：同 dv_id 连续两次均 Ok
+        reg.create_version(
+            ZZZ_V1,
+            "活跃版本",
+            "tushare",
+            &["market_stock"],
+            span.0,
+            span.1,
+        )
+        .await
+        .expect("创建 v1");
+        reg.create_version(
+            ZZZ_V1,
+            "活跃版本",
+            "tushare",
+            &["market_stock"],
+            span.0,
+            span.1,
+        )
+        .await
+        .expect("重复创建 v1 幂等");
+        reg.create_version(
+            ZZZ_V2,
+            "待废弃版本",
+            "tushare",
+            &["market_stock"],
+            span.0,
+            span.1,
+        )
+        .await
+        .expect("创建 v2");
+        reg.deprecate(&DataVersionId::new(ZZZ_V2))
+            .await
+            .expect("废弃 v2");
+
+        // 批量校验：只返回 active 子集，deprecated 与未注册均被过滤
+        let ids = vec![
+            ZZZ_V1.to_string(),
+            ZZZ_V2.to_string(),
+            "zzz-test-dv-none".to_string(),
+        ];
+        let verified = reg.verify_registered(&ids).await.expect("批量校验");
+        assert_eq!(verified.len(), 1);
+        assert!(verified.contains(ZZZ_V1));
+
+        // latest_eod_version_id：有 dv-eod-* 取最新，无则回退研究基线
+        let latest = reg.latest_eod_version_id().await;
+        assert!(
+            latest == "research-full-2016-2026-20260515" || latest.starts_with("dv-eod-"),
+            "应返回基线或 dv-eod 前缀，实际 {}",
+            latest
+        );
+
+        for dv in [ZZZ_V1, ZZZ_V2] {
+            let _ = sqlx::query("DELETE FROM data_version WHERE data_version_id = $1")
+                .bind(dv)
+                .execute(&pool)
+                .await;
+        }
     }
 }

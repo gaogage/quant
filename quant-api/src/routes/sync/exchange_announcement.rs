@@ -547,8 +547,32 @@ pub(crate) fn exchange_announcement_order_capacity_validate_bounded_window(
     Ok(())
 }
 
+/// 仅解 %XX 转义、不动 `+`（时间戳解析专用，2026-09-21 修复）。
+/// 表单编码版 decode（cninfo_percent_decode）把 `+` 转空格——查询参数上下文
+/// 正确，但喂给 RFC3339 解析会破坏正时区 offset（`+08:00` → ` 08:00`），
+/// 导致带正 offset 的时间戳从未解析成功（中国主场景全部命中此 bug，
+/// 由覆盖率第四批测试暴露）。
+fn cninfo_percent_decode_strict(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = &value[index + 1..index + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                decoded.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
+}
+
 pub(crate) fn parse_exchange_announcement_date(value: &str) -> Option<NaiveDate> {
-    let decoded = cninfo_percent_decode(value);
+    let decoded = cninfo_percent_decode_strict(value);
     let trimmed = decoded.trim();
     NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(trimmed, "%Y%m%d"))
@@ -577,7 +601,7 @@ fn parse_exchange_announcement_local_datetime(value: &str) -> Option<NaiveDateTi
 }
 
 pub(crate) fn parse_exchange_announcement_timestamp(value: &str) -> Option<DateTime<Utc>> {
-    let decoded = cninfo_percent_decode(value);
+    let decoded = cninfo_percent_decode_strict(value);
     let trimmed = decoded.trim();
     DateTime::parse_from_rfc3339(trimmed)
         .ok()
@@ -4748,4 +4772,1023 @@ async fn build_exchange_announcement_order_capacity_ocr_blocked_row_audit(
             "factor_builder, P3.10, bounded WFA and v19 remain blocked"
         ],
     }))
+}
+
+// ── 第四批覆盖率测试：公告 OCR/审计域纯函数、决策函数与只读审计路径 ──
+// 模式沿用 phase7_audit.rs third_batch：inner 直调，跳过 axum HTTP 层；
+// 外部 Python/OCR 运行时统一用不存在的路径触发 runtime_not_configured 早退，无网络无 spawn。
+#[cfg(test)]
+mod fourth_batch {
+    use super::*;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+    }
+
+    /// 构造真实本机 PG 连接（DATABASE_URL 缺省 postgres://gaocheng@localhost/quant）。
+    /// Tushare 客户端经 dotenv 加载 quant/.env 中的 TUSHARE_TOKEN（cargo test cwd=quant-api 向上查找）。
+    async fn test_app_state() -> crate::AppState {
+        dotenv::dotenv().ok();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        crate::AppState {
+            start_time: Utc::now(),
+            db,
+            tushare: quant_data::tushare::client::TushareClient::from_env()
+                .expect("Tushare client init（dotenv 加载 quant/.env 后需 TUSHARE_TOKEN）"),
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        }
+    }
+
+    /// 构造元数据完整的 cninfo 公告链接（四要素齐全，metadata_complete=true）。
+    fn complete_cninfo_link(announcement_id: &str) -> String {
+        format!(
+            "http://static.cninfo.com.cn/finalpage/2024-01-02/{announcement_id}.PDF\
+             ?announcementId={announcement_id}&orgId=gssz0600001&stockCode=600000\
+             &announcementTime=2024-01-02"
+        )
+    }
+
+    // ── 纯函数：符号/CSV/类别/行数限制归一化 ──
+
+    #[test]
+    fn order_capacity_symbol_strips_exchange_suffix_and_trims() {
+        // split('.') 取第一段；先 trim
+        assert_eq!(
+            exchange_announcement_order_capacity_symbol(" 600000.SH "),
+            "600000"
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_symbol("000001"),
+            "000001"
+        );
+        // 无小数点时 unwrap_or 兜底返回 trim 后原值
+        assert_eq!(
+            exchange_announcement_order_capacity_symbol(" 300750.SZ "),
+            "300750"
+        );
+    }
+
+    #[test]
+    fn order_capacity_symbols_normalizes_dedupes_and_caps_at_five() {
+        let normalized = exchange_announcement_order_capacity_symbols(&[
+            "600000.SH".to_string(),
+            "600000".to_string(),
+            " 000001.SZ ".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+        ]);
+        assert_eq!(normalized, vec!["600000".to_string(), "000001".to_string()]);
+
+        // 上限 5 个（EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_MAX_SYMBOLS），超出截断
+        let six: Vec<String> = ["1", "2", "3", "4", "5", "6"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(exchange_announcement_order_capacity_symbols(&six).len(), 5);
+    }
+
+    #[test]
+    fn order_capacity_csv_values_splits_trims_and_drops_empty() {
+        assert_eq!(
+            exchange_announcement_order_capacity_csv_values(Some("600000, 000001 ,,300750".into())),
+            vec![
+                "600000".to_string(),
+                "000001".to_string(),
+                "300750".to_string()
+            ]
+        );
+        assert!(exchange_announcement_order_capacity_csv_values(None).is_empty());
+        assert!(exchange_announcement_order_capacity_csv_values(Some(" , ".into())).is_empty());
+    }
+
+    #[test]
+    fn order_capacity_categories_defaults_to_four_and_dedupes() {
+        // 空入参 → 默认四类
+        assert_eq!(
+            exchange_announcement_order_capacity_categories(&[]),
+            vec![
+                "日常经营".to_string(),
+                "重大事项".to_string(),
+                "股权激励".to_string(),
+                "并购重组".to_string(),
+            ]
+        );
+        // 非空入参：trim + 去重 + 去空
+        assert_eq!(
+            exchange_announcement_order_capacity_categories(&[
+                "日常经营".to_string(),
+                " 日常经营 ".to_string(),
+                "".to_string(),
+                "并购重组".to_string(),
+            ]),
+            vec!["日常经营".to_string(), "并购重组".to_string()]
+        );
+        // 上限 6 类
+        let many: Vec<String> = ["a", "b", "c", "d", "e", "f", "g"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            exchange_announcement_order_capacity_categories(&many).len(),
+            6
+        );
+    }
+
+    #[test]
+    fn order_capacity_row_limit_defaults_to_five_and_clamps_to_max_twenty() {
+        assert_eq!(exchange_announcement_order_capacity_row_limit(None), 5);
+        assert_eq!(exchange_announcement_order_capacity_row_limit(Some(0)), 1);
+        assert_eq!(exchange_announcement_order_capacity_row_limit(Some(7)), 7);
+        assert_eq!(
+            exchange_announcement_order_capacity_row_limit(Some(999)),
+            20
+        );
+    }
+
+    #[test]
+    fn order_capacity_detail_links_trims_dedupes_and_clamps() {
+        assert_eq!(
+            exchange_announcement_order_capacity_detail_links(
+                &[
+                    " http://a ".to_string(),
+                    "http://a".to_string(),
+                    "".to_string()
+                ],
+                None
+            ),
+            vec!["http://a".to_string()]
+        );
+        // limit clamp [1, 20]，默认 5
+        let links: Vec<String> = (0..30).map(|i| format!("http://l{i}")).collect();
+        assert_eq!(
+            exchange_announcement_order_capacity_detail_links(&links, None).len(),
+            5
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_detail_links(&links, Some(0)).len(),
+            1
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_detail_links(&links, Some(50)).len(),
+            20
+        );
+    }
+
+    // ── 纯函数：cninfo 链接解析 / 百分号解码 ──
+
+    #[test]
+    fn cninfo_percent_decode_decodes_hex_and_plus_and_keeps_invalid() {
+        // 标准 URL 编码的 UTF-8 中文
+        assert_eq!(cninfo_percent_decode("%E4%B8%AD%E6%96%87"), "中文");
+        // '+' 解码为空格
+        assert_eq!(cninfo_percent_decode("a+b"), "a b");
+        // 非法十六进制序列原样保留
+        assert_eq!(cninfo_percent_decode("%ZZ"), "%ZZ");
+        // 尾部截断的 % 不消费后续字符
+        assert_eq!(cninfo_percent_decode("100%"), "100%");
+    }
+
+    #[test]
+    fn cninfo_query_param_returns_decoded_first_match() {
+        let link = "http://x/?announcementId=12345&orgId=gssz0001&note=a%20b";
+        assert_eq!(
+            cninfo_query_param(link, "announcementId"),
+            Some("12345".to_string())
+        );
+        assert_eq!(
+            cninfo_query_param(link, "orgId"),
+            Some("gssz0001".to_string())
+        );
+        // 值做百分号解码
+        assert_eq!(cninfo_query_param(link, "note"), Some("a b".to_string()));
+        // 键不存在 / 值为空 → None
+        assert_eq!(cninfo_query_param(link, "missing"), None);
+        assert_eq!(
+            cninfo_query_param("http://x/?k=", "k"),
+            None,
+            "空值 trim 后为空应返回 None"
+        );
+        // 无查询串 → None
+        assert_eq!(cninfo_query_param("http://x/path", "k"), None);
+    }
+
+    #[test]
+    fn cninfo_announcement_id_from_path_strips_pdf_suffix() {
+        assert_eq!(
+            cninfo_announcement_id_from_path(
+                "http://static.cninfo.com.cn/finalpage/2024-01-02/121399.PDF"
+            ),
+            Some("121399".to_string())
+        );
+        assert_eq!(
+            cninfo_announcement_id_from_path("http://x/abc.pdf"),
+            Some("abc".to_string())
+        );
+        // 无后缀取文件名本身
+        assert_eq!(
+            cninfo_announcement_id_from_path("http://x/dir/xyz987"),
+            Some("xyz987".to_string())
+        );
+        // 路径末尾为空文件名 → None
+        assert_eq!(cninfo_announcement_id_from_path("http://x/dir/"), None);
+    }
+
+    // ── 纯函数：日期/时间戳解析 ──
+
+    #[test]
+    fn parse_announcement_date_accepts_common_and_urlencoded_formats() {
+        assert_eq!(
+            parse_exchange_announcement_date("2024-01-02"),
+            Some(date(2024, 1, 2))
+        );
+        assert_eq!(
+            parse_exchange_announcement_date("20240102"),
+            Some(date(2024, 1, 2))
+        );
+        assert_eq!(
+            parse_exchange_announcement_date("2024/01/02"),
+            Some(date(2024, 1, 2))
+        );
+        // RFC3339
+        assert_eq!(
+            parse_exchange_announcement_date("2024-01-02T08:30:00+08:00"),
+            Some(date(2024, 1, 2))
+        );
+        // URL 编码后的本地日期时间（%20 → 空格，再走本地 datetime 分支取 date）
+        assert_eq!(
+            parse_exchange_announcement_date("2024-01-02%2008:30:00"),
+            Some(date(2024, 1, 2))
+        );
+        assert_eq!(parse_exchange_announcement_date("not-a-date"), None);
+        assert_eq!(parse_exchange_announcement_date(""), None);
+    }
+
+    #[test]
+    fn parse_announcement_local_datetime_supports_dash_slash_and_cn_formats() {
+        let expected = NaiveDate::from_ymd_opt(2024, 1, 2)
+            .unwrap()
+            .and_hms_opt(8, 30, 0)
+            .unwrap();
+        assert_eq!(
+            parse_exchange_announcement_local_datetime("2024-01-02 08:30:00"),
+            Some(expected)
+        );
+        // 'T' 分隔符被替换为空格
+        assert_eq!(
+            parse_exchange_announcement_local_datetime("2024-01-02T08:30"),
+            NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(8, 30, 0)
+        );
+        assert_eq!(
+            parse_exchange_announcement_local_datetime("2024/01/02 08:30:00"),
+            Some(expected)
+        );
+        assert_eq!(
+            parse_exchange_announcement_local_datetime("2024年01月02日 08:30"),
+            NaiveDate::from_ymd_opt(2024, 1, 2)
+                .unwrap()
+                .and_hms_opt(8, 30, 0)
+        );
+        assert_eq!(
+            parse_exchange_announcement_local_datetime("2024-01-02"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_announcement_timestamp_converts_shanghai_local_to_utc() {
+        // RFC3339 带时区优先：+08:00 → UTC 00:30
+        let rfc = parse_exchange_announcement_timestamp("2024-01-02T08:30:00+08:00").unwrap();
+        assert_eq!(rfc.to_rfc3339(), "2024-01-02T00:30:00+00:00");
+        // 无时区本地时间按上海 -8h（2024-01-02 08:30 本地 → 00:30Z）
+        let local = parse_exchange_announcement_timestamp("2024-01-02 08:30:00").unwrap();
+        assert_eq!(local.to_rfc3339(), "2024-01-02T00:30:00+00:00");
+        assert_eq!(parse_exchange_announcement_timestamp("invalid"), None);
+    }
+
+    #[test]
+    fn next_open_date_picks_first_later_open_date_else_next_day() {
+        let opens = vec![date(2024, 1, 8), date(2024, 1, 9)];
+        assert_eq!(
+            exchange_announcement_next_open_date(date(2024, 1, 5), &opens),
+            date(2024, 1, 8)
+        );
+        // 无更晚开市日 → 公告日 +1
+        assert_eq!(
+            exchange_announcement_next_open_date(date(2024, 1, 10), &opens),
+            date(2024, 1, 11)
+        );
+        // 空开市列表同样回退 +1
+        assert_eq!(
+            exchange_announcement_next_open_date(date(2024, 1, 10), &[]),
+            date(2024, 1, 11)
+        );
+    }
+
+    // ── 纯决策函数 ──
+
+    #[test]
+    fn event_type_from_spans_prefers_order_then_capacity_then_price() {
+        let spans = |themes: &[&str]| {
+            json!(themes
+                .iter()
+                .map(|theme| json!({ "theme": theme }))
+                .collect::<Vec<_>>())
+        };
+        assert_eq!(
+            exchange_announcement_event_type_from_spans(&spans(&["order_contract", "capacity"])),
+            Some("order_or_contract_signed".to_string())
+        );
+        assert_eq!(
+            exchange_announcement_event_type_from_spans(&spans(&["capacity"])),
+            Some("capacity_expansion_or_commissioning".to_string())
+        );
+        assert_eq!(
+            exchange_announcement_event_type_from_spans(&spans(&["price"])),
+            Some("product_price_adjustment".to_string())
+        );
+        assert_eq!(
+            exchange_announcement_event_type_from_spans(&spans(&["other"])),
+            None
+        );
+        assert_eq!(
+            exchange_announcement_event_type_from_spans(&json!([])),
+            None
+        );
+        // 非数组 → None
+        assert_eq!(
+            exchange_announcement_event_type_from_spans(&json!({})),
+            None
+        );
+    }
+
+    #[test]
+    fn pdf_parse_status_maps_probe_status_to_landing_status() {
+        let status =
+            |value: &str| exchange_announcement_pdf_parse_status(&json!({ "status": value }));
+        assert_eq!(status("ok"), "ok");
+        assert_eq!(
+            status("scanned_pdf_ocr_required"),
+            "scanned_pdf_ocr_required"
+        );
+        assert_eq!(status("pdf_parse_empty"), "pdf_parse_empty");
+        assert_eq!(status("not_pdf_after_redirect"), "error");
+        assert_eq!(status("error"), "error");
+        assert_eq!(status("timeout"), "error");
+        assert_eq!(status("runtime_not_configured"), "error");
+        assert_eq!(status("incomplete_link_metadata"), "error");
+        assert_eq!(status("anything_else"), "pending_manual_review");
+        // 缺 status 字段 → pending_manual_review
+        assert_eq!(
+            exchange_announcement_pdf_parse_status(&json!({})),
+            "pending_manual_review"
+        );
+    }
+
+    #[test]
+    fn json_path_accessors_extract_or_default() {
+        let payload = json!({
+            "summary": { "row_count": 7, "ratio": 1.5, "items": [1, 2, 3] }
+        });
+        assert_eq!(
+            exchange_announcement_order_capacity_json_path_i64(&payload, &["summary", "row_count"]),
+            7
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_json_path_i64(&payload, &["missing", "x"]),
+            0
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_json_path_f64(&payload, &["summary", "ratio"]),
+            Some(1.5)
+        );
+        // 字符串数字不做隐式转换
+        assert_eq!(
+            exchange_announcement_order_capacity_json_path_f64(&json!({ "v": "1.5" }), &["v"]),
+            None
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_array_len(&payload["summary"], "items"),
+            3
+        );
+        assert_eq!(
+            exchange_announcement_order_capacity_array_len(&payload["summary"], "missing"),
+            0
+        );
+    }
+
+    // ── 纯函数：切片与批次窗口 ──
+
+    #[test]
+    fn tiny_slices_chunk_calendar_days_by_max_three() {
+        let slices =
+            exchange_announcement_order_capacity_tiny_slices(date(2024, 1, 1), date(2024, 1, 7));
+        assert_eq!(slices.len(), 3);
+        assert_eq!(slices[0].label, "20240101-20240103");
+        assert_eq!(slices[0].calendar_day_count, 3);
+        assert_eq!(slices[1].start_date, date(2024, 1, 4));
+        assert_eq!(slices[1].end_date, date(2024, 1, 6));
+        // 尾部不足 3 天单独成片
+        assert_eq!(slices[2].start_date, date(2024, 1, 7));
+        assert_eq!(slices[2].end_date, date(2024, 1, 7));
+        assert_eq!(slices[2].calendar_day_count, 1);
+
+        // 恰好 3 天 → 单片
+        let single =
+            exchange_announcement_order_capacity_tiny_slices(date(2024, 2, 1), date(2024, 2, 3));
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].calendar_day_count, 3);
+    }
+
+    #[test]
+    fn validate_bounded_window_enforces_single_month_or_quarter() {
+        assert!(
+            exchange_announcement_order_capacity_validate_bounded_window(
+                date(2024, 1, 1),
+                date(2024, 1, 31),
+                "month"
+            )
+            .is_ok()
+        );
+        // 跨月拒绝
+        assert!(
+            exchange_announcement_order_capacity_validate_bounded_window(
+                date(2024, 1, 1),
+                date(2024, 2, 1),
+                "month"
+            )
+            .is_err()
+        );
+        assert!(
+            exchange_announcement_order_capacity_validate_bounded_window(
+                date(2024, 1, 1),
+                date(2024, 3, 31),
+                "quarter"
+            )
+            .is_ok()
+        );
+        // 跨季拒绝（Q1 → Q2）
+        assert!(
+            exchange_announcement_order_capacity_validate_bounded_window(
+                date(2024, 1, 1),
+                date(2024, 4, 30),
+                "quarter"
+            )
+            .is_err()
+        );
+        // 未知 batch 模式拒绝
+        assert!(
+            exchange_announcement_order_capacity_validate_bounded_window(
+                date(2024, 1, 1),
+                date(2024, 1, 31),
+                "week"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sync_plan_batches_reuses_analyst_revision_batch_labels() {
+        // 年批次：整年一片，label 为年份
+        let year_batches = exchange_announcement_order_capacity_sync_plan_batches(
+            date(2024, 1, 1),
+            date(2024, 12, 31),
+            "year",
+        )
+        .expect("year batches");
+        assert_eq!(year_batches.len(), 1);
+        assert_eq!(year_batches[0].label, "2024");
+        assert_eq!(year_batches[0].calendar_day_count, 366);
+
+        // 月批次：一年 12 片
+        let month_batches = exchange_announcement_order_capacity_sync_plan_batches(
+            date(2024, 1, 1),
+            date(2024, 12, 31),
+            "month",
+        )
+        .expect("month batches");
+        assert_eq!(month_batches.len(), 12);
+        assert_eq!(month_batches[0].label, "202401");
+
+        // 错误文案做了前缀替换（AkShare → exchange announcement）
+        let error = exchange_announcement_order_capacity_sync_plan_batches(
+            date(2024, 1, 1),
+            date(2024, 1, 31),
+            "invalid",
+        )
+        .expect_err("invalid batch mode");
+        assert!(
+            error.contains("exchange announcement order capacity sync-plan"),
+            "实际错误: {error}"
+        );
+    }
+
+    #[test]
+    fn pdf_audit_python_path_prefers_explicit_request() {
+        // 显式请求优先于环境变量
+        assert_eq!(
+            exchange_announcement_order_capacity_pdf_audit_python_path(Some(
+                "/custom/pdf-python".into()
+            )),
+            "/custom/pdf-python"
+        );
+        // 空白请求回退（环境或默认），仅断言非空，避免依赖测试环境的 QUANT_PDF_AUDIT_PYTHON
+        let fallback =
+            exchange_announcement_order_capacity_pdf_audit_python_path(Some("   ".into()));
+        assert!(!fallback.is_empty());
+    }
+
+    #[test]
+    fn smoke_date_range_validates_order_and_defaults_to_one_year_window() {
+        let empty_req = ExchangeAnnouncementOrderCapacitySmokeReq {
+            symbols: Vec::new(),
+            categories: Vec::new(),
+            market: None,
+            start_date: None,
+            end_date: None,
+            limit: None,
+            python: None,
+        };
+        // start > end 拒绝
+        let inverted = ExchangeAnnouncementOrderCapacitySmokeReq {
+            start_date: Some("20240105".into()),
+            end_date: Some("20240101".into()),
+            ..empty_req.clone()
+        };
+        assert!(exchange_announcement_order_capacity_date_range(&inverted).is_err());
+
+        // 非法格式拒绝（parse_optional_date 要求 YYYYMMDD）
+        let malformed = ExchangeAnnouncementOrderCapacitySmokeReq {
+            start_date: Some("2024-01-05".into()),
+            end_date: Some("20240110".into()),
+            ..empty_req.clone()
+        };
+        assert!(exchange_announcement_order_capacity_date_range(&malformed).is_err());
+
+        // 缺省：start=今天-365，end=今天，且 start <= end
+        let (start, end) =
+            exchange_announcement_order_capacity_date_range(&empty_req).expect("default range");
+        assert_eq!(start.len(), 8);
+        assert_eq!(end.len(), 8);
+        assert!(start <= end);
+    }
+
+    // ── 私有纯函数：probe 汇总与元数据附加 ──
+
+    #[test]
+    fn summarize_pdf_detail_probes_counts_each_status_bucket() {
+        let probes = vec![
+            // ok + 稳定哈希 + timestamp 质量 + 证据 span
+            json!({
+                "status": "ok",
+                "hash_stable": true,
+                "text_hash": "abc",
+                "source_published_at_quality": "timestamp",
+                "evidence_spans": [{ "theme": "order_contract" }],
+            }),
+            // ok + date_only_next_session 质量（无哈希）
+            json!({
+                "status": "ok",
+                "source_published_at_quality": "date_only_next_session",
+            }),
+            // 扫描件需 OCR
+            json!({ "status": "scanned_pdf_ocr_required" }),
+            // 链接元数据缺失（按 status 统计）
+            json!({ "status": "incomplete_link_metadata" }),
+            // 链接元数据缺失（按 metadata_complete=false 统计）
+            json!({
+                "status": "ok",
+                "link_metadata": { "metadata_complete": false },
+            }),
+            // 运行时未配置
+            json!({ "status": "runtime_not_configured" }),
+        ];
+        let summary = summarize_exchange_announcement_pdf_detail_probes(&probes);
+        assert_eq!(summary.parsed_pdf_count, 3);
+        assert_eq!(summary.stable_hash_count, 1);
+        assert_eq!(summary.timestamp_count, 1);
+        assert_eq!(summary.next_session_policy_count, 1);
+        assert_eq!(summary.availability_count, 2);
+        assert_eq!(summary.evidence_span_count, 1);
+        assert_eq!(summary.incomplete_link_metadata_count, 2);
+        assert_eq!(summary.scanned_pdf_count, 1);
+        assert_eq!(summary.runtime_not_configured_count, 1);
+    }
+
+    #[test]
+    fn summarize_ocr_blocked_row_probes_counts_each_status_bucket() {
+        let probes = vec![
+            // 完整 ok：OCR 文本 + 哈希 + 可用性 + 质量 + span
+            json!({
+                "status": "ok",
+                "ocr_text_length": 120,
+                "hash_stable": true,
+                "ocr_text_hash": "abc",
+                "source_published_at_quality": "timestamp",
+                "available_at": "2024-01-03",
+                "ocr_quality": { "status": "passed" },
+                "evidence_spans": [{ "theme": "capacity" }],
+            }),
+            // ok 但无证据 span（缺字段按空处理）→ no_target_span
+            json!({ "status": "ok" }),
+            // ok + date_only_next_session 质量 + available_at
+            json!({
+                "status": "ok",
+                "source_published_at_quality": "date_only_next_session",
+                "available_at": "2024-01-03",
+            }),
+            // OCR 运行时缺失（两种状态都计入）
+            json!({ "status": "ocr_runtime_not_configured" }),
+            json!({ "status": "ocr_dependency_missing" }),
+            // OCR 执行错误（error/timeout/ocr_error/pdf_fetch_error）
+            json!({ "status": "ocr_error" }),
+            json!({ "status": "pdf_fetch_error" }),
+            // 原始 PDF 链接缺失
+            json!({ "status": "incomplete_raw_pdf_link" }),
+        ];
+        let summary = summarize_exchange_announcement_ocr_blocked_row_probes(&probes);
+        assert_eq!(summary.ocr_text_count, 1);
+        assert_eq!(summary.stable_hash_count, 1);
+        assert_eq!(summary.availability_count, 2);
+        assert_eq!(summary.quality_pass_count, 1);
+        assert_eq!(summary.evidence_span_count, 1);
+        assert_eq!(summary.runtime_missing_count, 2);
+        assert_eq!(summary.ocr_error_count, 2);
+        assert_eq!(summary.no_target_span_count, 2);
+        assert_eq!(summary.incomplete_raw_link_count, 1);
+    }
+
+    #[test]
+    fn attach_link_metadata_enriches_payload_with_sample_counts() {
+        let complete = complete_cninfo_link("121399");
+        let payload = json!({
+            "sample_rows": [
+                { "公告链接": complete },
+                { "公告链接": "http://broken/link-without-query" },
+                { "其它字段": "无公告链接的行被跳过" },
+            ]
+        });
+        let enriched = attach_exchange_announcement_link_metadata(payload);
+        let metadata = enriched["link_metadata_sample"].as_array().unwrap();
+        assert_eq!(metadata.len(), 2);
+        assert!(metadata[0]["metadata_complete"].as_bool().unwrap());
+        assert!(!metadata[1]["metadata_complete"].as_bool().unwrap());
+        assert_eq!(enriched["complete_link_metadata_sample_rows"], 1);
+        assert_eq!(enriched["incomplete_link_metadata_sample_rows"], 1);
+
+        // 非 object payload 原样返回（无字段可插入）
+        let array_payload = json!([1, 2]);
+        assert_eq!(
+            attach_exchange_announcement_link_metadata(array_payload),
+            json!([1, 2])
+        );
+    }
+
+    #[test]
+    fn operator_evidence_forbidden_keys_cover_secret_and_leak_names() {
+        let keys = cninfo_operator_evidence_forbidden_keys();
+        assert_eq!(keys.len(), 13);
+        for expected in [
+            "api_token",
+            "password",
+            "cookie",
+            "authorization",
+            "secret",
+            "token",
+            "raw_payload",
+            "oos_performance_label",
+        ] {
+            assert!(keys.contains(&expected), "缺少禁用键: {expected}");
+        }
+    }
+
+    // ── 私有 async probe：不完整链接 / 缺失运行时早退（无网络无 spawn）──
+
+    #[tokio::test]
+    async fn detail_probe_short_circuits_on_incomplete_link_metadata() {
+        // 无查询串且路径末段为空 → announcementId 无 path 兜底，四项元数据全缺
+        let probe =
+            run_exchange_announcement_detail_probe("/nonexistent-quant-test-python", "http://x/")
+                .await;
+        assert_eq!(probe["status"], "incomplete_link_metadata");
+        assert_eq!(probe["permission"], "unknown_or_unavailable");
+        let missing = probe["link_metadata"]["missing_fields"].as_array().unwrap();
+        assert_eq!(missing.len(), 4, "四项元数据全缺");
+    }
+
+    #[tokio::test]
+    async fn detail_probe_reports_runtime_not_configured_for_complete_link() {
+        let probe = run_exchange_announcement_detail_probe(
+            "/nonexistent-quant-test-python",
+            &complete_cninfo_link("121399"),
+        )
+        .await;
+        // 元数据完整但 Python 运行时缺失 → runtime_not_configured（不 spawn）
+        assert_eq!(probe["status"], "runtime_not_configured");
+        assert_eq!(probe["python"], "/nonexistent-quant-test-python");
+        assert!(probe["link_metadata"]["metadata_complete"]
+            .as_bool()
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn pdf_detail_probe_reports_runtime_not_configured_for_complete_link() {
+        let probe = run_exchange_announcement_pdf_detail_probe(
+            "/nonexistent-quant-test-python",
+            &complete_cninfo_link("121399"),
+        )
+        .await;
+        assert_eq!(probe["status"], "runtime_not_configured");
+        assert!(probe["link_metadata"]["metadata_complete"]
+            .as_bool()
+            .unwrap());
+
+        // 不完整链接同样短路
+        let incomplete = run_exchange_announcement_pdf_detail_probe(
+            "/nonexistent-quant-test-python",
+            "http://x/bare",
+        )
+        .await;
+        assert_eq!(incomplete["status"], "incomplete_link_metadata");
+    }
+
+    #[tokio::test]
+    async fn ocr_blocked_row_probe_short_circuits_without_link_or_runtime() {
+        // 行内无任何 PDF 链接 → incomplete_raw_pdf_link
+        let no_link = run_exchange_announcement_ocr_blocked_row_probe(
+            "/nonexistent-quant-test-python",
+            json!({ "symbol": "600000" }),
+        )
+        .await;
+        assert_eq!(no_link["status"], "incomplete_raw_pdf_link");
+
+        // 有链接但运行时缺失 → ocr_runtime_not_configured
+        let runtime_missing = run_exchange_announcement_ocr_blocked_row_probe(
+            "/nonexistent-quant-test-python",
+            json!({ "pdf_final_url": "http://x/a.pdf" }),
+        )
+        .await;
+        assert_eq!(runtime_missing["status"], "ocr_runtime_not_configured");
+        assert_eq!(runtime_missing["pdf_url"], "http://x/a.pdf");
+    }
+
+    #[tokio::test]
+    async fn pdf_parser_probe_reports_missing_runtime_without_spawning() {
+        let checks = probe_exchange_announcement_order_capacity_pdf_parsers(
+            "/nonexistent-quant-test-python",
+        )
+        .await;
+        // 早退：pdftotext 二进制检查 + python_runtime 检查，共 2 项
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0]["tool"], "pdftotext");
+        assert_eq!(checks[1]["tool"], "python_runtime");
+        assert_eq!(checks[1]["available"], false);
+        assert_eq!(checks[1]["python"], "/nonexistent-quant-test-python");
+    }
+
+    // ── build 函数：拒绝分支与 runtime_not_configured 全路径 ──
+
+    #[tokio::test]
+    async fn build_detail_audit_rejects_empty_links() {
+        let req = ExchangeAnnouncementOrderCapacityDetailAuditReq {
+            announcement_links: Vec::new(),
+            limit: None,
+            python: None,
+        };
+        let error = build_exchange_announcement_order_capacity_detail_audit(req)
+            .await
+            .expect_err("empty links");
+        assert!(
+            error.contains("requires at least one announcement link"),
+            "实际错误: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_pdf_detail_audit_rejects_empty_links() {
+        let req = ExchangeAnnouncementOrderCapacityPdfDetailAuditReq {
+            announcement_links: Vec::new(),
+            limit: None,
+            python: None,
+        };
+        let error = build_exchange_announcement_order_capacity_pdf_detail_audit(req)
+            .await
+            .expect_err("empty links");
+        assert!(
+            error.contains("requires at least one announcement link"),
+            "实际错误: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_detail_audit_walks_runtime_not_configured_path() {
+        // 完整链接 + 不存在的 Python：probe 返回 runtime_not_configured，
+        // 汇总与决策完整走通（无网络、无 spawn）
+        let req = ExchangeAnnouncementOrderCapacityDetailAuditReq {
+            announcement_links: vec![complete_cninfo_link("121399")],
+            limit: Some(1),
+            python: Some("/nonexistent-quant-test-python".into()),
+        };
+        let report = build_exchange_announcement_order_capacity_detail_audit(req)
+            .await
+            .expect("detail audit report");
+        assert_eq!(report["summary"]["probe_count"], 1);
+        assert_eq!(report["probes"][0]["status"], "runtime_not_configured");
+        // fetched_text_count(0) < total_links(1) → 文本抓取不完整
+        assert_eq!(
+            report["decision"]["admission_decision"],
+            "blocked_detail_text_fetch_incomplete"
+        );
+        assert_eq!(report["write_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn build_pdf_detail_audit_walks_runtime_not_configured_path() {
+        let req = ExchangeAnnouncementOrderCapacityPdfDetailAuditReq {
+            announcement_links: vec![complete_cninfo_link("121399")],
+            limit: Some(1),
+            python: Some("/nonexistent-quant-test-python".into()),
+        };
+        let report = build_exchange_announcement_order_capacity_pdf_detail_audit(req)
+            .await
+            .expect("pdf detail audit report");
+        assert_eq!(report["summary"]["probe_count"], 1);
+        assert_eq!(report["summary"]["runtime_not_configured_count"], 1);
+        assert_eq!(report["summary"]["parsed_pdf_count"], 0);
+        // incomplete=0、scanned=0、parsed(0)<total(1) → PDF 抓取/解析不完整
+        assert_eq!(
+            report["decision"]["admission_decision"],
+            "blocked_pdf_fetch_or_parse_incomplete"
+        );
+    }
+
+    // ── handler inner：验证早退（不触库不写库）──
+
+    #[tokio::test]
+    async fn tiny_sync_rejects_background_requests_before_any_db_access() {
+        let state = test_app_state().await;
+        let req = ExchangeAnnouncementOrderCapacitySyncReq {
+            symbols: None,
+            categories: None,
+            market: None,
+            start_date: None,
+            end_date: None,
+            data_version_id: None,
+            python: None,
+            pdf_python: None,
+            background: true,
+        };
+        let error = run_exchange_announcement_order_capacity_tiny_sync(&state, req)
+            .await
+            .expect_err("background=true");
+        assert!(
+            error.contains("requires background=false"),
+            "实际错误: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_sync_rejects_background_requests_before_any_db_access() {
+        let state = test_app_state().await;
+        let req = ExchangeAnnouncementOrderCapacityBoundedSyncReq {
+            symbols: None,
+            categories: None,
+            market: None,
+            start_date: None,
+            end_date: None,
+            batch: None,
+            data_version_id: None,
+            python: None,
+            pdf_python: None,
+            background: true,
+            stop_on_audit_failure: None,
+        };
+        let error = run_exchange_announcement_order_capacity_bounded_sync(&state, req)
+            .await
+            .expect_err("background=true");
+        assert!(
+            error.contains("requires background=false"),
+            "实际错误: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ocr_blocked_row_audit_rejects_inverted_date_range() {
+        let state = test_app_state().await;
+        let req = ExchangeAnnouncementOrderCapacityOcrBlockedRowAuditReq {
+            start_date: Some("20240105".into()),
+            end_date: Some("20240101".into()),
+            symbols: None,
+            limit: None,
+            python: None,
+        };
+        let error = build_exchange_announcement_order_capacity_ocr_blocked_row_audit(&state, req)
+            .await
+            .expect_err("inverted range");
+        assert!(
+            error.contains("cannot be after end_date"),
+            "实际错误: {error}"
+        );
+    }
+
+    // ── 连库只读审计：真实本机 PG，只 SELECT 不写入 ──
+
+    #[tokio::test]
+    async fn coverage_quality_audit_returns_read_only_structure() {
+        let state = test_app_state().await;
+        let req = ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq {
+            start_date: Some("20240101".into()),
+            end_date: Some("20240102".into()),
+        };
+        let report = build_exchange_announcement_order_capacity_coverage_quality_audit(&state, req)
+            .await
+            .expect("coverage quality audit report");
+        // 结构断言：不臆测本机库数据值，只验证报告骨架与回显
+        assert_eq!(
+            report["mode"],
+            "read_only_db_backed_small_batch_coverage_pit_quality_audit"
+        );
+        assert_eq!(report["table"], "market_exchange_announcement_text_raw");
+        assert_eq!(report["date_range"]["start_date"], "20240101");
+        assert_eq!(report["date_range"]["end_date"], "20240102");
+        assert!(report["table_exists"].is_boolean());
+        for field in [
+            "row_count",
+            "pit_violation_rows",
+            "target_event_rows",
+            "scanned_pdf_ocr_required_rows",
+            "completed_attempts",
+        ] {
+            assert!(
+                report["summary"][field].is_i64(),
+                "summary.{field} 应为整数，实际: {}",
+                report["summary"][field]
+            );
+        }
+        assert!(report["decision"].is_object());
+        assert!(report["promotion_gate"]["factor_builder"].is_string());
+        assert!(report["year_category_breakdown"].is_array());
+        assert!(report["symbol_event_breakdown"].is_array());
+    }
+
+    #[tokio::test]
+    async fn manual_precision_sample_audit_returns_read_only_structure() {
+        let state = test_app_state().await;
+        let req = ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq {
+            start_date: Some("20240101".into()),
+            end_date: Some("20240102".into()),
+            limit: Some(3),
+            include_negative_samples: Some(false),
+        };
+        let report =
+            build_exchange_announcement_order_capacity_manual_precision_sample_audit(&state, req)
+                .await
+                .expect("manual precision sample audit report");
+        // 表存在时输出样本骨架；表缺失时输出 blocked_raw_schema_not_applied——两种都合法
+        if report["status"] == "blocked_raw_schema_not_applied" {
+            assert_eq!(report["table_exists"], false);
+        } else {
+            assert!(report["review_items"].is_array());
+            assert!(report["sample_policy"]["negative_samples"].is_boolean());
+            // include_negative_samples=false → 负样本上限为 0
+            assert_eq!(report["sample_policy"]["negative_sample_limit"], 0);
+        }
+        assert_eq!(report["date_range"]["start_date"], "20240101");
+        assert_eq!(
+            report["promotion_gate"]["p310_status"],
+            "blocked_until_manual_precision_review_passes"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_smoke_reports_runtime_errors_without_spawning() {
+        let state = test_app_state().await;
+        // 显式 symbol + 默认类别（4 类）：1×4 个 probe，
+        // Python 运行时不存在 → 全部 runtime_not_configured（秒回，不 spawn）
+        // 该 Req 无 Default derive，手工列全字段（其余走 None/空默认语义）
+        let req = ExchangeAnnouncementOrderCapacitySmokeReq {
+            symbols: vec!["600000.SH".to_string()],
+            categories: vec![],
+            market: None,
+            start_date: None,
+            end_date: None,
+            limit: None,
+            python: Some("/nonexistent-quant-test-python".into()),
+        };
+        let report = build_exchange_announcement_order_capacity_permission_smoke(&state, req)
+            .await
+            .expect("permission smoke report");
+        assert_eq!(report["summary"]["probe_count"], 4);
+        assert_eq!(report["summary"]["runtime_error_count"], 4);
+        assert_eq!(report["summary"]["nonempty_probe_count"], 0);
+        assert_eq!(report["write_enabled"], false);
+        assert_eq!(
+            report["admission_decision"],
+            "blocked_runtime_or_permission_errors_before_schema_apply"
+        );
+        assert_eq!(report["plan"]["symbols"][0], "600000");
+    }
 }
