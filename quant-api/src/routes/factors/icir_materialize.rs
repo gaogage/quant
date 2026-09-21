@@ -275,11 +275,17 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
         // 因子集与参数。防两类静默漂移：① 配置漂移（生产 combo 曾实配 70+ 因子
         // 而 strategy_config.whitelist 只记 21，重物化按 21 跑出 -15pp 差异）；
         // ② 因子停更静默退出（缺数据因子被剔除重归一化，构成逐季变化无告警）。
+        // 审计口径（2026-09-21 修正）：原用 trade_date = as_of 单日判定"缺数据"，
+        // 与低频物化因子错配——val_* 等因子每周仅 2-5 天有值（正常节奏非断更），
+        // as_of 当天恰好无值就被误报"静默剔除"。scores CTE 实际用整个季度区间
+        // [as_of, q_end) 取值参与打分（该因子在区间内任一日有值即被采纳），审计
+        // 判据改为与其对齐的区间存在性，消除该类误报；因子真正整季无值时仍会
+        // 被判定缺失（missing 逻辑不变）。
         let audit: Option<(i64, Option<Vec<String>>)> = sqlx::query_as(
             "SELECT COUNT(DISTINCT fv.factor_code)::bigint,
                     array_agg(DISTINCT fv.factor_code)
              FROM factor_value fv
-             WHERE fv.trade_date = $1 AND fv.factor_version = $2
+             WHERE fv.trade_date >= $1 AND fv.trade_date < $5 AND fv.factor_version = $2
                AND fv.normalized_value IS NOT NULL
                AND ($3 IS NULL OR fv.factor_code = ANY($3))
                AND fv.factor_code !~ $4",
@@ -288,6 +294,7 @@ ON CONFLICT (combo_name, version, symbol, trade_date) DO UPDATE SET
         .bind(factor_version)
         .bind(factor_whitelist)
         .bind(blacklist_re)
+        .bind(q_end)
         .fetch_one(db)
         .await
         .ok();
