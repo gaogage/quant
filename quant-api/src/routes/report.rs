@@ -869,14 +869,15 @@ pub async fn push_dingtalk_trade_detail_notification(
     Ok(())
 }
 
-#[cfg(test)]
 /// report 域写库测试互斥锁（2026-09-22 修）：refresh_eod_snapshot /
 /// snapshot_positions_for_all_accounts 是**全库 active 扫描**的产品函数，
 /// 并行时会顺带给其它测试的中间态账户补快照（如 resend 测试的 rsA
 /// 处于已建未写完整快照时被补 2027-06-15 行 → prev_nav 错乱 →
 /// daily_return 断言失败）。report 域四个写库测试必须串行。
+#[cfg(test)]
 static REPORT_WRITE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(test)]
 mod daily_report_tests {
     use super::*;
 
