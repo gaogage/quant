@@ -1278,7 +1278,9 @@ mod fifth_batch {
         let acct_b = "zzz_test_api5_rsB";
         // 前置全删远未来日（上次 panic 残留防连锁）
         sqlx::query("DELETE FROM paper_nav_snapshot WHERE snapshot_date = '2027-06-17'")
-            .execute(&db).await.unwrap();
+            .execute(&db)
+            .await
+            .unwrap();
         for a in [acct_a, acct_b] {
             cleanup_account(&db, a).await;
         }

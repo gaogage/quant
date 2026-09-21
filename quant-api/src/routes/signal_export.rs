@@ -701,23 +701,21 @@ mod tests {
     fn combo_materialization_freshness_gate_branches() {
         use chrono::TimeZone;
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 21).unwrap();
-        let mat_at = chrono::Utc.with_ymd_and_hms(2026, 9, 21, 14, 11, 25).unwrap(); // 22:11:25 +08
-        let backfill_at = chrono::Utc.with_ymd_and_hms(2026, 9, 21, 14, 35, 33).unwrap(); // 22:35:33 +08
+        let mat_at = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 21, 14, 11, 25)
+            .unwrap(); // 22:11:25 +08
+        let backfill_at = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 21, 14, 35, 33)
+            .unwrap(); // 22:35:33 +08
 
         // 分支1: 截面日无物化行(MIN=NULL) → 拒
-        let err =
-            verify_combo_materialization_freshness((0, None), Some(backfill_at), "c1", date)
-                .unwrap_err();
+        let err = verify_combo_materialization_freshness((0, None), Some(backfill_at), "c1", date)
+            .unwrap_err();
         assert!(err.contains("无物化行"), "分支1 文案: {}", err);
 
         // 分支2: 当日无已完成回填任务 → 拒
-        let err = verify_combo_materialization_freshness(
-            (5919, Some(mat_at)),
-            None,
-            "c1",
-            date,
-        )
-        .unwrap_err();
+        let err = verify_combo_materialization_freshness((5919, Some(mat_at)), None, "c1", date)
+            .unwrap_err();
         assert!(err.contains("夜间链未跑"), "分支2 文案: {}", err);
 
         // 分支3: 事故形态——物化(22:11:25)早于回填完成(22:35:33) → 拒
@@ -731,7 +729,9 @@ mod tests {
         assert!(err.contains("旧因子物化"), "分支3 文案: {}", err);
 
         // 分支4: 修正编排后——物化(22:36:10)晚于回填完成(22:35:33) → 过
-        let fixed_mat = chrono::Utc.with_ymd_and_hms(2026, 9, 21, 14, 36, 10).unwrap();
+        let fixed_mat = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 21, 14, 36, 10)
+            .unwrap();
         assert!(verify_combo_materialization_freshness(
             (5919, Some(fixed_mat)),
             Some(backfill_at),

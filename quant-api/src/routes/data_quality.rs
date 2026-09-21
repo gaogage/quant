@@ -40,20 +40,18 @@ impl FactorFreshnessBaseline {
     async fn resolve(self, db: &PgPool, latest_td: NaiveDate) -> NaiveDate {
         match self {
             Self::LatestTradeDate => latest_td,
-            Self::PreviousTradeDate => {
-                sqlx::query_as::<_, (NaiveDate,)>(
-                    "SELECT trade_date FROM market_trade_calendar
+            Self::PreviousTradeDate => sqlx::query_as::<_, (NaiveDate,)>(
+                "SELECT trade_date FROM market_trade_calendar
                      WHERE is_open = true AND trade_date < $1
                      ORDER BY trade_date DESC LIMIT 1",
-                )
-                .bind(latest_td)
-                .fetch_optional(db)
-                .await
-                .ok()
-                .flatten()
-                .map(|(d,)| d)
-                .unwrap_or(latest_td)
-            }
+            )
+            .bind(latest_td)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .map(|(d,)| d)
+            .unwrap_or(latest_td),
         }
     }
 

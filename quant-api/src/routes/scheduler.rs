@@ -167,7 +167,10 @@ async fn wait_for_factor_backfill(
         .await
         .unwrap_or((0,));
         if pending.0 == 0 {
-            info!("[夜间预备] 因子回填全部终态(等待至 {})", chrono::Local::now().format("%H:%M:%S"));
+            info!(
+                "[夜间预备] 因子回填全部终态(等待至 {})",
+                chrono::Local::now().format("%H:%M:%S")
+            );
             return;
         }
         if tokio::time::Instant::now() >= deadline {

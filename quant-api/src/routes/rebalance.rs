@@ -2123,7 +2123,9 @@ mod fifth_batch {
 
         // 现金分红：每股 0.5，ex_date 落在 (d0, d1]        // 前置精确清分红（上次 panic 残留主键冲突）
         sqlx::query("DELETE FROM market_stock_dividend WHERE symbol IN ('ZZZA02.SH','ZZZA03.SH')")
-            .execute(&db).await.unwrap();
+            .execute(&db)
+            .await
+            .unwrap();
 
         sqlx::query(
             "INSERT INTO market_stock_dividend
