@@ -774,3 +774,148 @@ pub(crate) async fn eod_ml_and_quality(
     )
     .await;
 }
+
+// ───────────────────────── 第八批测试（eod.rs 拆分子函数可测面） ─────────────────────────
+//
+// 诚实边界（先读实现再判定，不硬凑）：13 个子函数中 11 个无法在本机测试安全直调——
+// - eod_sync_events：sync_suspension 首句即真实 Tushare API + DELETE/INSERT 生产表
+//   market_stock_suspension，无早退分支；
+// - eod_sync_daily_bars_and_ets：sync_limit_with_retry 首句 DELETE 生产表
+//   market_stock_limit + 真实 API（失败还 sleep 65 秒重试）；sync_daily_bars 空
+//   universe 仍写 dataset_sync_task/data_version 假任务行（dv id 固定前缀无法注入
+//   zzz 标记）；
+// - eod_sync_margin_detail：prev_str=Local::now()-1 硬编码（远未来入参隔离不了
+//   start），空 symbols 走全市场路径，会真实拉昨日数据写 market_stock_margin_detail；
+// - eod_materialize_margin_factors / eod_sync_mfdc_factors：INSERT...SELECT 写
+//   factor_value，win 窗口 = MAX(trade_date)-N 基于本机真实数据，无只读路径
+//   （后者还有真实 HTTP Tushare 拉取）；
+// - eod_spawn_forecast_increment / eod_spawn_repurchase_increment：tokio::spawn
+//   后台真实拉取，走不走取决于 TUSHARE_TOKEN_ALT 环境变量，测试进程不可控且
+//   spawn 不可等待；
+// - eod_sync_index_and_basics：真实 Tushare 多接口；CSI300 失败路径触发
+//   send_quality_alert 真实钉钉推送（查 active 账户 webhook）；
+// - eod_adj_backfill_composite：backfill_adj_factor_for_date 会把最新前值复制写入
+//   指定日期的 market_stock_adj_factor（远未来日期 = 生产表写入假日期行），
+//   composite 段对全库 active 策略真实重算写曲线；
+// - eod_sync_adj_full_and_etf：真实 Tushare + 同上 backfill 写生产表；
+// - eod_ml_and_quality：sleep 10 秒 + ML 内部 HTTP 触发 + 质量检查可能发真实告警。
+//
+// eod_mark_all_accounts 的 is_trade=true 路径同样不可测：全库扫描 active simulated
+// 账户逐个 re-mark（真实账户会被改写），盯市完整性门禁在远未来日期必然把全部
+// active 账户判为快照缺失 → send_quality_alert 真实推钉钉（REPORT_WRITE_TEST_LOCK
+// 教训：全库扫描类路径无法用 zzz 数据自洽隔离）。
+//
+// 本批覆盖可安全直调的面：两个 is_trade=false 空操作分支（整个函数体被 if is_trade
+// 包住，零查询零写入，与并行测试零互扰）+ P0 EOD 隔离 timeout 常量 pin。
+#[cfg(test)]
+mod eighth_batch {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    /// 远未来隔离日期：源端（bar/snapshot）在该日期必无数据，任何误写入都可精确断言。
+    fn far_future() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2099, 1, 1).expect("2099-01-01 必然是合法日期")
+    }
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 精确清理 zzz 账户全部关联行（对齐第五批 cleanup_account 表清单）。
+    async fn cleanup_account(db: &sqlx::PgPool, account_id: &str) {
+        for sql in [
+            "DELETE FROM paper_fill WHERE paper_account_id = $1",
+            "DELETE FROM paper_order WHERE paper_account_id = $1",
+            "DELETE FROM paper_margin_trade WHERE paper_account_id = $1",
+            "DELETE FROM paper_position WHERE paper_account_id = $1",
+            "DELETE FROM paper_nav_snapshot WHERE paper_account_id = $1",
+        ] {
+            let _ = sqlx::query(sql).bind(account_id).execute(db).await;
+        }
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(account_id)
+            .execute(db)
+            .await;
+    }
+
+    /// 造 zzz 模拟账户（active/simulated，无 webhook——钉钉通道零触发）。
+    async fn create_zzz_account(db: &sqlx::PgPool, account_id: &str) {
+        cleanup_account(db, account_id).await;
+        sqlx::query(
+            "INSERT INTO paper_account
+               (paper_account_id, name, initial_capital, cash, status, account_type,
+                signal_source, leverage_enabled, margin_amount, reserve_amount,
+                liquidation_threshold, warning_threshold)
+             VALUES ($1, 'zzz 第八批 EOD 测试', 100000, 100000, 'active', 'simulated',
+                'factor', false, 0, 0, 1.3, 1.5)",
+        )
+        .bind(account_id)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_account");
+    }
+
+    async fn snapshot_count(db: &sqlx::PgPool, account_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM paper_nav_snapshot WHERE paper_account_id = $1")
+            .bind(account_id)
+            .fetch_one(db)
+            .await
+            .expect("count snapshots")
+    }
+
+    // ── P0 EOD 隔离常量 pin ──
+
+    #[test]
+    fn eod_step_timeout_pinned_at_30_minutes() {
+        // 30 分钟是 P0 EOD 隔离的历史决策：daily_basic 曾 3 小时卡死 running 永不完成，
+        // 导致复权因子兜底未执行、adj 视图退化为 raw 价、回测曲线崩坏。pin 住防误改
+        // （改动它须连带重估 daily_basic/index/moneyflow/block_trade 四段隔离语义）。
+        assert_eq!(EOD_STEP_TIMEOUT_SECS, 1800);
+    }
+
+    // ── is_trade=false 空操作分支（真实本机 PG + zzz 账户 + 远未来日期） ──
+
+    #[tokio::test]
+    async fn mark_all_accounts_skips_all_work_when_is_trade_false() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api8_mark";
+        create_zzz_account(&db, account_id).await;
+
+        // 非交易日：整个盯市段（re-mark + NAV 重算 + 完整性门禁）都不应执行——
+        // false 分支连 find_active_simulated_ids 都不查（零全库扫描，无并行互扰）。
+        eod_mark_all_accounts(&db, far_future(), false).await;
+
+        // 远未来日期零快照写入（若守卫失效，re-mark/门禁路径会留下痕迹）
+        let snaps = snapshot_count(&db, account_id).await;
+        assert_eq!(snaps, 0, "is_trade=false 不得写入任何 NAV 快照");
+        // 账户行未被触碰（仍 active、现金不动）
+        let (status, cash): (String, Decimal) =
+            sqlx::query_as("SELECT status, cash FROM paper_account WHERE paper_account_id = $1")
+                .bind(account_id)
+                .fetch_one(&db)
+                .await
+                .expect("account row");
+        assert_eq!(status, "active");
+        assert_eq!(cash, Decimal::from(100_000));
+
+        cleanup_account(&db, account_id).await;
+    }
+
+    #[tokio::test]
+    async fn push_daily_report_skips_when_is_trade_false() {
+        let db = test_db().await;
+        let account_id = "zzz_test_api8_report";
+        create_zzz_account(&db, account_id).await;
+
+        // 非交易日：日报推送守卫应拦住 push_daily_performance_report——该路径内部
+        // 会 upsert paper_nav_snapshot 并推真实钉钉，此处用快照零写入做回归锚点。
+        eod_push_daily_report(&db, far_future(), false).await;
+
+        let snaps = snapshot_count(&db, account_id).await;
+        assert_eq!(snaps, 0, "is_trade=false 不得触发日报的快照 upsert");
+
+        cleanup_account(&db, account_id).await;
+    }
+}
