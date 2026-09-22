@@ -1,9 +1,12 @@
 //! 内置调度器 — v15 日频量化交易。
 //!
-//! 14:45 (收盘前): 获取当日行情 → 回测 → MVO → 调仓 → 立即推送钉钉
-//! 22:00 (盘后数据就绪): 同步日终行情数据到历史表 → 清理过期回测数据
+//! 09:35 (开盘后早间): 前置数据校验 → 生成信号 → 调仓 → 钉钉推送
+//! 21:30 (盘后数据就绪, 任务73 前移): 同步日终行情数据到历史表 → 清理过期回测数据(16:00-16:30)
 //!
-//! 日频交易不需要盘中实时行情，每天只在收盘前交易一次。
+//! 工作时间定版(任务73, 2026-09-22 用户裁决): 非工作段 = 00:00-08:30 /
+//! 16:30-21:00 / 非交易日全天(可部署/关机休眠); 其余为工作段,定时任务
+//! 执行和完成必须落在工作段内。
+//! 日频交易不需要盘中实时行情，每天只在开盘后调仓一次。
 //! MVO 策略: Ledoit-Wolf + Grid Search 季度调仓 (自动发现权重)
 //! 杠杆: 波动率目标 (vol_target, 20%年化波动率目标)
 //! 启动时通过 tokio::spawn 在后台运行，每 60 秒检查一次。
@@ -195,7 +198,7 @@ pub(crate) async fn get_latest_data_version(db: &PgPool) -> String {
 struct DailyState {
     date: Option<NaiveDate>,
     traded_today: bool,     // 今日是否已完成调仓 (14:40+)
-    eod_synced_today: bool, // 今日是否已完成日终数据同步 (16:00)
+    eod_synced_today: bool, // 今日是否已完成日终数据同步 (21:30, 任务73 前移)
     yesterday_synced: bool, // 昨日日线是否已完成 T+1 同步 (次日9:00)
     cleanup_done: bool,
     report_pushed: bool, // 今日是否已推送实盘绩效日报 (16:00 EOD 后)
@@ -234,11 +237,13 @@ fn scheduled_task_time_minutes(expr: &str) -> Result<u32, String> {
 }
 
 fn is_eod_sync_window(hour: u32, minute: u32) -> bool {
-    // 22:00 窗口：Tushare fund_daily 当日就绪率不稳定(2026-08 实测约 5/7 交易日
-    // 20:00 前就绪,8/14/8/19 延迟到次日;8/19 当晚 22:00 仍 0 rows)。
-    // A 股日线通常 17:00-18:00 后完整,ETF 延后更不稳定——挪到 22:00 给晚到数据
-    // 多 2 小时窗口,再配 akshare(东财)兜底与 9:00 T+1 补盯市闭环。
-    hour == 22 && minute < 10
+    // 21:30 窗口（2026-09-22 任务73 前移，原 22:00）：Tushare fund_daily 当日就绪率
+    // 不稳定(2026-08 实测约 5/7 交易日 20:00 前就绪,8/14/8/19 延迟到次日;8/19 当晚
+    // 22:00 仍 0 rows)。前移动机：全链收尾提前 30 分钟,为周五 23:20 rolling IC 与
+    // 0 点关机窗口留余量(工作时间定版:00:00-08:30/16:30-21:00/非交易日全天为非工作段)。
+    // fund_daily 21:30 就绪率较 22:00 略降的残留,由 akshare(东财)兜底与 9:00 T+1
+    // 补盯市闭环承接,告警观察一周后复评。
+    hour == 21 && (30..40).contains(&minute)
 }
 
 fn pre_trade_factor_combo(sc: &StrategyConfig) -> &str {
@@ -428,13 +433,14 @@ mod tests {
 
     #[test]
     fn eod_sync_window_does_not_replay_after_startup_late_in_day() {
-        // EOD 于 22:00：Tushare 日线 16:00 未发布，fund_daily 当日就绪率不稳定
-        assert!(is_eod_sync_window(22, 0));
-        assert!(is_eod_sync_window(22, 9));
-        assert!(!is_eod_sync_window(22, 10));
-        assert!(!is_eod_sync_window(22, 39));
+        // EOD 于 21:30（任务73 前移，原 22:00）：fund_daily 晚到由 akshare 兜底 + 9:00 T+1 补
+        assert!(is_eod_sync_window(21, 30));
+        assert!(is_eod_sync_window(21, 39));
+        assert!(!is_eod_sync_window(21, 40));
+        assert!(!is_eod_sync_window(21, 29));
         assert!(!is_eod_sync_window(16, 0));
         assert!(!is_eod_sync_window(20, 0)); // 旧 20:00 窗口已废弃，防回归
+        assert!(!is_eod_sync_window(22, 0)); // 旧 22:00 窗口已废弃（任务73 前移），防回归
         assert!(!is_eod_sync_window(23, 0));
     }
 
@@ -830,12 +836,14 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                 trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
             }
             "nightly_signal_prep" => {
-                // 夜间信号预备链(2026-09-11): 22:10 独立触发,不等 EOD 主链(主链被
-                // forecast 拖到 00:00 的历史教训)。bar 22:01 入库即满足前置。
-                // 链: phase7 因子回补(~67m) → PIT 物化增量 → sleeve 曲线更新
+                // 夜间信号预备链(2026-09-11; 任务73 2026-09-22 前移 21:45,原 22:10):
+                // 独立触发不等 EOD 主链(主链被 forecast 拖到 00:00 的历史教训)。
+                // bar 前置: EOD 主链 21:30 起跑,日线步骤 21:31 入库即满足。
+                // 链: phase7 因子回补(正常 ~25m) → PIT 物化增量 → sleeve 曲线更新
                 //      → fund_nav 净值增量(2026-09-17, ETF 溢价门禁数据源)
                 //      → 收尾质量检查(T日基准, 任务71 2026-09-21)。
-                // 预计 23:20 完成,为 23:30 信号生成与日终通知留窗。幂等,失败告警。
+                // 预计 22:55 完成,为 23:00 信号生成(任务73 倒挂修复:原 23:30 导出晚于
+                // 预备链最坏 23:45)与日终通知留窗。幂等,失败告警。
                 // 任务71 依赖编排修正: 回补由 fire-and-forget 改为等待终态后再物化
                 // (原实现在回填完成前物化, T 日 combo 行由 T-1 因子合成, 信号截面
                 // 静默滞后一交易日——multi_factor_value created_at 实锤)。
@@ -852,12 +860,13 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                     trigger_v24_backfill_routes(&db2, &sd, &ed).await;
                     // 受理→任务行落库毫秒级, 但防末条路由尚未落库时 COUNT=0 提前返回
                     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    // 超时上限 95m(22:10+95m=23:45): 正常 25m 内完成; 超时继续走
-                    // 物化, 信号侧物化新鲜度门禁拒发残缺截面(宁缺毋假)。
+                    // 超时上限 60m(21:45+60m=22:45, 任务73 由 95m 收紧): 正常 25m 内
+                    // 完成; 超时继续走物化, 信号侧物化新鲜度门禁拒发残缺截面(宁缺毋假),
+                    // 且为 23:00 信号导出留 15m 缓冲(倒挂修复的一部分)。
                     wait_for_factor_backfill(
                         &db2,
                         trigger_started,
-                        std::time::Duration::from_secs(95 * 60),
+                        std::time::Duration::from_secs(60 * 60),
                     )
                     .await;
                     info!(
@@ -1219,11 +1228,11 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         match strategy_config.as_ref() {
             Some(sc) => info!(
-                "[scheduler] {} 已启动 ({}): 09:35调仓(早间) | 22:00 EOD+夜间预备链 | 9:00 T+1数据补同步",
+                "[scheduler] {} 已启动 ({}): 09:35调仓(早间) | 21:30 EOD+夜间预备链 | 9:00 T+1数据补同步",
                 sc.strategy_id, sc.name
             ),
             None => info!(
-                "[scheduler] 已启动 (无 active 复合策略): 09:35调仓(早间) | 22:00 EOD+夜间预备链 | 9:00 T+1数据补同步"
+                "[scheduler] 已启动 (无 active 复合策略): 09:35调仓(早间) | 21:30 EOD+夜间预备链 | 9:00 T+1数据补同步"
             ),
         }
 
@@ -1465,7 +1474,7 @@ async fn run_tick(
         }
     }
 
-    // ── 22:00 (盘后数据就绪): 交易日EOD + 非交易日也执行数据同步 ──
+    // ── 21:30 (盘后数据就绪, 任务73 前移): 交易日EOD + 非交易日也执行数据同步 ──
     if is_eod_sync_window(hour, minute) {
         let should_sync = {
             let st = state.lock().await;
@@ -1477,7 +1486,7 @@ async fn run_tick(
                 let mut st = state.lock().await;
                 st.eod_synced_today = true;
             }
-            info!("[scheduler] 22:00 日终数据同步...");
+            info!("[scheduler] 21:30 日终数据同步...");
             if let Err(e) = crate::routes::sync::sync_eod_data(db, tushare, today, is_trade).await {
                 warn!("[scheduler] 日终数据同步失败: {}", e);
             }
@@ -1598,7 +1607,7 @@ async fn run_tick(
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
 
-            // Step 3b: T+1 补盯市。22:00 EOD 时 fund_daily 偶发无当日数据,
+            // Step 3b: T+1 补盯市。21:30 EOD 时 fund_daily 偶发无当日数据(前移后概率略增),
             // ETF 持仓的日终盯市被迫落在前日收盘。此处 ETF 日线已补齐,对 active 账户
             // 补 mark_to_market(上一交易日收盘) + NAV 重算。
             let remak_accounts: Vec<String> = PgPaperAccountRepo::new(db)
@@ -1771,8 +1780,10 @@ async fn run_tick(
         }
     }
 
-    // ── 收盘后 (16:00): 清理 7 天前过期回测数据 (每日一次) ──
-    if hour >= 16 {
+    // ── 收盘后 (16:00-16:30, 工作段A尾): 清理 7 天前过期回测数据 (每日一次) ──
+    // 任务73 收窗：16:30-21:00 属非工作段(可部署/关机),清理必须在工作段内完成;
+    // 错过当日窗口则次日再清(cleanup_done 为每日状态,过期清理晚一天无碍)。
+    if hour == 16 && (0..30).contains(&minute) {
         let should_cleanup = {
             let st = state.lock().await;
             !st.cleanup_done
@@ -1818,7 +1829,10 @@ async fn run_tick(
         }
     };
 
-    if is_first_trading_day_of_quarter && hour >= 16 {
+    // 任务73：季度 WFA 挪工作段 B(21:00-22:00, 原 16:00+)——非工作段定义下
+    // 16:30 后可能部署/关机,长任务(分钟-小时级寻优)不得跨非工作段执行;
+    // 次日 09:35 调仓前完成即可,与 EOD 链(21:30 起)数据依赖不冲突(读历史)。
+    if is_first_trading_day_of_quarter && (21..22).contains(&hour) {
         let quarter = format!("{}-Q{}", today.year(), (today.month() - 1) / 3 + 1);
         match check_and_trigger_wfa(db, port, &quarter, today).await {
             Ok(Some(msg)) => info!("[scheduler] WFA: {}", msg),
