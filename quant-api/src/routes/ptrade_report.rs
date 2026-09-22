@@ -191,6 +191,12 @@ fn fetch_mail_reports_blocking(
                 }
             };
             let subject = msg.subject().unwrap_or_default().to_string();
+            // QQ IMAP 的 SINCE 匹配宽松(2026-09-22 实测: SINCE 21-Sep 带出 9/17
+            // 旧邮件重放, 刷缺均价 ERROR 噪音且镜像有倒刷风险)——本地按 subject
+            // 尾段日期二次过滤, 只留 >= 昨日; 无日期段的异常主题一并跳过
+            if subject_date(&subject).is_none_or(|d| d < yesterday) {
+                continue;
+            }
             if subject.starts_with("ptrade_heartbeat_") {
                 summary.heartbeats.push(subject);
                 continue;
@@ -223,6 +229,13 @@ fn fetch_mail_reports_blocking(
     // logout best-effort: 会话即将 drop, 失败不影响结果
     let _ = session.logout();
     result
+}
+
+/// subject 尾段 8 位日期解析(`ptrade_exec_sim_20260922` → 2026-09-22)。
+/// 用于 SINCE 宽松匹配后的本地二次过滤; 无日期段(旧格式/异常主题)返回 None。
+fn subject_date(subject: &str) -> Option<chrono::NaiveDate> {
+    let tail = subject.rsplit('_').next()?;
+    chrono::NaiveDate::parse_from_str(tail, "%Y%m%d").ok()
 }
 
 /// IMAP SEARCH 的日期格式 `DD-Mon-YYYY`——英文月名手写表, 不依赖 chrono %b 的
@@ -616,6 +629,22 @@ mod tests {
         assert_eq!(fmt(2026, 12, 31), "31-Dec-2026");
         // 跨年边界: 昨天=12-31 时 SINCE 串仍须正确
         assert_eq!(fmt(2025, 12, 31), "31-Dec-2025");
+    }
+
+    #[test]
+    fn subject_date_parses_tail_segment() {
+        assert_eq!(
+            subject_date("ptrade_exec_sim_20260922"),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 22)
+        );
+        // 旧格式(无 tag)同样可解析
+        assert_eq!(
+            subject_date("ptrade_exec_20260917"),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 17)
+        );
+        // 无日期段/垃圾尾段: None(过滤时跳过)
+        assert_eq!(subject_date("ptrade_heartbeat_sim"), None);
+        assert_eq!(subject_date(""), None);
     }
 
     #[test]
