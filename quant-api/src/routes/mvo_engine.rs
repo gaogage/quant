@@ -129,81 +129,15 @@ pub async fn run_daily_simulation(
     leverage_multiplier: f64,
     leverage_mode: &str,
 ) -> Result<Vec<DailyNav>, String> {
-    // 0. 账号绑校验
-    let (strategy_version_id, init_cap): (Option<String>, Decimal) = sqlx::query_as(
-        "SELECT strategy_version_id, initial_capital FROM paper_account WHERE paper_account_id = $1",
-    )
-    .bind(account_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("query account: {}", e))?
-    .ok_or_else(|| "account not found".to_string())?;
-    if strategy_version_id.as_deref().unwrap_or("").is_empty() {
-        return Err(format!(
-            "账号 {} 未挂策略（strategy_version_id 空）",
-            account_id
-        ));
-    }
-    let init_cap_f: f64 = init_cap.to_string().parse().unwrap_or(1_000_000.0);
-
-    // 1. 账号重置（回放专用）——子表清理收敛为 repo 的 wipe_account_tables（防表清单漂移）
-    if reset_account {
-        PgPaperAccountRepo::new(db)
-            .wipe_account_tables(account_id)
-            .await
-            .map_err(|e| format!("clean tables: {}", e))?;
-        sqlx::query(
-            "UPDATE paper_account SET current_nav=$1, peak_nav=$1, cash=$1, max_drawdown_pct=0, margin_amount=0, total_trades=0 WHERE paper_account_id=$2",
-        )
-        .bind(init_cap)
-        .bind(account_id)
-        .execute(db)
-        .await
-        .map_err(|e| format!("reset: {}", e))?;
-    }
-
-    // 2. 交易日序列（从 a_share asset 的 backtest_equity_curve 取）+ task_id（回放传 rs 的 equity_curve_task_id）
-    let a_task_id = rs
-        .assets
-        .iter()
-        .find(|a| a.asset_class == crate::routes::strategy::AssetClass::AShare)
-        .and_then(|a| a.security.equity_curve_task_id.as_deref())
-        .ok_or_else(|| "策略无 a_share asset，equity_curve_task_id 缺失".to_string())?;
-    let dates: Vec<NaiveDate> = sqlx::query_scalar(
-        "SELECT trade_date FROM backtest_equity_curve WHERE task_id = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date",
-    )
-    .bind(a_task_id)
-    .bind(start)
-    .bind(end)
-    .fetch_all(db)
-    .await
-    .map_err(|e| format!("load dates: {}", e))?;
-    if dates.is_empty() {
-        return Err(format!(
-            "交易日序列为空（task={}, {}~{}）",
-            a_task_id, start, end
-        ));
-    }
-
-    // 2.1 预加载 CSI300 日线到内存(detect_regime_exposure 每天查 252 天,改内存读省 ~N 次 DB)
-    // 复用 paper.rs:721 bench_map 模式。first_d 往前推 400 天确保 trailing 252 天有边界数据。
-    let csi300_first = *dates.first().unwrap() - chrono::Duration::days(400);
-    let csi300_last = *dates.last().unwrap();
-    let csi300_rows = sqlx::query_as::<_, (NaiveDate, f64)>(
-        "SELECT trade_date, close::double precision FROM market_index_daily_bar
-         WHERE symbol = '000300.SH' AND trade_date >= $1 AND trade_date <= $2 AND close > 0
-         ORDER BY trade_date",
-    )
-    .bind(csi300_first)
-    .bind(csi300_last)
-    .fetch_all(db)
-    .await
-    .map_err(|e| format!("load csi300: {}", e))?;
-    let csi300_map: std::collections::HashMap<NaiveDate, f64> = csi300_rows.into_iter().collect();
-    tracing::info!(
-        days = csi300_map.len(),
-        "CSI300 预加载完成(detect_regime 缓存)"
-    );
+    // 0. 账号绑校验 + init_cap 读取（任务74 拆出，语义等价搬运）
+    let ctx = load_account_context(db, account_id).await?;
+    let init_cap_f = ctx.init_cap_f;
+    // 1. 账号重置（回放专用）——绑 Decimal 原值保持 bit 级等价
+    reset_account_if_needed(db, account_id, reset_account, ctx.init_cap).await?;
+    // 2. 交易日序列 + task_id（回放传 rs 的 equity_curve_task_id）
+    let (a_task_id, dates) = load_simulation_dates(db, rs, start, end).await?;
+    // 2.1 CSI300 预加载（regime 检测内存缓存）
+    let csi300_map = preload_csi300_map(db, &dates).await?;
 
     // 3. 逐日
     let mut prev_nav = init_cap_f;
@@ -221,22 +155,9 @@ pub async fn run_daily_simulation(
         let d = *d;
         // P2-B:regime 提前算(只依赖 date + csi300_map),供 rebalance_account 复用,省调仓日内 1 次 DB
         // regime_policy 配置化(阶段1.2): bwgv2 走 bear_window_guard_v2，其余/缺省走 trailing-12m
-        let regime = match rs.mvo.as_ref().and_then(|m| m.regime_policy.as_deref()) {
-            Some("bwgv2") | Some("bear_window_guard_v2") | Some("quality_bear_window_guard_v2") => {
-                let m = rs.mvo.as_ref().unwrap();
-                let cfg = crate::routes::shared::Bwgv2Config {
-                    bear_return_threshold: m.regime_bear_return_threshold,
-                    ..crate::routes::shared::Bwgv2Config::default()
-                };
-                crate::routes::shared::detect_regime_exposure_bwgv2(&csi300_map, d, &cfg)
-            }
-            _ => crate::routes::shared::detect_regime_exposure_cached(
-                &csi300_map,
-                d,
-                deep_bear_threshold,
-                deep_bear_exposure,
-            ),
-        };
+        // （任务74 拆出 resolve_daily_regime 纯函数）
+        let regime =
+            resolve_daily_regime(rs, &csi300_map, d, deep_bear_threshold, deep_bear_exposure);
         // 3a. 调仓日控制（读 rebalance_freq）
         if is_rebalance_day(d, &rs.rebalance_freq, &mut last_marker) {
             rebalance_account(
@@ -244,7 +165,7 @@ pub async fn run_daily_simulation(
                 account_id,
                 rs,
                 d,
-                a_task_id,
+                a_task_id.as_str(),
                 price_source,
                 mvo_cache,
                 tushare,
@@ -283,17 +204,9 @@ pub async fn run_daily_simulation(
         } else {
             nav_first
         };
-        let net = if prev_nav > 0.0 {
-            nav / prev_nav - 1.0
-        } else {
-            0.0
-        };
+        // 3d. 当日收益/累计收益（任务74 拆出 compute_day_returns 纯函数）
+        let (net, cum) = compute_day_returns(nav, prev_nav, init_cap_f);
         // 3e. 写 paper_nav_snapshot
-        let cum = if init_cap_f > 0.0 {
-            nav / init_cap_f - 1.0
-        } else {
-            0.0
-        };
         // R5: 统一走 upsert_nav_snapshot（原裸 SQL 5 处重复之一）
         let mut snap = crate::routes::shared::NavSnapshot::new(account_id, d, nav);
         snap.daily_return = Some(net);
@@ -309,6 +222,167 @@ pub async fn run_daily_simulation(
         });
     }
     Ok(out)
+}
+
+/// 账号上下文（任务74 从 run_daily_simulation 步骤 0 拆出）。
+/// init_cap 保留 Decimal 原值供重置 UPDATE 绑定（bit 级等价）；init_cap_f 供 NAV 计算。
+pub(crate) struct AccountContext {
+    pub init_cap: Decimal,
+    pub init_cap_f: f64,
+}
+
+/// 步骤 0：账号绑校验 + 初始资金读取。未挂策略/账号不存在报错（语义等价搬运）。
+pub(crate) async fn load_account_context(
+    db: &PgPool,
+    account_id: &str,
+) -> Result<AccountContext, String> {
+    let (strategy_version_id, init_cap): (Option<String>, Decimal) = sqlx::query_as(
+        "SELECT strategy_version_id, initial_capital FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("query account: {}", e))?
+    .ok_or_else(|| "account not found".to_string())?;
+    if strategy_version_id.as_deref().unwrap_or("").is_empty() {
+        return Err(format!(
+            "账号 {} 未挂策略（strategy_version_id 空）",
+            account_id
+        ));
+    }
+    let init_cap_f: f64 = init_cap.to_string().parse().unwrap_or(1_000_000.0);
+    Ok(AccountContext {
+        init_cap,
+        init_cap_f,
+    })
+}
+
+/// 步骤 1：账号重置（回放专用）——子表清理收敛为 repo 的 wipe_account_tables
+/// （防表清单漂移）；账户行归零绑定 Decimal 原值保持精度等价。
+pub(crate) async fn reset_account_if_needed(
+    db: &PgPool,
+    account_id: &str,
+    reset_account: bool,
+    init_cap: Decimal,
+) -> Result<(), String> {
+    if reset_account {
+        PgPaperAccountRepo::new(db)
+            .wipe_account_tables(account_id)
+            .await
+            .map_err(|e| format!("clean tables: {}", e))?;
+        sqlx::query(
+            "UPDATE paper_account SET current_nav=$1, peak_nav=$1, cash=$1, max_drawdown_pct=0, margin_amount=0, total_trades=0 WHERE paper_account_id=$2",
+        )
+        .bind(init_cap)
+        .bind(account_id)
+        .execute(db)
+        .await
+        .map_err(|e| format!("reset: {}", e))?;
+    }
+    Ok(())
+}
+
+/// 步骤 2：交易日序列（从 a_share asset 的 backtest_equity_curve 取）+ task_id
+/// （回放传 rs 的 equity_curve_task_id）。空序列报错含 task 与区间。
+pub(crate) async fn load_simulation_dates(
+    db: &PgPool,
+    rs: &ResolvedStrategy,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<(String, Vec<NaiveDate>), String> {
+    let a_task_id = rs
+        .assets
+        .iter()
+        .find(|a| a.asset_class == crate::routes::strategy::AssetClass::AShare)
+        .and_then(|a| a.security.equity_curve_task_id.as_deref())
+        .ok_or_else(|| "策略无 a_share asset，equity_curve_task_id 缺失".to_string())?
+        .to_string();
+    let dates: Vec<NaiveDate> = sqlx::query_scalar(
+        "SELECT trade_date FROM backtest_equity_curve WHERE task_id = $1 AND trade_date >= $2 AND trade_date <= $3 ORDER BY trade_date",
+    )
+    .bind(&a_task_id)
+    .bind(start)
+    .bind(end)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("load dates: {}", e))?;
+    if dates.is_empty() {
+        return Err(format!(
+            "交易日序列为空（task={}, {}~{}）",
+            a_task_id, start, end
+        ));
+    }
+    Ok((a_task_id, dates))
+}
+
+/// 步骤 2.1：预加载 CSI300 日线到内存(detect_regime_exposure 每天查 252 天,改内存读
+/// 省 ~N 次 DB)。复用 paper.rs:721 bench_map 模式。first_d 往前推 400 天确保
+/// trailing 252 天有边界数据。
+pub(crate) async fn preload_csi300_map(
+    db: &PgPool,
+    dates: &[NaiveDate],
+) -> Result<std::collections::HashMap<NaiveDate, f64>, String> {
+    let csi300_first = *dates.first().unwrap() - chrono::Duration::days(400);
+    let csi300_last = *dates.last().unwrap();
+    let csi300_rows = sqlx::query_as::<_, (NaiveDate, f64)>(
+        "SELECT trade_date, close::double precision FROM market_index_daily_bar
+         WHERE symbol = '000300.SH' AND trade_date >= $1 AND trade_date <= $2 AND close > 0
+         ORDER BY trade_date",
+    )
+    .bind(csi300_first)
+    .bind(csi300_last)
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("load csi300: {}", e))?;
+    let csi300_map: std::collections::HashMap<NaiveDate, f64> = csi300_rows.into_iter().collect();
+    tracing::info!(
+        days = csi300_map.len(),
+        "CSI300 预加载完成(detect_regime 缓存)"
+    );
+    Ok(csi300_map)
+}
+
+/// 循环体 regime 分派（任务74 拆出纯函数）：regime_policy 配置化(阶段1.2)——
+/// bwgv2 族走 bear_window_guard_v2（阈值从策略配置读），其余/缺省走 trailing-12m。
+pub(crate) fn resolve_daily_regime(
+    rs: &ResolvedStrategy,
+    csi300_map: &std::collections::HashMap<NaiveDate, f64>,
+    d: NaiveDate,
+    deep_bear_threshold: f64,
+    deep_bear_exposure: f64,
+) -> f64 {
+    match rs.mvo.as_ref().and_then(|m| m.regime_policy.as_deref()) {
+        Some("bwgv2") | Some("bear_window_guard_v2") | Some("quality_bear_window_guard_v2") => {
+            let m = rs.mvo.as_ref().unwrap();
+            let cfg = crate::routes::shared::Bwgv2Config {
+                bear_return_threshold: m.regime_bear_return_threshold,
+                ..crate::routes::shared::Bwgv2Config::default()
+            };
+            crate::routes::shared::detect_regime_exposure_bwgv2(csi300_map, d, &cfg)
+        }
+        _ => crate::routes::shared::detect_regime_exposure_cached(
+            csi300_map,
+            d,
+            deep_bear_threshold,
+            deep_bear_exposure,
+        ),
+    }
+}
+
+/// 循环体日收益/累计收益（任务74 拆出纯函数）：prev_nav<=0 或 init_cap<=0 时
+/// 对应项记 0（原实现语义）。
+pub(crate) fn compute_day_returns(nav: f64, prev_nav: f64, init_cap: f64) -> (f64, f64) {
+    let net = if prev_nav > 0.0 {
+        nav / prev_nav - 1.0
+    } else {
+        0.0
+    };
+    let cum = if init_cap > 0.0 {
+        nav / init_cap - 1.0
+    } else {
+        0.0
+    };
+    (net, cum)
 }
 
 /// 调仓日判断：quarterly（季首）/monthly（月首）/weekly（周首）/biweekly（双周≈10交易日）。
