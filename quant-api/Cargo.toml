@@ -35,6 +35,7 @@ chrono.workspace = true
 sqlx.workspace = true
 rust_decimal.workspace = true
 imap.workspace = true
+rustls.workspace = true
 rustls-connector.workspace = true
 mail-parser.workspace = true
 bcrypt = "0.15"

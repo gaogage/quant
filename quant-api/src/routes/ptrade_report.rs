@@ -83,6 +83,14 @@ fn fetch_mail_reports_blocking() -> Result<FetchSummary, String> {
 
     use mail_parser::MimeHeaders;
 
+    // rustls 0.23 在 ring/aws-lc-rs 双 feature 共存的依赖树里无法自动选定
+    // CryptoProvider(首次 TLS 握手 panic, 2026-09-22 实测)——进程级显式安装
+    // ring(纯 Rust, 环境风险最小); install_default 幂等, 已被其它组件安装则沿用
+    static INSTALL_PROVIDER: std::sync::Once = std::sync::Once::new();
+    INSTALL_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+
     // webpki 根证书编译期内嵌, 不依赖目标机系统 CA 装配差异
     let tls = rustls_connector::RustlsConnector::new_with_webpki_root_certs()
         .map_err(|e| format!("tls roots: {}", e))?;
