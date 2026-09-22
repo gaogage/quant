@@ -5378,3 +5378,1969 @@ pub(crate) async fn persist_feature_profile_readiness_report(
         )
     })
 }
+
+// ─── 第九批测试（B 线）：诊断域纯函数直测 + 连库只读/zzz 造数 ───
+//
+// 边界约定：
+// - 纯函数（sleeve_*/统计聚合/请求解析）零依赖直测；
+// - 连库测试用本机真实 PG（postgres://gaocheng@localhost/quant），读路径优先用
+//   真实 combo / zzz 不存在键断言零命中；
+// - 写路径（experiment_run / optimization 链路）一律 zzz_test_diag% 前缀自造自清理，
+//   清理按 FK 依赖逆序执行（optimization_task 级联删 trial 与 gate_result）。
+
+#[cfg(test)]
+mod ninth_batch {
+    use super::*;
+
+    async fn test_db() -> sqlx::PgPool {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 构造直调用 AppState（拒绝分支不触 Tushare/库，客户端仅初始化不发请求）。
+    async fn test_state() -> Arc<crate::AppState> {
+        let db = test_db().await;
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    async fn resp_json(resp: impl IntoResponse) -> serde_json::Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    fn d(date: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(date, "%Y-%m-%d").expect("test date")
+    }
+
+    // ═══ sleeve admission 纯函数 ═══════════════════════════════════
+
+    #[test]
+    fn sleeve_train_task_id_extraction_reads_window_entries_only() {
+        let metrics = json!({
+            "windows": [
+                {"window": 1, "train_optimization_task_id": "task-a"},
+                {"window": 2, "train_optimization_task_id": "task-b"},
+                {"window": 3, "status": "skipped", "skip_reason": "no data"},
+                {"window": 4, "train_optimization_task_id": "task-a"},
+                {"window": 5, "train_optimization_task_id": 42},
+            ]
+        });
+        let ids = sleeve_admission_train_task_ids(&metrics);
+        // BTreeSet 去重排序；非字符串值被跳过
+        assert_eq!(
+            ids.into_iter().collect::<Vec<_>>(),
+            vec!["task-a".to_string(), "task-b".to_string()]
+        );
+        // 缺 windows 键 → 空集合
+        assert!(sleeve_admission_train_task_ids(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn sleeve_family_key_prefers_registered_order_then_unknown() {
+        assert_eq!(
+            sleeve_admission_family(&json!({"alpha_sleeve_family": "sleeve-1"})),
+            "sleeve-1"
+        );
+        // alpha_sleeve_family 优先于 alpha_source_family
+        assert_eq!(
+            sleeve_admission_family(&json!({
+                "alpha_sleeve_family": "sleeve-1",
+                "alpha_source_family": "source-1",
+            })),
+            "sleeve-1"
+        );
+        assert_eq!(
+            sleeve_admission_family(&json!({
+                "alpha_source_family": "source-1",
+                "combo_name": "combo-1",
+            })),
+            "source-1"
+        );
+        assert_eq!(
+            sleeve_admission_family(&json!({"multi_alpha_sleeve_profile": "profile-1"})),
+            "profile-1"
+        );
+        assert_eq!(
+            sleeve_admission_family(&json!({"combo_name": "combo-1"})),
+            "combo-1"
+        );
+        assert_eq!(sleeve_admission_family(&json!({})), "unknown");
+        assert_eq!(
+            sleeve_admission_family(&json!({"alpha_sleeve_family": 7})),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn sleeve_unevaluated_status_depends_on_trial_status() {
+        assert_eq!(sleeve_unevaluated_status("completed"), "not_evaluated");
+        assert_eq!(sleeve_unevaluated_status("failed"), "trial_not_completed");
+        assert_eq!(
+            sleeve_unevaluated_status("cancelled"),
+            "trial_not_completed"
+        );
+    }
+
+    #[test]
+    fn sleeve_failed_gate_reports_prefer_gates_then_constraint_fallback() {
+        // gate_results 中 passed=false 的门被挑出并规整为四键结构
+        let gates = json!([
+            {"gate": "fill_ratio_gate", "passed": false, "actual": 0.7, "limit": 0.9},
+            {"gate": "ok_gate", "passed": true},
+            {"passed": false, "gate": "no_limit_gate"},
+        ]);
+        let reports = sleeve_failed_gate_reports(Some(&gates), None);
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0]["gate"], json!("fill_ratio_gate"));
+        assert_eq!(reports[0]["limit"], json!(0.9));
+        assert_eq!(reports[0]["actual"], json!(0.7));
+        assert_eq!(reports[0]["passed"], json!(false));
+        assert_eq!(reports[1]["gate"], json!("no_limit_gate"));
+        assert_eq!(reports[1]["limit"], json!(null));
+
+        // gate_results 无失败门时回退到 constraint_violations（constraint 键映射为 gate）
+        let violations = json!([
+            {"constraint": "max_gross_exposure", "limit": 1.0, "actual": 1.2},
+            {"constraint": "max_position", "limit": 0.1, "actual": 0.05},
+        ]);
+        let reports = sleeve_failed_gate_reports(Some(&json!([])), Some(&violations));
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0]["gate"], json!("max_gross_exposure"));
+        assert_eq!(reports[0]["actual"], json!(1.2));
+
+        // 两者皆空 → 空列表
+        assert!(sleeve_failed_gate_reports(None, None).is_empty());
+    }
+
+    #[test]
+    fn sleeve_skip_reason_combines_status_and_failed_gate_names() {
+        // approved_candidate 无跳过原因
+        assert_eq!(
+            sleeve_trial_skip_reason("approved_candidate", &[]),
+            json!(null)
+        );
+        // 无失败门 → 只报 robustness_status
+        assert_eq!(
+            sleeve_trial_skip_reason("not_evaluated", &[]),
+            json!("robustness_status=not_evaluated")
+        );
+        // 带失败门 → 拼接门名
+        let gates = vec!["fill_ratio_gate".to_string(), "stress_gate".to_string()];
+        assert_eq!(
+            sleeve_trial_skip_reason("rejected", &gates),
+            json!("robustness_status=rejected failed_gates=fill_ratio_gate,stress_gate")
+        );
+    }
+
+    #[test]
+    fn sleeve_gate_accessors_return_null_when_gate_absent() {
+        let gates = json!([
+            {"gate": "g1", "actual": 0.5, "extra": "x"},
+            {"gate": "g2", "passed_count": 9, "total_count": 10},
+        ]);
+        assert!(sleeve_gate(Some(&gates), "g1").is_some());
+        assert!(sleeve_gate(Some(&gates), "missing").is_none());
+        assert!(sleeve_gate(None, "g1").is_none());
+        // 非数组 gate_results → None
+        assert!(sleeve_gate(Some(&json!({"gate": "g1"})), "g1").is_none());
+
+        assert_eq!(sleeve_gate_actual(Some(&gates), "g1"), json!(0.5));
+        assert_eq!(sleeve_gate_actual(Some(&gates), "missing"), json!(null));
+        assert_eq!(sleeve_gate_actual(None, "g1"), json!(null));
+        assert_eq!(
+            sleeve_gate_field(Some(&gates), "g2", "passed_count"),
+            json!(9)
+        );
+        assert_eq!(
+            sleeve_gate_field(Some(&gates), "g2", "missing_field"),
+            json!(null)
+        );
+    }
+
+    #[test]
+    fn sleeve_stress_pass_ratio_covers_actual_count_and_missing_branches() {
+        // actual 直接返回
+        let gates = json!([
+            {"gate": "train_cost_capacity_perturbation_pass_ratio", "actual": 0.9},
+        ]);
+        assert_eq!(sleeve_stress_pass_ratio(Some(&gates)), Some(0.9));
+        // actual 缺失时用 passed_count/total_count 计算
+        let gates = json!([
+            {"gate": "train_cost_capacity_perturbation_pass_ratio", "passed_count": 8.0, "total_count": 10.0},
+        ]);
+        assert_eq!(sleeve_stress_pass_ratio(Some(&gates)), Some(0.8));
+        // total_count=0 → None（避免除零）
+        let gates = json!([
+            {"gate": "train_cost_capacity_perturbation_pass_ratio", "passed_count": 0.0, "total_count": 0.0},
+        ]);
+        assert_eq!(sleeve_stress_pass_ratio(Some(&gates)), None);
+        // 门缺失 / gate_results 缺失 → None
+        assert_eq!(sleeve_stress_pass_ratio(Some(&json!([]))), None);
+        assert_eq!(sleeve_stress_pass_ratio(None), None);
+    }
+
+    #[test]
+    fn sleeve_weak_regime_windows_reads_walk_forward_details() {
+        let gates = json!([
+            {"gate": "walk_forward_min_window_count", "details": {"windows": [
+                {"window": 1, "sharpe": 0.2},
+                {"window": 2, "sharpe": -0.5},
+                {"window": 3, "sharpe": 0.1},
+            ]}},
+        ]);
+        let windows = sleeve_weak_regime_windows(Some(&gates), 2);
+        assert_eq!(windows.len(), 2);
+        // 门或 details 缺失 → 空列表
+        assert!(sleeve_weak_regime_windows(Some(&json!([])), 3).is_empty());
+        assert!(sleeve_weak_regime_windows(None, 3).is_empty());
+    }
+
+    #[test]
+    fn sleeve_metric_helpers_default_to_null_and_empty_summary() {
+        assert_eq!(metric_value(None, "annual_return_pct"), json!(null));
+        assert_eq!(
+            metric_value(
+                Some(&json!({"annual_return_pct": 12.5})),
+                "annual_return_pct"
+            ),
+            json!(12.5)
+        );
+        assert_eq!(
+            metric_value(Some(&json!({})), "annual_return_pct"),
+            json!(null)
+        );
+        let empty = sleeve_empty_portfolio_constraint_summary();
+        assert_eq!(empty["total_count"], json!(0));
+        assert_eq!(empty["hard_count"], json!(0));
+        assert_eq!(empty["by_constraint"], json!([]));
+    }
+
+    #[test]
+    fn sleeve_parameter_lookup_backtest_overrides_trial() {
+        // sleeve_parameter_value：backtest 优先，trial 兜底，均无 → Null
+        let trial = json!({"top_n": 30, "capacity_risk_budget": 0.5});
+        let backtest = json!({"top_n": 50});
+        assert_eq!(
+            sleeve_parameter_value(&trial, Some(&backtest), "top_n"),
+            json!(50)
+        );
+        assert_eq!(sleeve_parameter_value(&trial, None, "top_n"), json!(30));
+        assert_eq!(
+            sleeve_parameter_value(&trial, Some(&backtest), "missing"),
+            json!(null)
+        );
+
+        // sleeve_value_at_path：逐层下钻，断链 → Null
+        let nested = json!({"execution_rules": {"max_participation_rate": 0.2}});
+        assert_eq!(
+            sleeve_value_at_path(
+                Some(&nested),
+                &["execution_rules", "max_participation_rate"]
+            ),
+            json!(0.2)
+        );
+        assert_eq!(
+            sleeve_value_at_path(Some(&nested), &["execution_rules", "missing"]),
+            json!(null)
+        );
+        assert_eq!(sleeve_value_at_path(None, &["a"]), json!(null));
+
+        // sleeve_nested_parameter_value：backtest 命中即返回，否则回落 trial 嵌套值
+        let trial_full = json!({
+            "execution_rules": {"max_participation_rate": 0.1, "execution_carry_policy": "next_open"}
+        });
+        assert_eq!(
+            sleeve_nested_parameter_value(
+                &trial_full,
+                Some(&nested),
+                &["execution_rules", "max_participation_rate"]
+            ),
+            json!(0.2)
+        );
+        assert_eq!(
+            sleeve_nested_parameter_value(
+                &trial_full,
+                None,
+                &["execution_rules", "execution_carry_policy"]
+            ),
+            json!("next_open")
+        );
+        assert_eq!(
+            sleeve_nested_parameter_value(&trial_full, None, &["missing", "key"]),
+            json!(null)
+        );
+    }
+
+    #[test]
+    fn sleeve_shortfall_excess_json_and_constraint_count() {
+        // shortfall：actual 低于 limit 才为正
+        let sf = sleeve_positive_shortfall_json(0.90, Some(0.80));
+        assert!(
+            (sf.as_f64().unwrap() - 0.10).abs() < 1e-9,
+            "shortfall 浮点近似: {sf}"
+        );
+        assert_eq!(sleeve_positive_shortfall_json(0.90, Some(0.95)), json!(0.0));
+        assert_eq!(sleeve_positive_shortfall_json(0.90, None), json!(null));
+        // excess：actual 超过 limit 的部分
+        let ex = sleeve_positive_excess_json(Some(0.30), 0.08);
+        assert!(
+            (ex.as_f64().unwrap() - 0.22).abs() < 1e-9,
+            "excess 浮点近似: {ex}"
+        );
+        assert_eq!(sleeve_positive_excess_json(Some(0.05), 0.08), json!(0.0));
+        assert_eq!(sleeve_positive_excess_json(None, 0.08), json!(null));
+
+        let summary = json!({"total_count": 3, "hard_count": 2});
+        assert_eq!(
+            sleeve_portfolio_constraint_count(&summary, "total_count"),
+            3
+        );
+        assert_eq!(sleeve_portfolio_constraint_count(&summary, "hard_count"), 2);
+        assert_eq!(sleeve_portfolio_constraint_count(&summary, "missing"), 0);
+        assert_eq!(
+            sleeve_portfolio_constraint_count(&json!({}), "total_count"),
+            0
+        );
+    }
+
+    #[test]
+    fn sleeve_portfolio_expression_json_reports_exposure_fields() {
+        let metrics = json!({
+            "final_target_gross_exposure_pct": 0.95,
+            "final_actual_gross_exposure_pct": 0.80,
+            "final_cash_weight_pct": 0.15,
+            "final_execution_fill_ratio": 0.85,
+            "final_unfilled_target_gap_pct": 0.10,
+        });
+        let expr = sleeve_portfolio_expression_json(Some(&metrics));
+        assert_eq!(expr["target_gross_exposure_pct"], json!(0.95));
+        assert_eq!(expr["actual_gross_exposure_pct"], json!(0.80));
+        assert_eq!(expr["cash_weight_pct"], json!(0.15));
+        assert_eq!(expr["fill_ratio"], json!(0.85));
+        assert_eq!(expr["unfilled_target_gap_pct"], json!(0.10));
+        assert_eq!(
+            expr["actual_gross_shortfall_to_target"],
+            json!(0.1499999999999999)
+        );
+        assert_eq!(expr["source"], json!("optimization_trial.metrics"));
+
+        // metrics 缺失 → 全 Null + 缺口 Null
+        let expr = sleeve_portfolio_expression_json(None);
+        assert_eq!(expr["target_gross_exposure_pct"], json!(null));
+        assert_eq!(expr["actual_gross_shortfall_to_target"], json!(null));
+    }
+
+    #[test]
+    fn sleeve_capacity_headroom_json_aggregates_metrics_and_gate_actuals() {
+        let metrics = json!({
+            "final_execution_fill_ratio": 0.85,
+            "final_unfilled_target_gap_pct": 0.10,
+            "final_cash_weight_pct": 0.30,
+            "final_actual_gross_exposure_pct": 0.80,
+            "final_target_gross_exposure_pct": 0.95,
+        });
+        let gates = json!([
+            {"gate": "train_avg_perturbed_calmar", "actual": 1.5},
+            {"gate": "train_perturbed_annual_return", "actual": 0.08},
+        ]);
+        let constraints = json!({"total_count": 4, "hard_count": 1});
+        let headroom = sleeve_capacity_headroom_json(Some(&metrics), Some(&gates), &constraints);
+        assert_eq!(
+            headroom["fill_shortfall_to_90"],
+            json!(0.050000000000000044)
+        );
+        assert_eq!(
+            headroom["unfilled_gap_excess_over_08"],
+            json!(0.020000000000000004)
+        );
+        assert_eq!(headroom["cash_excess_over_25"], json!(0.04999999999999999));
+        assert_eq!(
+            headroom["train_gate_actuals"]["avg_perturbed_calmar"],
+            json!(1.5)
+        );
+        assert_eq!(
+            headroom["train_gate_actuals"]["perturbed_annual_return"],
+            json!(0.08)
+        );
+        assert_eq!(headroom["portfolio_constraint_violation_count"], json!(4));
+        assert_eq!(
+            headroom["hard_portfolio_constraint_violation_count"],
+            json!(1)
+        );
+
+        // 全空输入 → Null 指标 + 零违规计数
+        let headroom = sleeve_capacity_headroom_json(None, None, &json!({}));
+        assert_eq!(headroom["fill_shortfall_to_90"], json!(null));
+        assert_eq!(headroom["portfolio_constraint_violation_count"], json!(0));
+    }
+
+    #[test]
+    fn sleeve_execution_capacity_json_merges_configured_and_realized() {
+        let trial = json!({
+            "capacity_risk_budget": 0.6,
+            "top_n": 40,
+            "execution_rules": {"max_participation_rate": 0.15},
+        });
+        let backtest = json!({"top_n": 60, "execution_impact_budget": 0.2});
+        let metrics =
+            json!({"turnover": 1.2, "num_trades": 33, "final_execution_fill_ratio": 0.92});
+        let gates = json!([
+            {"gate": "train_cost_capacity_perturbation_pass_ratio",
+             "actual": 0.85, "passed_count": 17, "total_count": 20},
+        ]);
+        let capacity = sleeve_execution_capacity_json(
+            &trial,
+            Some(&backtest),
+            &json!({"total_count": 0, "hard_count": 0}),
+            Some(&metrics),
+            Some(&gates),
+        );
+        // configured：backtest 优先 / trial 兜底 / 嵌套参与率
+        assert_eq!(capacity["configured"]["top_n"], json!(60));
+        assert_eq!(capacity["configured"]["capacity_risk_budget"], json!(0.6));
+        assert_eq!(
+            capacity["configured"]["execution_impact_budget"],
+            json!(0.2)
+        );
+        assert_eq!(
+            capacity["configured"]["max_participation_rate"],
+            json!(0.15)
+        );
+        assert_eq!(
+            capacity["configured"]["explicit_participation_cap_configured"],
+            json!(true)
+        );
+        // realized：来自 trial metrics
+        assert_eq!(capacity["realized"]["turnover"], json!(1.2));
+        assert_eq!(capacity["realized"]["num_trades"], json!(33));
+        // stress_gate：pass_ratio 直接取 actual
+        assert_eq!(capacity["stress_gate"]["pass_ratio"], json!(0.85));
+        assert_eq!(capacity["stress_gate"]["passed_count"], json!(17));
+
+        // 空输入 → 参与率未配置
+        let capacity = sleeve_execution_capacity_json(&json!({}), None, &json!({}), None, None);
+        assert_eq!(
+            capacity["configured"]["explicit_participation_cap_configured"],
+            json!(false)
+        );
+        assert_eq!(
+            capacity["configured"]["max_participation_rate"],
+            json!(null)
+        );
+        assert_eq!(capacity["stress_gate"]["pass_ratio"], json!(null));
+    }
+
+    #[test]
+    fn sleeve_capacity_diagnosis_classifies_primary_failure_axes() {
+        let make = |annual: f64, excess: f64, sharpe: f64, fill: f64, hard: i64, gates: Value| {
+            let metrics = json!({
+                "annual_return_pct": annual,
+                "excess_return_pct": excess,
+                "sharpe_ratio": sharpe,
+                "final_execution_fill_ratio": fill,
+                "final_unfilled_target_gap_pct": 0.0,
+            });
+            let constraints = json!({"total_count": hard, "hard_count": hard});
+            sleeve_trial_capacity_diagnosis_json(Some(&metrics), Some(&gates), &constraints)
+        };
+        let strong_gates = json!([
+            {"gate": "train_cost_capacity_perturbation_pass_ratio", "actual": 0.95},
+            {"gate": "train_avg_perturbed_calmar", "actual": 2.0},
+        ]);
+
+        // 通过：正收益 + 超额 + 专业夏普 + 填充达标 + 无硬约束 + 压力门通过
+        let diag = make(0.12, 0.05, 1.8, 0.95, 0, strong_gates.clone());
+        assert_eq!(
+            diag["primary_failure_axis"],
+            json!("passed_observed_execution_capacity_diagnostics")
+        );
+        assert!(diag["findings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("positive_absolute_return")));
+        assert!(diag["findings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("no_hard_portfolio_constraint_violations")));
+
+        // 弱/负 alpha 轴：非正收益
+        let diag = make(-0.02, 0.01, 1.5, 0.95, 0, strong_gates.clone());
+        assert_eq!(
+            diag["primary_failure_axis"],
+            json!("weak_or_negative_alpha")
+        );
+        assert!(diag["findings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("weak_or_negative_absolute_return")));
+
+        // 硬约束容量轴：正收益但存在硬约束违规
+        let diag = make(0.12, 0.05, 1.8, 0.95, 2, strong_gates.clone());
+        assert_eq!(
+            diag["primary_failure_axis"],
+            json!("hard_capacity_constraint")
+        );
+        assert!(diag["findings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("hard_portfolio_constraint_violations_present")));
+
+        // 组合表达容量缺口轴：填充率跌破 0.90
+        let diag = make(0.12, 0.05, 1.8, 0.70, 0, strong_gates.clone());
+        assert_eq!(
+            diag["primary_failure_axis"],
+            json!("portfolio_expression_capacity_gap")
+        );
+        assert!(diag["findings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("fill_below_90")));
+
+        // 压力脆弱且跑输基准轴
+        let weak_gates = json!([
+            {"gate": "train_cost_capacity_perturbation_pass_ratio", "actual": 0.5},
+            {"gate": "train_avg_perturbed_calmar", "actual": 0.8},
+        ]);
+        let diag = make(0.12, -0.03, 1.8, 0.95, 0, weak_gates.clone());
+        assert_eq!(
+            diag["primary_failure_axis"],
+            json!("alpha_underbenchmark_and_stress_fragile")
+        );
+        assert!(diag["findings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("cost_capacity_stress_failed")));
+        assert!(diag["findings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("negative_excess_return")));
+
+        // 纯压力脆弱轴（超额为正）
+        let diag = make(0.12, 0.05, 1.8, 0.95, 0, weak_gates);
+        assert_eq!(
+            diag["primary_failure_axis"],
+            json!("cost_capacity_stress_fragile")
+        );
+
+        // 全空 metrics：年化/超额/夏普按 0 兜底 → 弱 alpha 轴 + 次专业夏普
+        let diag = sleeve_trial_capacity_diagnosis_json(None, None, &json!({}));
+        assert_eq!(
+            diag["primary_failure_axis"],
+            json!("weak_or_negative_alpha")
+        );
+        assert!(diag["findings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("sub_professional_sharpe")));
+    }
+
+    fn zzz_sleeve_row(
+        trial_id: &str,
+        trial_index: i32,
+        score: Option<f64>,
+        parameters: Value,
+        status: &str,
+        robustness_status: Option<&str>,
+        metrics: Value,
+        gate_results: Option<Value>,
+        constraint_violations: Option<Value>,
+    ) -> SleeveAdmissionTrialDiagnosticRow {
+        SleeveAdmissionTrialDiagnosticRow {
+            trial_id: trial_id.to_string(),
+            trial_index,
+            status: status.to_string(),
+            backtest_task_id: None,
+            score: score.map(|value| Decimal::from_f64_retain(value).expect("finite score")),
+            parameters,
+            backtest_parameters: None,
+            metrics: Some(metrics),
+            constraint_violations,
+            portfolio_constraint_summary: None,
+            robustness_status: robustness_status.map(str::to_string),
+            gate_results,
+        }
+    }
+
+    #[test]
+    fn sleeve_trial_diagnostic_builds_json_and_accessors() {
+        let row = zzz_sleeve_row(
+            "zzz_trial_1",
+            3,
+            Some(1.75),
+            json!({
+                "alpha_sleeve_family": "zzz_family_a",
+                "combo_name": "zzz_combo",
+                "score_direction": "higher_is_better",
+            }),
+            "completed",
+            None, // robustness_status 缺失 → trial completed → not_evaluated
+            json!({
+                "annual_return_pct": 12.5,
+                "excess_return_pct": 4.0,
+                "sharpe_ratio": 1.6,
+                "calmar_ratio": 2.1,
+                "final_execution_fill_ratio": 0.88,
+                "final_unfilled_target_gap_pct": 0.09,
+            }),
+            Some(json!([
+                {"gate": "train_final_execution_fill_ratio", "passed": false, "actual": 0.88, "limit": 0.90},
+                {"gate": "train_cost_capacity_perturbation_pass_ratio", "passed": true, "actual": 0.9},
+            ])),
+            Some(json!([{"constraint": "max_gross_exposure", "limit": 1.0, "actual": 1.1}])),
+        );
+
+        let diagnostic = sleeve_admission_trial_diagnostic(&row);
+        assert_eq!(diagnostic.family, "zzz_family_a");
+        // robustness_status 缺失 → not_evaluated 回退
+        assert_eq!(diagnostic.robustness_status, "not_evaluated");
+        assert_eq!(
+            diagnostic.score,
+            Some(Decimal::from_f64_retain(1.75).unwrap())
+        );
+        assert_eq!(diagnostic.annual_return, Some(12.5));
+        assert_eq!(diagnostic.sharpe, Some(1.6));
+        assert_eq!(diagnostic.fill_ratio, Some(0.88));
+        assert_eq!(diagnostic.stress_pass_ratio, Some(0.9));
+        // 失败门取 gate_results 中 passed=false 的门
+        assert_eq!(
+            diagnostic.failed_gate_names,
+            vec!["train_final_execution_fill_ratio".to_string()]
+        );
+
+        let payload = &diagnostic.json;
+        assert_eq!(payload["trial_id"], json!("zzz_trial_1"));
+        assert_eq!(payload["trial_index"], json!(3));
+        assert_eq!(payload["trial_status"], json!("completed"));
+        assert_eq!(payload["family"], json!("zzz_family_a"));
+        assert_eq!(payload["robustness_status"], json!("not_evaluated"));
+        assert_eq!(payload["metrics"]["annual_return_pct"], json!(12.5));
+        assert_eq!(payload["metrics"]["sharpe_ratio"], json!(1.6));
+        assert_eq!(payload["execution_quality"]["fill_ratio"], json!(0.88));
+        assert_eq!(payload["stress"]["pass_ratio"], json!(0.9));
+        // constraint_violations 原样透传
+        assert_eq!(
+            payload["constraint_violations"][0]["constraint"],
+            json!("max_gross_exposure")
+        );
+        // skip_reason 含失败门
+        assert_eq!(
+            payload["skip_reason"],
+            json!("robustness_status=not_evaluated failed_gates=train_final_execution_fill_ratio")
+        );
+
+        // robustness_status 显式给出时不再回退；trial 未完成 → trial_not_completed
+        let row = zzz_sleeve_row(
+            "zzz_trial_2",
+            0,
+            None,
+            json!({"combo_name": "zzz_combo"}),
+            "failed",
+            None,
+            json!({}),
+            None,
+            None,
+        );
+        let diagnostic = sleeve_admission_trial_diagnostic(&row);
+        assert_eq!(diagnostic.robustness_status, "trial_not_completed");
+        // 空输入：failed_gates/constraint_violations 均为空数组
+        assert_eq!(diagnostic.json["failed_gates"], json!([]));
+        assert_eq!(diagnostic.json["constraint_violations"], json!([]));
+    }
+
+    #[test]
+    fn sleeve_best_trial_json_copies_core_fields() {
+        let row = zzz_sleeve_row(
+            "zzz_best",
+            1,
+            Some(2.5),
+            json!({"alpha_sleeve_family": "zzz_family_a"}),
+            "completed",
+            Some("approved_candidate"),
+            json!({"annual_return_pct": 9.0, "sharpe_ratio": 1.2}),
+            None,
+            None,
+        );
+        let diagnostic = sleeve_admission_trial_diagnostic(&row);
+        let best = sleeve_admission_best_trial_json(&diagnostic);
+        assert_eq!(best["trial_id"], json!("zzz_best"));
+        assert_eq!(best["family"], json!("zzz_family_a"));
+        assert_eq!(best["robustness_status"], json!("approved_candidate"));
+        assert_eq!(best["metrics"]["annual_return_pct"], json!(9.0));
+        assert_eq!(
+            best["diagnosis"]["primary_failure_axis"],
+            json!("passed_observed_execution_capacity_diagnostics")
+        );
+    }
+
+    #[test]
+    fn avg_json_returns_null_for_zero_count() {
+        assert_eq!(avg_json(0.0, 0), json!(null));
+        assert_eq!(avg_json(6.0, 2), json!(3.0));
+        assert_eq!(avg_json(-4.5, 3), json!(-1.5));
+    }
+
+    #[test]
+    fn sleeve_diagnostic_matrix_aggregates_windows_families_and_actions() {
+        // 两个 trial：family_a（正收益+低填充）与 family_b（负收益）
+        let rows = vec![
+            zzz_sleeve_row(
+                "zzz_t1",
+                0,
+                Some(2.0),
+                json!({"alpha_sleeve_family": "zzz_family_a"}),
+                "completed",
+                Some("rejected"),
+                json!({
+                    "annual_return_pct": 10.0,
+                    "excess_return_pct": 2.0,
+                    "sharpe_ratio": 1.5,
+                    "calmar_ratio": 2.0,
+                    "final_execution_fill_ratio": 0.80,
+                    "final_unfilled_target_gap_pct": 0.05,
+                }),
+                Some(json!([
+                    {"gate": "train_final_execution_fill_ratio", "passed": false, "actual": 0.80, "limit": 0.90},
+                    {"gate": "train_avg_perturbed_calmar", "passed": false, "actual": 0.9},
+                ])),
+                None,
+            ),
+            zzz_sleeve_row(
+                "zzz_t2",
+                1,
+                Some(1.0),
+                json!({"alpha_source_family": "zzz_family_b"}),
+                "completed",
+                None,
+                json!({"annual_return_pct": -5.0, "excess_return_pct": -8.0, "sharpe_ratio": -0.5}),
+                None,
+                None,
+            ),
+        ];
+        let mut rows_by_task = BTreeMap::new();
+        rows_by_task.insert("zzz_task_1".to_string(), rows);
+
+        let metrics = json!({
+            "windows": [
+                {"window": 1, "status": "completed", "train_optimization_task_id": "zzz_task_1"},
+                {"window": 2, "status": "skipped", "skip_reason": "no candidates",
+                 "train_optimization_task_id": "zzz_task_missing"},
+            ]
+        });
+        let matrix = sleeve_admission_diagnostic_matrix_json(
+            "zzz_run_1",
+            "completed",
+            &metrics,
+            &rows_by_task,
+        );
+
+        assert_eq!(matrix["experiment_run_id"], json!("zzz_run_1"));
+        assert_eq!(matrix["experiment_status"], json!("completed"));
+        assert_eq!(matrix["window_count"], json!(2));
+
+        // 窗口 1：2 个 trial、2 个 family；按 score 降序排列
+        let window1 = &matrix["windows"][0];
+        assert_eq!(window1["trial_count"], json!(2));
+        assert_eq!(window1["family_count"], json!(2));
+        assert_eq!(window1["best_trial"]["trial_id"], json!("zzz_t1"));
+        assert_eq!(window1["best_rejected_trial"]["trial_id"], json!("zzz_t1"));
+        assert_eq!(window1["families"][0]["trial_id"], json!("zzz_t1"));
+
+        // 窗口 2：task 缺行 → 空 trial 列表 + Null best
+        let window2 = &matrix["windows"][1];
+        assert_eq!(window2["trial_count"], json!(0));
+        assert_eq!(window2["best_trial"], json!(null));
+        assert_eq!(window2["skip_reason"], json!("no candidates"));
+
+        // family_summary：按 family 聚合均值与失败门计数
+        let families = matrix["family_summary"].as_array().expect("family array");
+        assert_eq!(families.len(), 2);
+        let family_a = families
+            .iter()
+            .find(|entry| entry["family"] == json!("zzz_family_a"))
+            .expect("family a");
+        assert_eq!(family_a["trial_count"], json!(1));
+        assert_eq!(family_a["rejected_count"], json!(1));
+        assert_eq!(family_a["approved_count"], json!(0));
+        assert_eq!(family_a["avg_annual_return_pct"], json!(10.0));
+        assert_eq!(family_a["avg_sharpe_ratio"], json!(1.5));
+        // 失败门按出现次数排序（两个不同门各 1 次）
+        let modes = family_a["dominant_failure_modes"]
+            .as_array()
+            .expect("modes");
+        assert_eq!(modes.len(), 2);
+
+        // action_summary：正收益 trial 1 个、填充低于 0.90 → 执行容量修复动作；
+        // 负收益 trial → 弱 alpha 重建动作
+        let actions = &matrix["action_summary"];
+        assert_eq!(actions["total_trial_count"], json!(2));
+        assert_eq!(actions["positive_trial_count"], json!(1));
+        assert_eq!(actions["positive_fill_below_90_count"], json!(1));
+        assert_eq!(actions["weak_or_negative_alpha_count"], json!(1));
+        let next_actions = actions["next_actions"].as_array().expect("next actions");
+        let action_names: Vec<&str> = next_actions
+            .iter()
+            .filter_map(|action| action["action"].as_str())
+            .collect();
+        assert!(action_names.contains(&"repair_execution_capacity_for_positive_alpha"));
+        assert!(action_names.contains(&"rebuild_alpha_sources_for_weak_or_negative_train_windows"));
+        // execution_capacity_families 记录填充不足的 family
+        assert_eq!(next_actions[0]["families"][0], json!("zzz_family_a"));
+
+        // scope 契约固定输出
+        assert_eq!(
+            matrix["diagnostic_scope"]["source"],
+            json!("experiment_run.metrics.windows -> optimization_trial -> latest robustness_gate_result")
+        );
+    }
+
+    // ═══ 统计聚合纯函数 ═════════════════════════════════════════════
+
+    fn labeled(day: &str, symbol: &str, score: f64, forward_return: f64) -> AlphaSourceLabeledRow {
+        AlphaSourceLabeledRow {
+            trade_date: d(day),
+            symbol: symbol.to_string(),
+            score,
+            forward_return,
+            amount: Some(100.0),
+            circ_mv: Some(1000.0),
+        }
+    }
+
+    #[test]
+    fn rank_values_assigns_first_rank_to_tied_groups() {
+        // 排序后 [1.0, 1.0, 2.0, 3.0]：并列组取组首名次（1,1,3,4）
+        let ranks = rank_values(&[3.0, 1.0, 2.0, 1.0]);
+        assert_eq!(ranks, vec![4.0, 1.0, 3.0, 1.0]);
+        assert_eq!(rank_values(&[5.0]), vec![1.0]);
+        assert!(rank_values(&[]).is_empty());
+    }
+
+    #[test]
+    fn pearson_corr_detects_linear_relationships_and_degenerate_inputs() {
+        let left = vec![1.0, 2.0, 3.0, 4.0];
+        let right = vec![2.0, 4.0, 6.0, 8.0];
+        let corr = pearson_corr(&left, &right).expect("perfect corr");
+        assert!((corr - 1.0).abs() < 1e-9);
+        // 完全负相关
+        let corr = pearson_corr(&left, &[-1.0, -2.0, -3.0, -4.0]).expect("inverse corr");
+        assert!((corr + 1.0).abs() < 1e-9);
+        // 长度不等 / 少于 2 个样本 / 零方差 → None
+        assert!(pearson_corr(&left, &[1.0, 2.0]).is_none());
+        assert!(pearson_corr(&[1.0], &[1.0]).is_none());
+        assert!(pearson_corr(&[2.0, 2.0], &[1.0, 3.0]).is_none());
+    }
+
+    #[test]
+    fn daily_rank_ic_respects_minimum_daily_sample_size() {
+        // 3 行同日，min=3 才计入
+        let rows = vec![
+            labeled("2024-01-02", "000001.SZ", 1.0, 0.01),
+            labeled("2024-01-02", "000002.SZ", 2.0, 0.02),
+            labeled("2024-01-02", "000003.SZ", 3.0, 0.03),
+            labeled("2024-01-03", "000001.SZ", 1.0, 0.01),
+        ];
+        let ic_rows = daily_rank_ic_from_labeled_rows(5, &rows, 3);
+        assert_eq!(ic_rows.len(), 1);
+        assert_eq!(ic_rows[0].trade_date, d("2024-01-02"));
+        assert_eq!(ic_rows[0].sample_size, 3);
+        // 完全同向秩 → rank_ic = 1
+        assert!((ic_rows[0].rank_ic - 1.0).abs() < 1e-9);
+        // 提高门槛后全部被过滤
+        assert!(daily_rank_ic_from_labeled_rows(5, &rows, 4).is_empty());
+    }
+
+    #[test]
+    fn group_return_buckets_average_forward_returns_by_score_order() {
+        // 4 只股票分 2 桶（按 score 升序）：低分桶 {a,b}、高分桶 {c,d}
+        let rows = vec![
+            labeled("2024-01-02", "a", 1.0, 0.01),
+            labeled("2024-01-02", "b", 2.0, 0.03),
+            labeled("2024-01-02", "c", 3.0, 0.05),
+            labeled("2024-01-02", "d", 4.0, 0.07),
+        ];
+        let buckets = group_return_rows_from_labeled_rows(&rows, 4, 2);
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].bucket, 1);
+        assert!((buckets[0].avg_forward_return - 0.02).abs() < 1e-9);
+        assert_eq!(buckets[0].sample_count, 2);
+        assert_eq!(buckets[1].bucket, 2);
+        assert!((buckets[1].avg_forward_return - 0.06).abs() < 1e-9);
+        // 样本不足 → 空桶
+        assert!(group_return_rows_from_labeled_rows(&rows, 5, 2).is_empty());
+    }
+
+    #[test]
+    fn turnover_capacity_summary_measures_high_bucket_churn() {
+        // 两天各 4 只，bucket_count=2 → 高分桶每日 2 只；
+        // 第一日高分桶 {c,d}，第二日高分桶 {d,e}（保留 1 只）→ 换手 0.5
+        let rows = vec![
+            labeled("2024-01-02", "a", 1.0, 0.01),
+            labeled("2024-01-02", "b", 2.0, 0.01),
+            labeled("2024-01-02", "c", 3.0, 0.01),
+            labeled("2024-01-02", "d", 4.0, 0.01),
+            labeled("2024-01-03", "a", 1.0, 0.01),
+            labeled("2024-01-03", "c", 2.0, 0.01),
+            labeled("2024-01-03", "d", 3.0, 0.01),
+            labeled("2024-01-03", "e", 4.0, 0.01),
+        ];
+        let summary = turnover_capacity_summary_from_labeled_rows(5, &rows, 4, 2);
+        assert_eq!(summary.horizon_days, 5);
+        assert_eq!(summary.sampled_days, 2);
+        assert!((summary.avg_high_score_bucket_symbols - 2.0).abs() < 1e-9);
+        assert!((summary.avg_high_score_bucket_turnover - 0.5).abs() < 1e-9);
+        // 首日不产生换手，只有次日 1 个观测
+        assert!((summary.median_high_score_bucket_turnover - 0.5).abs() < 1e-9);
+        assert!((summary.avg_high_score_bucket_amount - 100.0).abs() < 1e-9);
+        assert!((summary.median_high_score_bucket_circ_mv - 1000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn avg_and_sorted_finite_helpers_filter_non_finite_values() {
+        assert_eq!(avg_finite(&[]), 0.0);
+        assert_eq!(avg_finite(&[1.0, 2.0, 6.0]), 3.0);
+        assert_eq!(
+            sorted_finite(vec![3.0, f64::NAN, 1.0, f64::INFINITY, 2.0].into_iter()),
+            vec![1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn market_regime_distribution_counts_regime_samples() {
+        let mut regimes = BTreeMap::new();
+        for (day, regime) in [
+            ("2024-01-02", "bull"),
+            ("2024-01-03", "bear"),
+            ("2024-01-04", "bull"),
+        ] {
+            regimes.insert(
+                d(day),
+                AlphaSourceMarketRegime {
+                    trade_date: d(day),
+                    regime: regime.to_string(),
+                    trailing_return: 0.0,
+                    annualized_volatility: 0.0,
+                    trailing_max_drawdown: 0.0,
+                },
+            );
+        }
+        let distribution = market_regime_distribution(&regimes);
+        assert_eq!(distribution["sampled_days"], json!(3));
+        let entries = distribution["regimes"].as_array().expect("regime array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["regime"], json!("bear"));
+        assert_eq!(entries[0]["sampled_day_ratio"], json!(1.0 / 3.0));
+        assert_eq!(entries[1]["regime"], json!("bull"));
+        assert_eq!(entries[1]["sampled_days"], json!(2));
+        // 空输入 → 0 天且无崩溃
+        let distribution = market_regime_distribution(&BTreeMap::new());
+        assert_eq!(distribution["sampled_days"], json!(0));
+    }
+
+    #[test]
+    fn regime_split_summaries_group_rows_into_unknown_bucket() {
+        let rows = vec![
+            labeled("2024-01-02", "a", 1.0, 0.01),
+            labeled("2024-01-02", "b", 2.0, 0.02),
+            labeled("2024-01-02", "c", 3.0, 0.03),
+            labeled("2024-01-02", "d", 4.0, 0.04),
+        ];
+        // 无 regime 匹配 → 全部归入 unknown 桶
+        let summaries = regime_split_summaries_from_labeled_rows(10, &rows, &BTreeMap::new(), 4, 2);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].regime, "unknown");
+        assert_eq!(summaries[0].sampled_days, 1);
+        assert_eq!(summaries[0].labeled_rows, 4);
+        assert_eq!(summaries[0].horizon_days, 10);
+        assert_eq!(summaries[0].rank_ic.horizon_days, 10);
+        assert_eq!(summaries[0].group_return.bucket_count, 2);
+    }
+
+    // ═══ main business / readiness 纯函数 ═══════════════════════════
+
+    fn main_business_req() -> MainBusinessDiagnosticsRequest {
+        MainBusinessDiagnosticsRequest {
+            start_date: "20240101".into(),
+            end_date: "20240301".into(),
+            business_type: None,
+            universe_profile: None,
+            profiles: None,
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            min_daily_coverage_ratio: None,
+            persist_report: None,
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        }
+    }
+
+    #[test]
+    fn main_business_request_parsing_defaults_aliases_and_errors() {
+        let req = main_business_req();
+        // 默认业务类型 P；空白回落默认；小写转大写
+        assert_eq!(main_business_diagnostics_business_type(&req), "P");
+        let req = MainBusinessDiagnosticsRequest {
+            business_type: Some("  p ".into()),
+            ..main_business_req()
+        };
+        assert_eq!(main_business_diagnostics_business_type(&req), "P");
+
+        // universe 默认 listed_non_st + 两种别名
+        assert_eq!(
+            main_business_diagnostics_universe_profile(&main_business_req()).unwrap(),
+            MainBusinessDiagnosticsUniverse::ListedNonSt
+        );
+        for alias in [
+            "listed-non-st",
+            "main_chinext_non_st",
+            "main-chinext-non-st",
+        ] {
+            let req = MainBusinessDiagnosticsRequest {
+                universe_profile: Some(alias.into()),
+                ..main_business_req()
+            };
+            assert!(
+                main_business_diagnostics_universe_profile(&req).is_ok(),
+                "别名 {alias}"
+            );
+        }
+        let req = MainBusinessDiagnosticsRequest {
+            universe_profile: Some("zzz_universe".into()),
+            ..main_business_req()
+        };
+        let err = main_business_diagnostics_universe_profile(&req).expect_err("bad universe");
+        assert!(
+            err.contains("unsupported main_business universe_profile"),
+            "{err}"
+        );
+
+        // profile 别名 + 未注册报错
+        assert_eq!(
+            parse_main_business_diagnostics_profile("sales-yoy").unwrap(),
+            MainBusinessDiagnosticsProfile::SalesYoy
+        );
+        assert_eq!(
+            parse_main_business_diagnostics_profile(" gross-margin-delta-yoy ").unwrap(),
+            MainBusinessDiagnosticsProfile::GrossMarginDeltaYoy
+        );
+        assert_eq!(
+            parse_main_business_diagnostics_profile("segment_concentration_inverse").unwrap(),
+            MainBusinessDiagnosticsProfile::SegmentConcentrationInverse
+        );
+        let err = parse_main_business_diagnostics_profile("zzz_profile").expect_err("bad profile");
+        assert!(err.contains("not pre-registered"), "{err}");
+    }
+
+    #[test]
+    fn main_business_profiles_dedupe_sort_and_reject_blank_sets() {
+        // 默认四个 profile（BTreeSet 排序）
+        let req = main_business_req();
+        let profiles = main_business_diagnostics_profiles(&req).unwrap();
+        assert_eq!(profiles.len(), 4);
+        // BTreeSet 按 enum 声明序（Ord derive）：SalesYoy 在 GrossMarginDeltaYoy 之前
+        assert_eq!(profiles[0], MainBusinessDiagnosticsProfile::SalesYoy);
+        assert_eq!(
+            profiles[3],
+            MainBusinessDiagnosticsProfile::SegmentConcentrationInverse
+        );
+
+        // 重复 + 空白项被去重/跳过
+        let req = MainBusinessDiagnosticsRequest {
+            profiles: Some(vec!["profit_yoy".into(), "profit-yoy".into(), "  ".into()]),
+            ..main_business_req()
+        };
+        let profiles = main_business_diagnostics_profiles(&req).unwrap();
+        assert_eq!(profiles, vec![MainBusinessDiagnosticsProfile::ProfitYoy]);
+
+        // 全空白 → 拒绝
+        let req = MainBusinessDiagnosticsRequest {
+            profiles: Some(vec!["   ".into()]),
+            ..main_business_req()
+        };
+        let err = main_business_diagnostics_profiles(&req).expect_err("blank profiles");
+        assert!(err.contains("at least one pre-registered profile"), "{err}");
+
+        // 混入未注册 profile → 整体拒绝
+        let req = MainBusinessDiagnosticsRequest {
+            profiles: Some(vec!["sales_yoy".into(), "zzz_profile".into()]),
+            ..main_business_req()
+        };
+        assert!(main_business_diagnostics_profiles(&req).is_err());
+    }
+
+    #[test]
+    fn main_business_bounded_thresholds_clamp_non_finite_values() {
+        // 默认 0.90；非有限值回落默认；越界钳制到 [0,1]
+        let req = main_business_req();
+        assert_eq!(main_business_daily_coverage_ratio_threshold(&req), 0.90);
+        let req = MainBusinessDiagnosticsRequest {
+            min_daily_coverage_ratio: Some(f64::NAN),
+            ..main_business_req()
+        };
+        assert_eq!(main_business_daily_coverage_ratio_threshold(&req), 0.90);
+        let req = MainBusinessDiagnosticsRequest {
+            min_daily_coverage_ratio: Some(1.7),
+            ..main_business_req()
+        };
+        assert_eq!(main_business_daily_coverage_ratio_threshold(&req), 1.0);
+        assert_eq!(bounded_main_business_f64(Some(-0.5), 0.9, 0.0, 1.0), 0.0);
+        assert_eq!(bounded_main_business_f64(Some(0.25), 0.9, 0.0, 1.0), 0.25);
+    }
+
+    #[test]
+    fn main_business_sql_builders_embed_universe_filter_and_score_expression() {
+        // listed_non_st：无市场过滤片段；main_chinext_non_st：附加主板/创业板过滤
+        let listed = main_business_daily_coverage_sql(MainBusinessDiagnosticsUniverse::ListedNonSt);
+        assert!(!listed.contains("ms.market IN"), "listed 不应带市场过滤");
+        let chinext =
+            main_business_daily_coverage_sql(MainBusinessDiagnosticsUniverse::MainChinextNonSt);
+        assert!(chinext.contains("AND ms.market IN ('主板', '创业板')"));
+        assert!(chinext.contains("FROM market_trade_calendar"));
+
+        // score SQL：不同 profile 注入不同打分表达式
+        let sales = main_business_score_rows_sql(
+            MainBusinessDiagnosticsProfile::SalesYoy,
+            MainBusinessDiagnosticsUniverse::ListedNonSt,
+        );
+        assert!(sales.contains("LN(sales / prev_sales)"));
+        assert!(sales.contains("FROM market_stock_main_business"));
+        let concentration = main_business_score_rows_sql(
+            MainBusinessDiagnosticsProfile::SegmentConcentrationInverse,
+            MainBusinessDiagnosticsUniverse::MainChinextNonSt,
+        );
+        assert!(concentration.contains("-sales_hhi"));
+        assert!(concentration.contains("AND ms.market IN ('主板', '创业板')"));
+        let margin = main_business_score_rows_sql(
+            MainBusinessDiagnosticsProfile::GrossMarginDeltaYoy,
+            MainBusinessDiagnosticsUniverse::ListedNonSt,
+        );
+        assert!(margin.contains("(profit / sales) - (prev_profit / prev_sales)"));
+    }
+
+    #[test]
+    fn feature_readiness_date_parsing_accepts_compact_and_iso_forms() {
+        assert_eq!(
+            parse_feature_profile_readiness_date("20240506", "start_date").unwrap(),
+            d("2024-05-06")
+        );
+        assert_eq!(
+            parse_feature_profile_readiness_date(" 2024-05-06 ", "end_date").unwrap(),
+            d("2024-05-06")
+        );
+        let err = parse_feature_profile_readiness_date("2024/05/06", "start_date")
+            .expect_err("bad format");
+        assert_eq!(err, "start_date must use YYYYMMDD or YYYY-MM-DD format");
+    }
+
+    #[test]
+    fn readiness_passed_flag_and_failure_summary_extract_gate_details() {
+        let report = json!({
+            "passed": true,
+            "gates": [{"gate": "g1", "passed": true}],
+        });
+        assert!(feature_profile_readiness_passed(&report));
+        assert_eq!(readiness_failure_summary(&report), "no failing gate detail");
+
+        let report = json!({
+            "passed": false,
+            "gates": [
+                {"gate": "g1", "passed": false, "actual": 0, "expected": 1},
+                {"gate": "g2", "passed": false, "actual": 3, "expected": 0},
+                {"gate": "g3", "passed": true},
+            ],
+        });
+        assert!(!feature_profile_readiness_passed(&report));
+        let summary = readiness_failure_summary(&report);
+        assert!(summary.contains("g1 actual=0 expected=1"), "{summary}");
+        assert!(summary.contains("g2 actual=3 expected=0"), "{summary}");
+        assert!(!summary.contains("g3"), "通过的门不应进入失败摘要");
+
+        // 缺 passed / 缺 gates → 保守 false + 兜底文案
+        assert!(!feature_profile_readiness_passed(&json!({})));
+        assert_eq!(
+            readiness_failure_summary(&json!({})),
+            "no failing gate detail"
+        );
+    }
+
+    fn zzz_alpha_summary(
+        usable_rows: i64,
+        null_available: i64,
+        future_leak: i64,
+    ) -> AlphaSourceDiagnosticsSummary {
+        AlphaSourceDiagnosticsSummary {
+            usable_rows,
+            usable_symbols: usable_rows,
+            null_score_rows: 0,
+            null_available_at_rows: null_available,
+            future_leak_rows: future_leak,
+            first_trade_date: None,
+            last_trade_date: None,
+        }
+    }
+
+    #[test]
+    fn alpha_repair_hint_covers_priority_branches() {
+        // 通过 → 无需修复
+        let hint = alpha_source_diagnostics_repair_hint(true, &zzz_alpha_summary(0, 5, 9));
+        assert_eq!(hint["repairable"], json!(false));
+        // 未来泄漏优先级最高
+        let hint = alpha_source_diagnostics_repair_hint(false, &zzz_alpha_summary(10, 5, 9));
+        assert_eq!(hint["repairable"], json!(true));
+        assert!(hint["reason"].as_str().unwrap().contains("future leak"));
+        // 其次缺 available_at
+        let hint = alpha_source_diagnostics_repair_hint(false, &zzz_alpha_summary(10, 5, 0));
+        assert!(hint["reason"]
+            .as_str()
+            .unwrap()
+            .contains("available_at is missing"));
+        // 再次零可用行
+        let hint = alpha_source_diagnostics_repair_hint(false, &zzz_alpha_summary(0, 0, 0));
+        assert!(hint["reason"].as_str().unwrap().contains("no usable rows"));
+        // 兜底：覆盖/宽度不足
+        let hint = alpha_source_diagnostics_repair_hint(false, &zzz_alpha_summary(10, 0, 0));
+        assert!(hint["reason"]
+            .as_str()
+            .unwrap()
+            .contains("coverage or daily breadth"));
+    }
+
+    #[test]
+    fn alpha_market_scope_breadth_json_serializes_status_fields() {
+        let status = AlphaSourceMarketScopeBreadthStatus {
+            passed: true,
+            status: "stable",
+            eligible_days: 10,
+            joined_days: 9,
+            missing_eligible_days: 1,
+            min_ratio: 0.80,
+            p10_ratio: 0.82,
+            p50_ratio: 0.90,
+            p95_ratio: 0.95,
+            max_ratio: 1.0,
+            weak_day_count: 0,
+            weak_day_threshold_ratio: 0.70,
+            first_weak_day: Some(d("2024-01-02")),
+            last_weak_day: None,
+        };
+        let payload = alpha_source_market_scope_breadth_json(&status);
+        assert_eq!(payload["status"], json!("stable"));
+        assert_eq!(payload["passed"], json!(true));
+        assert_eq!(payload["eligible_days"], json!(10));
+        assert_eq!(payload["missing_eligible_days"], json!(1));
+        assert_eq!(payload["min_ratio"], json!(0.80));
+        assert_eq!(payload["first_weak_day"], json!("2024-01-02"));
+        assert_eq!(payload["last_weak_day"], json!(null));
+        assert!(payload["policy"]
+            .as_str()
+            .unwrap()
+            .contains("market-scope gated"));
+    }
+
+    // ═══ 连库：真实 PG 只读 + zzz 造数 ═══════════════════════════════
+
+    /// 清理 zzz 造数（按 FK 依赖逆序；optimization_task 级联删 trial/gate）。
+    /// 注意 related_entity_id 只匹配 er 前缀：persist_* 测试的行按返回 id 自行精确清理，
+    /// 避免并行测试时误删。
+    async fn cleanup_zzz_diag_rows(db: &sqlx::PgPool) {
+        for sql in [
+            "DELETE FROM experiment_run WHERE experiment_run_id LIKE 'zzz_test_diag%'
+                OR related_entity_id LIKE 'zzz_test_diag_er%'",
+            "DELETE FROM portfolio_constraint_violation WHERE task_id LIKE 'zzz_test_diag%'",
+            // 先断开 best_trial 自引用，避免 SET NULL 悬挂
+            "UPDATE optimization_task SET best_trial_id = NULL WHERE optimization_task_id LIKE 'zzz_test_diag%'",
+            "DELETE FROM optimization_task WHERE optimization_task_id LIKE 'zzz_test_diag%'",
+            "DELETE FROM backtest_task WHERE task_id LIKE 'zzz_test_diag%'",
+            "DELETE FROM strategy_version WHERE strategy_version_id LIKE 'zzz_test_diag%'",
+            "DELETE FROM strategy_definition WHERE strategy_code = 'zzz_diag_code'",
+            "DELETE FROM data_version WHERE data_version_id LIKE 'zzz_test_diag%'",
+        ] {
+            sqlx::query(sql).execute(db).await.expect("清理 zzz 造数");
+        }
+    }
+
+    #[tokio::test]
+    async fn sleeve_admission_rejects_unknown_and_metrics_less_runs() {
+        let db = test_db().await;
+        // 不存在的 run → not found
+        let err = build_sleeve_admission_diagnostics(&db, "zzz_test_diag_missing_run")
+            .await
+            .expect_err("unknown run");
+        assert!(err.contains("experiment_run not found"), "{err}");
+
+        // 有 run 但 metrics 为 NULL → has no metrics
+        sqlx::query(
+            "INSERT INTO experiment_run
+               (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+                config, metrics, status, started_at)
+             VALUES ('zzz_test_diag_er_no_metrics', 'zzz_diag', 'zzz_diag',
+                     'zzz_test_diag_er_no_metrics', '{}', NULL, 'failed', now())",
+        )
+        .execute(&db)
+        .await
+        .expect("造无 metrics 的 run");
+        let err = build_sleeve_admission_diagnostics(&db, "zzz_test_diag_er_no_metrics")
+            .await
+            .expect_err("no metrics");
+        assert!(err.contains("has no metrics"), "{err}");
+        cleanup_zzz_diag_rows(&db).await;
+    }
+
+    #[tokio::test]
+    async fn sleeve_admission_zzz_chain_loads_trials_and_builds_matrix() {
+        let db = test_db().await;
+        cleanup_zzz_diag_rows(&db).await;
+
+        // FK 前置链：strategy_definition / strategy_version / data_version
+        // → optimization_task → trial(+backtest) → gate_result / portfolio_constraint_violation
+        sqlx::query(
+            "INSERT INTO strategy_definition (strategy_code, name, strategy_type, status)
+             VALUES ('zzz_diag_code', 'zzz_diag_name', 'zzz', 'active')",
+        )
+        .execute(&db)
+        .await
+        .expect("造 strategy_definition");
+        sqlx::query(
+            "INSERT INTO strategy_version
+               (strategy_version_id, strategy_code, version, parameter_schema, default_parameters, status)
+             VALUES ('zzz_test_diag_sv1', 'zzz_diag_code', '1.0.0', '{}', '{}', 'active')",
+        )
+        .execute(&db)
+        .await
+        .expect("造 strategy_version");
+        sqlx::query(
+            "INSERT INTO data_version
+               (data_version_id, name, source, start_date, end_date, tables, snapshot_hash, state)
+             VALUES ('zzz_test_diag_dv1', 'zzz_diag', 'zzz',
+                     DATE '2024-01-01', DATE '2024-12-31', ARRAY['zzz_diag'], 'zzz-hash-1', 'active')",
+        )
+        .execute(&db)
+        .await
+        .expect("造 data_version");
+        sqlx::query(
+            "INSERT INTO optimization_task
+               (optimization_task_id, strategy_version_id, data_version_id,
+                search_method, search_space, objective, status)
+             VALUES ('zzz_test_diag_ot1', 'zzz_test_diag_sv1', 'zzz_test_diag_dv1',
+                     'random', '{}', '{}', 'completed')",
+        )
+        .execute(&db)
+        .await
+        .expect("造 optimization_task");
+        sqlx::query(
+            "INSERT INTO backtest_task
+               (task_id, strategy_version_id, data_version_id, benchmark_symbol, symbols,
+                start_date, end_date, initial_capital, rebalance_frequency,
+                cost_model, slippage_model, execution_rules, parameters, status)
+             VALUES ('zzz_test_diag_bt1', 'zzz_test_diag_sv1', 'zzz_test_diag_dv1', '000300.SH',
+                     ARRAY['000001.SZ']::varchar[], DATE '2024-01-01', DATE '2024-06-30',
+                     1000000.0, 'daily', '{}', '{}', '{}', '{}', 'completed')",
+        )
+        .execute(&db)
+        .await
+        .expect("造 backtest_task");
+
+        // trial 1：family_a、score 高、带 robustness gate 结果（rejected + 失败门）
+        sqlx::query(
+            "INSERT INTO optimization_trial
+               (trial_id, optimization_task_id, trial_index, parameters, backtest_task_id,
+                score, metrics, status)
+             VALUES ('zzz_test_diag_t1', 'zzz_test_diag_ot1', 0,
+                     '{\"alpha_sleeve_family\": \"zzz_family_a\", \"combo_name\": \"zzz_combo_a\"}',
+                     'zzz_test_diag_bt1', 2.5,
+                     '{\"annual_return_pct\": 12.0, \"sharpe_ratio\": 1.6,
+                        \"final_execution_fill_ratio\": 0.82, \"excess_return_pct\": 3.0}',
+                     'completed')",
+        )
+        .execute(&db)
+        .await
+        .expect("造 trial 1");
+        // trial 2：family_b、score 低、无 gate 行 → robustness 回退 not_evaluated
+        sqlx::query(
+            "INSERT INTO optimization_trial
+               (trial_id, optimization_task_id, trial_index, parameters, score, metrics, status)
+             VALUES ('zzz_test_diag_t2', 'zzz_test_diag_ot1', 1,
+                     '{\"alpha_source_family\": \"zzz_family_b\"}', 0.5,
+                     '{\"annual_return_pct\": -4.0, \"sharpe_ratio\": -0.3}', 'completed')",
+        )
+        .execute(&db)
+        .await
+        .expect("造 trial 2");
+        sqlx::query(
+            "INSERT INTO robustness_gate_result
+               (gate_result_id, optimization_task_id, trial_id, gate_policy, gate_results, status)
+             VALUES ('zzz_test_diag_gr1', 'zzz_test_diag_ot1', 'zzz_test_diag_t1', '{}',
+                     '[{\"gate\": \"train_final_execution_fill_ratio\", \"passed\": false,
+                        \"actual\": 0.82, \"limit\": 0.90},
+                       {\"gate\": \"train_cost_capacity_perturbation_pass_ratio\", \"passed\": true,
+                        \"actual\": 0.9}]',
+                     'rejected')",
+        )
+        .execute(&db)
+        .await
+        .expect("造 gate_result");
+        // 组合约束违规（挂在 trial1 的 backtest_task 上，验证 LATERAL 聚合）
+        for (violation, severity, count) in [
+            ("zzz_max_gross", "hard", 2),
+            ("zzz_max_position", "warning", 1),
+        ] {
+            for idx in 0..count {
+                sqlx::query(
+                    "INSERT INTO portfolio_constraint_violation
+                       (violation_id, task_id, trade_date, constraint_name, limit_value, actual_value, severity)
+                     VALUES ($1, 'zzz_test_diag_bt1', DATE '2024-01-02', $2, 1.0, 1.2, $3)",
+                )
+                .bind(format!("zzz_test_diag_pv_{violation}_{idx}"))
+                .bind(violation)
+                .bind(severity)
+                .execute(&db)
+                .await
+                .expect("造 portfolio_constraint_violation");
+            }
+        }
+        // 源头 experiment_run：metrics.windows 指向 zzz task
+        sqlx::query(
+            "INSERT INTO experiment_run
+               (experiment_run_id, experiment_type, related_entity_type, related_entity_id,
+                config, metrics, status, started_at, completed_at)
+             VALUES ('zzz_test_diag_er1', 'zzz_diag', 'zzz_diag', 'zzz_test_diag_er1', '{}',
+                     '{\"windows\": [{\"window\": 1, \"status\": \"completed\",
+                        \"train_optimization_task_id\": \"zzz_test_diag_ot1\"}]}',
+                     'completed', now(), now())",
+        )
+        .execute(&db)
+        .await
+        .expect("造 experiment_run");
+
+        // load：按 score DESC 排序，trial1 在前
+        let rows = load_sleeve_admission_trial_diagnostic_rows(&db, "zzz_test_diag_ot1")
+            .await
+            .expect("load zzz trials");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].trial_id, "zzz_test_diag_t1");
+        assert_eq!(rows[0].robustness_status.as_deref(), Some("rejected"));
+        assert_eq!(rows[1].trial_id, "zzz_test_diag_t2");
+        assert_eq!(rows[1].robustness_status, None);
+        // 违规 LATERAL 聚合：total=3、hard=2
+        let summary = rows[0]
+            .portfolio_constraint_summary
+            .as_ref()
+            .expect("summary");
+        assert_eq!(summary["total_count"], json!(3));
+        assert_eq!(summary["hard_count"], json!(2));
+
+        // build：完整诊断矩阵
+        let matrix = build_sleeve_admission_diagnostics(&db, "zzz_test_diag_er1")
+            .await
+            .expect("build zzz matrix");
+        assert_eq!(matrix["experiment_run_id"], json!("zzz_test_diag_er1"));
+        assert_eq!(matrix["window_count"], json!(1));
+        let window = &matrix["windows"][0];
+        assert_eq!(
+            window["train_optimization_task_id"],
+            json!("zzz_test_diag_ot1")
+        );
+        assert_eq!(window["trial_count"], json!(2));
+        assert_eq!(window["family_count"], json!(2));
+        assert_eq!(window["best_trial"]["trial_id"], json!("zzz_test_diag_t1"));
+        assert_eq!(
+            window["best_rejected_trial"]["trial_id"],
+            json!("zzz_test_diag_t1")
+        );
+        // family_b trial 无 gate 行 → not_evaluated；family_a 传播 rejected
+        let families = window["families"].as_array().expect("families");
+        let family_a = families
+            .iter()
+            .find(|entry| entry["family"] == json!("zzz_family_a"))
+            .expect("family a");
+        assert_eq!(family_a["robustness_status"], json!("rejected"));
+        assert_eq!(
+            family_a["skip_reason"],
+            json!("robustness_status=rejected failed_gates=train_final_execution_fill_ratio")
+        );
+        // 硬约束违规计入诊断
+        assert_eq!(
+            family_a["capacity_headroom"]["hard_portfolio_constraint_violation_count"],
+            json!(2)
+        );
+        let family_b = families
+            .iter()
+            .find(|entry| entry["family"] == json!("zzz_family_b"))
+            .expect("family b");
+        assert_eq!(family_b["robustness_status"], json!("not_evaluated"));
+
+        // family_summary / action_summary 聚合
+        let summaries = matrix["family_summary"].as_array().expect("family summary");
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(matrix["action_summary"]["total_trial_count"], json!(2));
+        assert_eq!(matrix["action_summary"]["positive_trial_count"], json!(1));
+        assert_eq!(
+            matrix["action_summary"]["weak_or_negative_alpha_count"],
+            json!(1)
+        );
+
+        cleanup_zzz_diag_rows(&db).await;
+        // 清理后 load 返回空（级联删除验证）
+        let rows = load_sleeve_admission_trial_diagnostic_rows(&db, "zzz_test_diag_ot1")
+            .await
+            .expect("load after cleanup");
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persist_diagnostics_reports_write_and_cleanup_zzz_runs() {
+        let db = test_db().await;
+        cleanup_zzz_diag_rows(&db).await;
+
+        let report = json!({"readiness_type": "zzz_test_diag", "passed": false});
+
+        // 三个 persist_*：写入 experiment_run 并返回 exp- 前缀 id
+        let alpha_id =
+            persist_alpha_source_diagnostics_report(&db, "zzz_test_diag_combo", "1.0.0", &report)
+                .await
+                .expect("persist alpha report");
+        assert!(alpha_id.starts_with("exp-"), "{alpha_id}");
+
+        let main_id = persist_main_business_diagnostics_report(
+            &db,
+            "zzz_test_diag_biz",
+            MainBusinessDiagnosticsUniverse::ListedNonSt,
+            &[MainBusinessDiagnosticsProfile::SalesYoy],
+            &report,
+        )
+        .await
+        .expect("persist main business report");
+        assert!(main_id.starts_with("exp-"), "{main_id}");
+
+        let feature_id =
+            persist_feature_profile_readiness_report(&db, "zzz_test_diag_profile", &report)
+                .await
+                .expect("persist feature profile report");
+        assert!(feature_id.starts_with("exp-"), "{feature_id}");
+
+        // 断言三行均落库（experiment_type / related_entity_id / status=completed）
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT experiment_run_id, experiment_type, related_entity_id, status
+             FROM experiment_run
+             WHERE experiment_run_id = ANY($1)",
+        )
+        .bind(vec![alpha_id.clone(), main_id.clone(), feature_id.clone()])
+        .fetch_all(&db)
+        .await
+        .expect("查询 persist 结果");
+        assert_eq!(rows.len(), 3);
+        for (run_id, experiment_type, related, status) in &rows {
+            assert_eq!(status, "completed");
+            if run_id == &alpha_id {
+                assert_eq!(experiment_type, "alpha_source_diagnostics_report");
+                assert_eq!(related, "zzz_test_diag_combo@1.0.0");
+            } else if run_id == &main_id {
+                assert_eq!(experiment_type, "main_business_source_diagnostics_report");
+                assert_eq!(related, "main_business");
+            } else {
+                assert_eq!(experiment_type, "feature_profile_readiness_report");
+                assert_eq!(related, "zzz_test_diag_profile");
+            }
+        }
+
+        // 精确清理三行
+        for run_id in [alpha_id, main_id, feature_id] {
+            let deleted = sqlx::query("DELETE FROM experiment_run WHERE experiment_run_id = $1")
+                .bind(&run_id)
+                .execute(&db)
+                .await
+                .expect("清理 persist 行");
+            assert_eq!(deleted.rows_affected(), 1, "应精确删除一行: {run_id}");
+        }
+        cleanup_zzz_diag_rows(&db).await;
+    }
+
+    #[tokio::test]
+    async fn alpha_source_load_summary_and_daily_rows_read_real_combo() {
+        let db = test_db().await;
+        // 真实 combo 只读：phase7_financial_quality_v1 在 2026-06 窗口有 PIT 可用行
+        let start = d("2026-06-01");
+        let end = d("2026-06-10");
+        let summary = load_alpha_source_diagnostics_summary(
+            &db,
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+        )
+        .await
+        .expect("真实 combo summary");
+        assert!(summary.usable_rows > 0, "真实 combo 应有可用行");
+        assert!(summary.usable_symbols > 0);
+        assert_eq!(summary.future_leak_rows, 0, "生产 combo 不应有未来泄漏行");
+        assert!(summary.first_trade_date.unwrap() >= start);
+        assert!(summary.last_trade_date.unwrap() <= end);
+
+        let daily = load_alpha_source_diagnostics_daily_rows(
+            &db,
+            "phase7_financial_quality_v1",
+            "1.0.0",
+            start,
+            end,
+        )
+        .await
+        .expect("真实 combo daily rows");
+        assert!(!daily.is_empty(), "真实 combo 应有按日行数");
+        // 按日升序且计数为正
+        assert!(daily.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(daily.iter().all(|(_, count)| *count > 0));
+
+        // zzz 不存在 combo：零命中且不报错
+        let summary =
+            load_alpha_source_diagnostics_summary(&db, "zzz_test_diag_combo", "1.0.0", start, end)
+                .await
+                .expect("zzz combo summary");
+        assert_eq!(summary.usable_rows, 0);
+        assert_eq!(summary.first_trade_date, None);
+        let daily = load_alpha_source_diagnostics_daily_rows(
+            &db,
+            "zzz_test_diag_combo",
+            "1.0.0",
+            start,
+            end,
+        )
+        .await
+        .expect("zzz combo daily rows");
+        assert!(daily.is_empty());
+    }
+
+    #[tokio::test]
+    async fn alpha_source_report_from_request_validates_and_reports_empty_combo() {
+        let db = test_db().await;
+        let make_req = || AlphaSourceDiagnosticsRequest {
+            combo_name: "zzz_test_diag_combo".into(),
+            version: None,
+            start_date: "20260601".into(),
+            end_date: "2026-06-10".into(),
+            alpha_admission_gate_id: None,
+            universe_profile: None,
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            persist_report: Some(false),
+            include_research_metrics: None,
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+
+        // combo_name 空白 → 拒绝
+        let err = build_alpha_source_diagnostics_report_from_request(
+            &db,
+            &AlphaSourceDiagnosticsRequest {
+                combo_name: "   ".into(),
+                ..make_req()
+            },
+        )
+        .await
+        .expect_err("blank combo");
+        assert!(err.contains("combo_name must not be empty"), "{err}");
+
+        // 非法日期格式 → 拒绝
+        let err = build_alpha_source_diagnostics_report_from_request(
+            &db,
+            &AlphaSourceDiagnosticsRequest {
+                start_date: "2026/06/01".into(),
+                ..make_req()
+            },
+        )
+        .await
+        .expect_err("bad date");
+        assert!(
+            err.contains("must use YYYYMMDD or YYYY-MM-DD format"),
+            "{err}"
+        );
+
+        // start > end → 拒绝
+        let err = build_alpha_source_diagnostics_report_from_request(
+            &db,
+            &AlphaSourceDiagnosticsRequest {
+                start_date: "20260610".into(),
+                end_date: "20260601".into(),
+                ..make_req()
+            },
+        )
+        .await
+        .expect_err("inverted window");
+        assert!(err.contains("start_date cannot be after end_date"), "{err}");
+
+        // zzz combo：报告成功生成但 gate 全红（persist=false 不写库）
+        let payload = build_alpha_source_diagnostics_report_from_request(&db, &make_req())
+            .await
+            .expect("zzz combo report");
+        assert_eq!(
+            payload["experiment_run_id"],
+            json!(null),
+            "persist=false 不应写库"
+        );
+        let report = &payload["report"];
+        assert_eq!(report["diagnostics_type"], json!("alpha_source"));
+        assert_eq!(report["combo_name"], json!("zzz_test_diag_combo"));
+        assert_eq!(report["version"], json!("1.0.0"));
+        assert_eq!(report["passed"], json!(false));
+        assert_eq!(report["level"], json!("red"));
+        assert_eq!(report["summary"]["usable_rows"], json!(0));
+        assert_eq!(report["summary"]["covered_days"], json!(0));
+        assert!(
+            report["summary"]["expected_open_days"].as_i64().unwrap() > 0,
+            "真实日历天数"
+        );
+        // 未开研究指标 → included=false
+        assert_eq!(report["research_metrics"]["included"], json!(false));
+        // 非 futures_price_chain → 组件诊断早退
+        assert_eq!(
+            report["component_orientation_diagnostics"]["included"],
+            json!(false)
+        );
+        // 修复提示指向零可用行
+        let reason = report["repair"]["reason"].as_str().expect("repair reason");
+        assert!(reason.contains("no usable rows"), "{reason}");
+        // 门名称齐全
+        let gate_names: Vec<&str> = report["gates"]
+            .as_array()
+            .expect("gates")
+            .iter()
+            .filter_map(|gate| gate["gate"].as_str())
+            .collect();
+        for expected in [
+            "alpha_source_usable_rows",
+            "alpha_source_day_coverage",
+            "alpha_source_daily_median_symbols",
+            "alpha_source_future_leak_rows",
+        ] {
+            assert!(gate_names.contains(&expected), "缺门 {expected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn feature_profile_readiness_zzz_factor_returns_red_report() {
+        let db = test_db().await;
+        let thresholds = ReadinessThresholds::from_options(None, None, None);
+        let start = d("2026-06-01");
+        let end = d("2026-06-10");
+
+        // 空 factors 早退：红报告 + 因子数门失败（不触库的纯逻辑分支）
+        let report = build_feature_profile_readiness_report(
+            &db,
+            "zzz_test_diag_profile",
+            &[],
+            start,
+            end,
+            thresholds,
+        )
+        .await
+        .expect("empty factors report");
+        assert_eq!(report["readiness_type"], json!("feature_profile"));
+        assert_eq!(report["factor_count"], json!(0));
+        assert_eq!(report["passed"], json!(false));
+        assert_eq!(report["level"], json!("red"));
+        assert_eq!(
+            report["gates"][0]["gate"],
+            json!("feature_profile_factor_count")
+        );
+        assert!(report["repair"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unknown feature profile"));
+
+        // zzz 因子：load 零命中 + 红报告（真实查询路径）
+        let zzz_factors = vec![LinearFactorRef {
+            factor_code: "zzz_test_diag_factor".into(),
+            factor_version: "1.0.0".into(),
+        }];
+        let factor_rows = load_feature_profile_factor_readiness_rows(&db, &zzz_factors, start, end)
+            .await
+            .expect("zzz factor rows");
+        assert_eq!(factor_rows.len(), 1);
+        assert_eq!(factor_rows[0].factor_code, "zzz_test_diag_factor");
+        assert_eq!(factor_rows[0].usable_rows, 0);
+        assert_eq!(factor_rows[0].future_leak_rows, 0);
+
+        let daily_rows =
+            load_feature_profile_intersection_daily_rows(&db, &zzz_factors, start, end)
+                .await
+                .expect("zzz intersection rows");
+        assert!(daily_rows.is_empty());
+
+        let report = build_feature_profile_readiness_report(
+            &db,
+            "zzz_test_diag_profile",
+            &zzz_factors,
+            start,
+            end,
+            thresholds,
+        )
+        .await
+        .expect("zzz factor report");
+        assert_eq!(report["factor_count"], json!(1));
+        assert_eq!(report["passed"], json!(false));
+        assert_eq!(report["summary"]["missing_factor_count"], json!(1));
+        assert_eq!(report["summary"]["intersection_days"], json!(0));
+
+        // from_request 拒绝分支：日期倒置 / 空 profile
+        let err = build_feature_profile_readiness_report_from_request(
+            &db,
+            &FeatureProfileReadinessRequest {
+                feature_profile: "zzz_test_diag_profile".into(),
+                start_date: "20260610".into(),
+                end_date: "20260601".into(),
+                min_day_coverage_ratio: None,
+                min_daily_rows: None,
+                min_p95_daily_row_ratio: None,
+                persist_report: Some(false),
+            },
+        )
+        .await
+        .expect_err("inverted window");
+        assert!(err.contains("start_date cannot be after end_date"), "{err}");
+        let err = build_feature_profile_readiness_report_from_request(
+            &db,
+            &FeatureProfileReadinessRequest {
+                feature_profile: "   ".into(),
+                start_date: "20260601".into(),
+                end_date: "20260610".into(),
+                min_day_coverage_ratio: None,
+                min_daily_rows: None,
+                min_p95_daily_row_ratio: None,
+                persist_report: Some(false),
+            },
+        )
+        .await
+        .expect_err("blank profile");
+        assert!(err.contains("feature_profile must not be empty"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn main_business_report_validates_input_and_reports_unknown_business_red() {
+        let db = test_db().await;
+        let make_req = || MainBusinessDiagnosticsRequest {
+            start_date: "20260601".into(),
+            end_date: "20260603".into(),
+            business_type: Some("zzz_test_diag_biz".into()),
+            universe_profile: None,
+            profiles: Some(vec!["sales_yoy".into()]),
+            min_day_coverage_ratio: None,
+            min_daily_rows: None,
+            min_p95_daily_row_ratio: None,
+            min_daily_coverage_ratio: None,
+            persist_report: Some(false),
+            return_horizons: None,
+            bucket_count: None,
+            max_rank_ic_days: None,
+            include_exposure_regime_metrics: None,
+            max_exposure_regime_days: None,
+        };
+
+        // universe 非法 / profile 非法 / 日期倒置 → 拒绝（均在触重查询之前短路）
+        let err = build_main_business_diagnostics_report_from_request(
+            &db,
+            &MainBusinessDiagnosticsRequest {
+                universe_profile: Some("zzz_universe".into()),
+                ..make_req()
+            },
+        )
+        .await
+        .expect_err("bad universe");
+        assert!(
+            err.contains("unsupported main_business universe_profile"),
+            "{err}"
+        );
+        let err = build_main_business_diagnostics_report_from_request(
+            &db,
+            &MainBusinessDiagnosticsRequest {
+                profiles: Some(vec!["zzz_profile".into()]),
+                ..make_req()
+            },
+        )
+        .await
+        .expect_err("bad profile");
+        assert!(err.contains("not pre-registered"), "{err}");
+        let err = build_main_business_diagnostics_report_from_request(
+            &db,
+            &MainBusinessDiagnosticsRequest {
+                start_date: "20260603".into(),
+                end_date: "20260601".into(),
+                ..make_req()
+            },
+        )
+        .await
+        .expect_err("inverted window");
+        assert!(err.contains("start_date cannot be after end_date"), "{err}");
+
+        // zzz 业务类型：raw_rows=0 → 门红，报告成功（persist=false 不写库）
+        let payload = build_main_business_diagnostics_report_from_request(&db, &make_req())
+            .await
+            .expect("zzz business report");
+        assert_eq!(
+            payload["experiment_run_id"],
+            json!(null),
+            "persist=false 不应写库"
+        );
+        let report = &payload["report"];
+        assert_eq!(report["diagnostics_type"], json!("main_business_source"));
+        assert_eq!(
+            report["business_type"],
+            json!("ZZZ_TEST_DIAG_BIZ"),
+            "业务类型应大写化"
+        );
+        assert_eq!(report["universe_profile"], json!("listed_non_st"));
+        assert_eq!(report["passed"], json!(false));
+        assert_eq!(report["level"], json!("red"));
+        assert_eq!(report["summary"]["raw_rows"], json!(0));
+        assert_eq!(report["summary"]["pit_violation_rows"], json!(0));
+        // 无稳定快照起点 → effective 起止为空
+        assert_eq!(report["effective_start_date"], json!(null));
+        assert_eq!(report["effective_end_date"], json!(null));
+        assert_eq!(report["profiles"][0]["profile"], json!("sales_yoy"));
+        assert_eq!(report["profiles"][0]["label"], json!("YoY主营收入增长"));
+        // research：无有效覆盖日 → included=false
+        assert_eq!(report["research_metrics"]["included"], json!(false));
+
+        // raw summary 单独直调：zzz 业务零行
+        let summary = load_main_business_raw_summary(&db, "zzz_test_diag_biz")
+            .await
+            .expect("zzz raw summary");
+        assert_eq!(summary.raw_rows, 0);
+        assert_eq!(summary.raw_symbols, 0);
+        assert_eq!(summary.first_end_date, None);
+    }
+
+    #[tokio::test]
+    async fn sleeve_admission_handler_returns_code1_for_unknown_run() {
+        let state = test_state().await;
+        let v = resp_json(
+            get_sleeve_admission_diagnostics(
+                State(state),
+                Path("zzz_test_diag_missing_run".to_string()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "未知 run 应返回 code 1: {v}");
+        let message = v["message"].as_str().unwrap_or_default();
+        assert!(message.contains("experiment_run not found"), "{message}");
+    }
+}

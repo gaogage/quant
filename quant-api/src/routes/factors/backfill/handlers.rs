@@ -4300,3 +4300,360 @@ pub async fn backfill_phase7_alpha_blend_profiles_background(
         }
     }))
 }
+
+// ─── 第九批测试（B 线）：P42b into_plan 全分支 + handler 拒绝分支参数形态 ───
+//
+// 安全边界（与第二批一致）：backfill_*_background handler 只直调**拒绝分支**——
+// into_plan 校验失败在写 data_sync_task / spawn 重回填之前短路返回，不触库不启动后台任务。
+// P42b 两个 into_plan 是本文件内的纯函数，成功分支直测构造 SetBasedFactorBackfillPlan，
+// 不需要 AppState、不写任何表。33 个 handler 的日期倒置拒绝分支已由第二批覆盖
+// （tests.rs::second_batch），本批补不同参数形态（blank version / 非法日期格式 / 超长 combo_name）。
+
+#[cfg(test)]
+mod ninth_batch {
+    use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use axum::Json;
+    use std::sync::Arc;
+
+    async fn test_db() -> sqlx::PgPool {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 构造直调用 AppState（拒绝分支不触 Tushare/库，客户端仅初始化不发请求）。
+    async fn test_state() -> Arc<crate::AppState> {
+        let db = test_db().await;
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    /// handler 返回的 Json 响应体解析为 serde_json::Value。
+    async fn resp_json(resp: impl IntoResponse) -> serde_json::Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    fn assert_rejected(value: &serde_json::Value, expect_fragment: &str, handler: &str) {
+        assert_eq!(
+            value["code"], 1,
+            "[{handler}] 拒绝分支应返回 code 1: {value}"
+        );
+        let message = value["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(expect_fragment),
+            "[{handler}] message 应含 {expect_fragment:?}: {message}"
+        );
+    }
+
+    // ── P42b into_plan 成功分支（纯函数直测，不触库不 spawn）──
+
+    #[test]
+    fn p42b_momentum_reversal_into_plan_fills_defaults_and_overrides() {
+        // 全默认：start 固定 2016-02-01，end 默认当天
+        let plan = P42bLargeCapMomentumReversalBackfillRequest {
+            start_date: None,
+            end_date: None,
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: None,
+        }
+        .into_plan()
+        .expect("default plan");
+        assert_eq!(
+            plan.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).unwrap()
+        );
+        // end_date 默认取调用当天，容忍跨午夜竞态（±1 天内）
+        let today = chrono::Utc::now().date_naive();
+        assert!(
+            plan.end_date == today || plan.end_date == today.pred_opt().unwrap(),
+            "默认 end_date 应为当天: {} vs {today}",
+            plan.end_date
+        );
+        assert_eq!(plan.version, "1.0.0");
+        assert_eq!(plan.combo_name, "p42b_large_cap_mom_rev_daily_std");
+        assert_eq!(plan.task_type, "p42b_large_cap_momentum_reversal_backfill");
+        assert_eq!(plan.source, "factor");
+        assert_eq!(plan.heartbeat_timeout_seconds, 3600);
+        assert_eq!(plan.bundle_name, "p42b_large_cap_mom_rev_daily_std");
+        assert_eq!(plan.category, "price_volume");
+        assert_eq!(plan.phase, "P4.2b");
+        assert_eq!(
+            plan.dependencies,
+            &["market_stock_daily_bar_adj", "market_stock_daily_basic"]
+        );
+        assert_eq!(plan.combo_method, "equal_weight");
+        assert_eq!(plan.experiment_type, "phase7_factor_backfill_profile");
+        assert_eq!(plan.statement_timeout_ms, 0);
+        assert!(plan.source_combos.is_empty());
+
+        // 显式覆盖：紧凑日期格式 + version/combo_name/超时
+        let plan = P42bLargeCapMomentumReversalBackfillRequest {
+            start_date: Some("20240506".into()),
+            end_date: Some(" 2024-06-05 ".into()),
+            version: Some(" 9.9.9 ".into()),
+            combo_name: Some("zzz_test_api_bf_p42b".into()),
+            statement_timeout_ms: Some(12345),
+        }
+        .into_plan()
+        .expect("override plan");
+        assert_eq!(
+            plan.start_date,
+            NaiveDate::from_ymd_opt(2024, 5, 6).unwrap()
+        );
+        assert_eq!(plan.end_date, NaiveDate::from_ymd_opt(2024, 6, 5).unwrap());
+        assert_eq!(plan.version, "9.9.9");
+        assert_eq!(plan.combo_name, "zzz_test_api_bf_p42b");
+        assert_eq!(plan.statement_timeout_ms, 12345);
+    }
+
+    #[test]
+    fn p42b_defensive_low_vol_quality_into_plan_fills_defaults_and_overrides() {
+        let plan = P42bDefensiveLowVolQualityBackfillRequest {
+            start_date: None,
+            end_date: None,
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: None,
+        }
+        .into_plan()
+        .expect("default plan");
+        assert_eq!(
+            plan.start_date,
+            NaiveDate::from_ymd_opt(2016, 2, 1).unwrap()
+        );
+        assert_eq!(plan.combo_name, "defensive_lowvol_quality_daily_std");
+        assert_eq!(plan.task_type, "p42b_defensive_low_vol_quality_backfill");
+        assert_eq!(plan.bundle_name, "defensive_lowvol_quality_daily_std");
+        assert_eq!(plan.category, "price_volume");
+        assert_eq!(plan.phase, "P4.2b");
+        assert_eq!(
+            plan.dependencies,
+            &["market_stock_daily_bar_adj", "market_stock", "factor_value"]
+        );
+        assert_eq!(plan.combo_method, "equal_weight");
+        assert_eq!(plan.experiment_type, "phase7_factor_backfill_profile");
+
+        let plan = P42bDefensiveLowVolQualityBackfillRequest {
+            start_date: Some("2024-05-06".into()),
+            end_date: Some("20240605".into()),
+            version: Some("2.0.0".into()),
+            combo_name: Some("zzz_test_api_bf_defensive".into()),
+            statement_timeout_ms: Some(999),
+        }
+        .into_plan()
+        .expect("override plan");
+        assert_eq!(plan.version, "2.0.0");
+        assert_eq!(plan.combo_name, "zzz_test_api_bf_defensive");
+        assert_eq!(plan.statement_timeout_ms, 999);
+    }
+
+    #[test]
+    fn p42b_into_plan_rejects_invalid_payload_shapes() {
+        let base = || P42bLargeCapMomentumReversalBackfillRequest {
+            start_date: Some("2024-05-06".into()),
+            end_date: Some("2024-06-05".into()),
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: None,
+        };
+
+        // 日期倒置
+        let err = P42bLargeCapMomentumReversalBackfillRequest {
+            start_date: Some("2024-06-10".into()),
+            end_date: Some("2024-06-01".into()),
+            ..base()
+        }
+        .into_plan()
+        .expect_err("inverted dates");
+        assert_eq!(err, "start_date must be <= end_date");
+
+        // 非法日期格式
+        let err = P42bLargeCapMomentumReversalBackfillRequest {
+            start_date: Some("2024/05/06".into()),
+            ..base()
+        }
+        .into_plan()
+        .expect_err("bad date format");
+        assert_eq!(err, "start_date must use YYYY-MM-DD or YYYYMMDD");
+
+        // 日期空白
+        let err = P42bLargeCapMomentumReversalBackfillRequest {
+            end_date: Some("   ".into()),
+            ..base()
+        }
+        .into_plan()
+        .expect_err("blank date");
+        assert_eq!(err, "end_date must not be blank");
+
+        // version 空白 / 超长
+        let err = P42bLargeCapMomentumReversalBackfillRequest {
+            version: Some("   ".into()),
+            ..base()
+        }
+        .into_plan()
+        .expect_err("blank version");
+        assert_eq!(err, "version must not be blank");
+        let err = P42bLargeCapMomentumReversalBackfillRequest {
+            version: Some("v".repeat(33)),
+            ..base()
+        }
+        .into_plan()
+        .expect_err("long version");
+        assert_eq!(err, "version must be <= 32 chars");
+
+        // combo_name 空白 / 超长（defensive 家族各验一例超长）
+        let err = P42bLargeCapMomentumReversalBackfillRequest {
+            combo_name: Some("   ".into()),
+            ..base()
+        }
+        .into_plan()
+        .expect_err("blank combo");
+        assert_eq!(err, "combo_name must not be blank");
+        let err = P42bDefensiveLowVolQualityBackfillRequest {
+            start_date: Some("2024-05-06".into()),
+            end_date: Some("2024-06-05".into()),
+            version: None,
+            combo_name: Some("c".repeat(129)),
+            statement_timeout_ms: None,
+        }
+        .into_plan()
+        .expect_err("long combo");
+        assert_eq!(err, "combo_name must be <= 128 chars");
+    }
+
+    // ── handler 拒绝分支：不同参数形态各测一例（直调，成功路径不触）──
+
+    #[tokio::test]
+    async fn handlers_reject_blank_version_payloads_without_scheduling() {
+        let state = test_state().await;
+
+        let v = resp_json(
+            backfill_phase7_price_volume_background(
+                State(state.clone()),
+                Json(Phase7PriceVolumeBackfillRequest {
+                    start_date: None,
+                    end_date: None,
+                    version: Some("   ".into()),
+                    combo_name: None,
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_rejected(&v, "version must not be blank", "price_volume");
+
+        let v = resp_json(
+            backfill_phase7_dividend_quality_background(
+                State(state),
+                Json(Phase7DividendQualityBackfillRequest {
+                    start_date: None,
+                    end_date: None,
+                    version: Some("".into()),
+                    combo_name: None,
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_rejected(&v, "version must not be blank", "dividend_quality");
+    }
+
+    #[tokio::test]
+    async fn handlers_reject_non_iso_date_payloads_without_scheduling() {
+        let state = test_state().await;
+
+        let v = resp_json(
+            backfill_phase7_valuation_background(
+                State(state.clone()),
+                Json(Phase7ValuationBackfillRequest {
+                    start_date: Some("2026/01/01".into()),
+                    end_date: None,
+                    version: None,
+                    combo_name: None,
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_rejected(
+            &v,
+            "start_date must use YYYY-MM-DD or YYYYMMDD",
+            "valuation",
+        );
+
+        let v = resp_json(
+            backfill_phase7_moneyflow_background(
+                State(state),
+                Json(Phase7MoneyflowBackfillRequest {
+                    start_date: None,
+                    end_date: Some("not-a-date".into()),
+                    version: None,
+                    combo_name: None,
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_rejected(&v, "end_date must use YYYY-MM-DD or YYYYMMDD", "moneyflow");
+    }
+
+    #[tokio::test]
+    async fn handlers_reject_oversized_combo_name_payloads_without_scheduling() {
+        let state = test_state().await;
+
+        let v = resp_json(
+            backfill_phase7_market_residual_risk_background(
+                State(state.clone()),
+                Json(Phase7MarketResidualRiskBackfillRequest {
+                    start_date: None,
+                    end_date: None,
+                    version: None,
+                    combo_name: Some("x".repeat(129)),
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_rejected(
+            &v,
+            "combo_name must be <= 128 chars",
+            "market_residual_risk",
+        );
+
+        let v = resp_json(
+            backfill_phase7_supply_float_shock_background(
+                State(state),
+                Json(Phase7SupplyFloatShockBackfillRequest {
+                    start_date: None,
+                    end_date: None,
+                    version: None,
+                    combo_name: Some("y".repeat(200)),
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_rejected(&v, "combo_name must be <= 128 chars", "supply_float_shock");
+    }
+}
