@@ -914,6 +914,55 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
                             error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e);
                         }
                     }
+                    // 任务77(2026-09-23): nightly 链物化此前只覆盖 indneutral_val_v1,
+                    // 生产信号 combo(37f_h20_fund_v2 等)仅靠早间 09:30 档保鲜——
+                    // 新鲜度门禁首夜即拦截(早间截面由 T-1 因子合成, 行写入早于夜间
+                    // 回填完成, 且早间截面行数不完整 3893/5573)。此处追加遍历其余
+                    // active full_pit_icir* combo 的夜间物化(与 pit_combo_refresh
+                    // 同口径, 120d 增量窗口), 早间 09:30 档降级为兜底。
+                    let pit_combos: Vec<_> = load_active_combo_materialize_configs(&db2)
+                        .await
+                        .into_iter()
+                        .filter(|c| {
+                            c.combo_name.starts_with("full_pit_icir")
+                                && c.combo_name != "full_pit_icir_indneutral_val_v1" // 前段已专门物化(ind_neutral 自举参数特殊)
+                        })
+                        .collect();
+                    for cfg in &pit_combos {
+                        // 显式 combo_horizon 列优先(2026-09-05: 名字推断曾把无 _h{N}
+                        // 后缀的 combo 判错 horizon), 与 pit_combo_refresh 同规则。
+                        let horizon = cfg
+                            .combo_horizon
+                            .unwrap_or_else(|| combo_horizon_from_name(&cfg.combo_name));
+                        match crate::routes::factors::materialize_pit_combo_ext(
+                            &db2,
+                            &crate::routes::factors::PitComboMaterializeParams {
+                                combo_name: &cfg.combo_name,
+                                factor_version: "1.0.0",
+                                horizon,
+                                start_date: date - chrono::Duration::days(120),
+                                end_date: date,
+                                include_fundamentals: cfg.include_fundamentals,
+                                min_abs_ic_ir: None,
+                                factor_whitelist: cfg.factor_whitelist.as_deref(),
+                                // scheduler 夜间物化不做行业中性化(与保鲜档同规则)
+                                ind_neutral: false,
+                            },
+                        )
+                        .await
+                        {
+                            Ok(rows) => info!(
+                                "[夜间预备] PIT combo {} 夜间物化 {} 行 累计{}s",
+                                cfg.combo_name,
+                                rows,
+                                t0.elapsed().as_secs()
+                            ),
+                            Err(e) => warn!(
+                                "[夜间预备] PIT combo {} 夜间物化失败(次日9:30档兜底): {}",
+                                cfg.combo_name, e
+                            ),
+                        }
+                    }
                     // 2026-09-18: 原写法 `results => for r in results` 实为迭代
                     // Result<SyncResult,String> —— Err 分支零次迭代被静默吞掉,
                     // 曲线同步异常时只打"更新完成"。改为显式三分支。
@@ -1208,8 +1257,28 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
 
 /// 启动后台调度器。
 pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
+    let tushare = Arc::new(tushare);
+
+    // 任务77(2026-09-23): 定时任务拾取拆独立循环——原主循环 run_tick().await 与
+    // run_scheduled_tasks().await 串行, run_tick 窗口分支一阻塞(9-22 实锤 22:11-23:00
+    // 阻塞 49 分钟)全部定时任务停摆(native_pv 22:15 档 23:00 才触发、signal_export
+    // 23:00 档 23:30 才触发)。解耦后两循环互不拖累; 首查仍在启动时立即执行(重启后
+    // 错过的当日任务立即补跑, 原语义保留)。任务体仍按原 match 分支执行, await 型
+    // 分支会延迟本循环内的后续拾取(分钟级, 可容忍), spawn 化留观察后深化。
+    {
+        let db_sched = db.clone();
+        let tushare_sched = tushare.clone();
+        tokio::spawn(async move {
+            run_scheduled_tasks(&db_sched, &tushare_sched).await;
+            let mut sched_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                sched_interval.tick().await;
+                run_scheduled_tasks(&db_sched, &tushare_sched).await;
+            }
+        });
+    }
+
     tokio::spawn(async move {
-        let tushare = Arc::new(tushare);
         let state = Arc::new(Mutex::new(DailyState {
             date: None,
             traded_today: false,
@@ -1236,9 +1305,6 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
             ),
         }
 
-        // 首次运行时检查定时任务
-        run_scheduled_tasks(&db, &tushare).await;
-
         loop {
             interval.tick().await;
             if let Err(e) = run_tick(
@@ -1253,10 +1319,6 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
             {
                 error!("[scheduler] 任务失败: {}", e);
             }
-            // 每分钟检查定时任务(2026-09-14 修复: 原整点检查+23:30 cron=死任务——
-            // 23:00 整点查时 next=23:30 未到期, 下个整点 00:00 已关机, 信号任务
-            // 周六开机才补跑且截面退化。60s tick 直接查, next_run_at 幂等控频)
-            run_scheduled_tasks(&db, &tushare).await;
         }
     });
 }

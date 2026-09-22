@@ -24,7 +24,14 @@ pub(crate) async fn send_dingtalk_alert_titled(db: &PgPool, title: &str, msg: &s
                 "msgtype": "markdown",
                 "markdown": {"title": title, "text": msg}
             });
-            let _ = reqwest::Client::new().post(url).json(&payload).send().await;
+            // 15s 总超时(2026-09-22 事故: 无超时 Client 卡死信号导出任务线程 15m+,
+            // scp 已成功但成功日志被 webhook 挂起吞掉)。告警是旁路,永不拖死调用方。
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default();
+            let _ = client.post(url).json(&payload).send().await;
         }
     }
 }
