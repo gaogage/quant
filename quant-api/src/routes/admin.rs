@@ -462,23 +462,52 @@ pub async fn sync_status(
         )),
     ));
 
-    let combo_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
-        "SELECT MAX(trade_date) FROM multi_factor_value
-         WHERE combo_name = $1 AND version='1.0.0'
-           AND COALESCE(available_at, trade_date) <= trade_date",
+    // 任务78(2026-09-23): 因子监控从单一 strategy_config.combo_name(v24 该字段存
+    // indneutral_val_v1) 扩展为全部 active full_pit_icir* combo——信号实际依赖的
+    // 37f_h20_fund_v2 此前不在监控视野(9-22 信号断供当晚面板仍全绿)。集合与夜间
+    // 物化(任务77)/pit_combo_refresh 同源, 三处口径一致。
+    let pit_combos: Vec<String> =
+        crate::routes::strategy_query::load_active_combo_materialize_configs(&state.db)
+            .await
+            .into_iter()
+            .filter(|c| c.combo_name.starts_with("full_pit_icir"))
+            .map(|c| c.combo_name)
+            .collect();
+    let combo_rows: Vec<(String, chrono::NaiveDate)> = sqlx::query_as(
+        "SELECT combo_name, MAX(trade_date) FROM multi_factor_value
+         WHERE combo_name = ANY($1) AND version='1.0.0'
+           AND COALESCE(available_at, trade_date) <= trade_date
+         GROUP BY combo_name",
     )
-    .bind(&cfg.combo_name)
-    .fetch_one(&state.db)
+    .bind(&pit_combos)
+    .fetch_all(&state.db)
     .await
-    .ok()
-    .flatten();
-    let combo_gap = admin_gap(today, combo_last);
+    .unwrap_or_default();
+    let mut combo_worst_gap = 0i64;
+    let mut combo_all_ok = !pit_combos.is_empty(); // 无 active combo = 配置异常, 直接红
+    let mut combo_parts: Vec<String> = Vec::new();
+    for name in &pit_combos {
+        let last = combo_rows
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, d)| *d);
+        let gap = admin_gap(today, last);
+        if gap > 2 {
+            combo_all_ok = false;
+        }
+        combo_worst_gap = combo_worst_gap.max(gap);
+        combo_parts.push(format!(
+            "{} 最新{}",
+            name,
+            last.map(|d| d.to_string()).unwrap_or_else(|| "无物化行".to_string())
+        ));
+    }
     results.push(admin_status_item(
         "因子(full PIT)",
         2,
-        combo_gap,
-        combo_gap <= 2,
-        combo_last.map(|d| format!("combo={}，最新 {}", cfg.combo_name, d)),
+        combo_worst_gap,
+        combo_all_ok,
+        Some(combo_parts.join("；")),
     ));
 
     let csi_last: Option<chrono::NaiveDate> = sqlx::query_scalar(
@@ -1073,31 +1102,69 @@ pub async fn repair_sync(
             }
         }
         "因子(pv)" | "因子(full PIT)" => {
-            // 正式 canonical 为 full PIT combo，修复动作直接补 PIT 组合物化区间。
+            // 任务78(2026-09-23): 修复动作与监控同集合——遍历 active full_pit_icir*
+            // 逐个触发物化(horizon 配置列优先/名字推断, 与 pit_combo_refresh 同规则),
+            // 替代原单 cfg.combo_name + 硬编码 horizon=20(v24 cfg 存的是 indneutral,
+            // 信号实际依赖的 37f_h20_fund_v2 修不到)。
             let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
             let url = format!(
                 "http://localhost:{}/api/v1/quant/factors/materialize-pit-combo/background",
                 port
             );
-            let payload = serde_json::json!({
-                "combo_name": cfg.combo_name,
-                "version": "1.0.0",
-                "horizon": 20,
-                "start_date": recent_start,
-                "end_date": today
-            });
-            match reqwest::Client::new()
-                .post(&url)
-                .json(&payload)
-                .send()
-                .await
-            {
-                Ok(_) => Json(
-                    serde_json::json!({"code": 0, "message": format!("PIT combo物化任务已触发: {} {}~{}", cfg.combo_name, recent_start, today)}),
-                ),
-                Err(e) => {
-                    Json(serde_json::json!({"code": 1, "message": format!("触发失败: {}", e)}))
+            let pit_cfgs: Vec<_> =
+                crate::routes::strategy_query::load_active_combo_materialize_configs(&state.db)
+                    .await
+                    .into_iter()
+                    .filter(|c| c.combo_name.starts_with("full_pit_icir"))
+                    .collect();
+            let mut ok_list: Vec<String> = Vec::new();
+            let mut fail_list: Vec<String> = Vec::new();
+            for c in &pit_cfgs {
+                let horizon = c.combo_horizon.unwrap_or_else(|| {
+                    crate::routes::strategy_query::combo_horizon_from_name(&c.combo_name)
+                });
+                let payload = serde_json::json!({
+                    "combo_name": c.combo_name,
+                    "version": "1.0.0",
+                    "horizon": horizon,
+                    "start_date": recent_start,
+                    "end_date": today,
+                    "include_fundamentals": c.include_fundamentals,
+                    "factor_whitelist": c.factor_whitelist,
+                });
+                match reqwest::Client::new().post(&url).json(&payload).send().await {
+                    Ok(_) => ok_list.push(c.combo_name.clone()),
+                    Err(e) => fail_list.push(format!("{}: {}", c.combo_name, e)),
                 }
+            }
+            if ok_list.is_empty() {
+                Json(serde_json::json!({
+                    "code": 1,
+                    "message": format!(
+                        "触发失败(无 active full_pit_icir* combo 或全部失败): {}",
+                        fail_list.join("; ")
+                    )
+                }))
+            } else if fail_list.is_empty() {
+                Json(serde_json::json!({
+                    "code": 0,
+                    "message": format!(
+                        "PIT combo物化已触发 {} 个: {} ({}~{})",
+                        ok_list.len(),
+                        ok_list.join(","),
+                        recent_start,
+                        today
+                    )
+                }))
+            } else {
+                Json(serde_json::json!({
+                    "code": 1,
+                    "message": format!(
+                        "部分失败: 成功[{}] 失败[{}]",
+                        ok_list.join(","),
+                        fail_list.join("; ")
+                    )
+                }))
             }
         }
         "ML预测" | "ML预测(活跃策略)" => {
