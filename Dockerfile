@@ -35,7 +35,7 @@ COPY quant-factor/ quant-factor/
 COPY quant-api/ quant-api/
 # quant-api 里若干 include_str! 引用 ../../../sql/*.sql（DDL 定义），构建期需要该目录存在
 COPY sql/ sql/
-# scripts/ptrade_report_fetch.py 经 include_str! 嵌入（PTrade 回报 IMAP 抓取）
+# scripts/ 下含 audit hash 基线等辅助文件（ptrade_report_fetch.py 已随任务75 Rust 化删除）
 COPY scripts/ scripts/
 RUN cargo build -p quant-api --release
 
