@@ -15,6 +15,8 @@ use tracing::error;
 use crate::routes::shared::{PaperPositionRepository, PgPaperPositionRepo};
 
 /// 定时任务入口(scheduler.rs "ptrade_report_fetch" 分支调用)。
+/// 任务76(2026-09-22): 逐 enabled 通道拉各自邮箱(执行器级配置), 单通道故障
+/// 不阻断其它通道; 逐通道段落合并一条钉钉日报。
 pub async fn run_ptrade_report_fetch(db: &PgPool) {
     if let Err(e) = ensure_report_table(db).await {
         error!("[PTrade回报] 建表失败: {}", e);
@@ -22,20 +24,65 @@ pub async fn run_ptrade_report_fetch(db: &PgPool) {
             .await;
         return;
     }
-    let fetch = fetch_mail_reports().await;
-    match fetch {
-        Ok(summary) => {
-            let report = ingest_reports(db, &summary).await;
-            crate::routes::shared::send_dingtalk_alert(db, &report).await;
-        }
+    let channels = match load_channels(db).await {
+        Ok(c) => c,
         Err(e) => {
             crate::routes::shared::send_dingtalk_alert(
                 db,
-                &format!("⛔ [PTrade回报] 邮件拉取失败(IMAP 通道故障?): {}", e),
+                &format!("⛔ [PTrade回报] 通道配置加载失败: {}", e),
             )
             .await;
+            return;
+        }
+    };
+    let mut sections: Vec<String> = Vec::new();
+    for ch in &channels {
+        match fetch_mail_reports(ch).await {
+            Ok(summary) => sections.push(ingest_reports(db, &summary, ch).await),
+            Err(e) => sections.push(format!(
+                "⛔ 通道[{}] 邮件拉取失败(IMAP 通道故障?): {}",
+                ch.channel_name, e
+            )),
         }
     }
+    crate::routes::shared::send_dingtalk_alert(db, &sections.join("\n")).await;
+}
+
+/// 执行器通道配置(ptrade_channel_config 一行 = 一个执行器通道)。
+/// 邮箱配置与执行器绑定: 执行器 send_email 的 EMAIL_FROM 即本通道拉取邮箱。
+struct ChannelConfig {
+    account_id: String,
+    channel_name: String,
+    is_production: bool,
+    imap_host: String,
+    imap_port: i32,
+    imap_user: Option<String>,
+    imap_pwd: Option<String>,
+}
+
+async fn load_channels(db: &PgPool) -> Result<Vec<ChannelConfig>, String> {
+    let rows = sqlx::query_as::<_, (String, String, bool, String, i32, Option<String>, Option<String>)>(
+        "SELECT paper_account_id, channel_name, is_production,
+                imap_host, imap_port, imap_user, imap_pwd
+         FROM ptrade_channel_config WHERE enabled = true ORDER BY is_production",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| format!("channel config: {}", e))?;
+    Ok(rows
+        .into_iter()
+        .map(|(account_id, channel_name, is_production, imap_host, imap_port, imap_user, imap_pwd)| {
+            ChannelConfig {
+                account_id,
+                channel_name,
+                is_production,
+                imap_host,
+                imap_port,
+                imap_user,
+                imap_pwd,
+            }
+        })
+        .collect())
 }
 
 #[derive(Default)]
@@ -52,34 +99,34 @@ struct ExecMail {
     bytes: Vec<u8>,
 }
 
-async fn fetch_mail_reports() -> Result<FetchSummary, String> {
+async fn fetch_mail_reports(ch: &ChannelConfig) -> Result<FetchSummary, String> {
+    if ch.imap_user.is_none() || ch.imap_pwd.is_none() {
+        // 未配置邮箱的通道(如 live 未启用邮件回报): 告警行而非任务失败
+        return Err(format!(
+            "通道[{}] 未配置 imap_user/imap_pwd, 跳过拉取(在 ptrade_channel_config 配置后启用)",
+            ch.channel_name
+        ));
+    }
+    let host = ch.imap_host.clone();
+    let port = ch.imap_port as u16;
+    let user = ch.imap_user.clone().unwrap_or_default();
+    let pwd = ch.imap_pwd.clone().unwrap_or_default();
     // IMAP 会话是同步短任务(一日一次, 秒级), 阻塞实现包 spawn_blocking 即可
-    tokio::task::spawn_blocking(fetch_mail_reports_blocking)
+    tokio::task::spawn_blocking(move || fetch_mail_reports_blocking(host, port, user, pwd))
         .await
         .map_err(|e| format!("blocking join: {}", e))?
 }
 
-/// IMAP 通道配置(全部环境变量注入, 代码零硬编码——任务75 配置化纪律):
-/// - PTRADE_IMAP_USER / PTRADE_IMAP_PWD: 必填, 缺失即 Err 由钉钉告警(fail fast,
-///   杜绝悄悄回落到错误账号)
-/// - PTRADE_IMAP_HOST / PTRADE_IMAP_PORT: 可选覆盖, 默认 QQ 邮箱端点(当前唯一
-///   事实通道, 换邮箱服务商时经 env 切换)
-fn imap_endpoint() -> Result<(String, u16, String, String), String> {
-    let user = std::env::var("PTRADE_IMAP_USER").map_err(|_| "PTRADE_IMAP_USER 未配置".to_string())?;
-    let pwd = std::env::var("PTRADE_IMAP_PWD").map_err(|_| "PTRADE_IMAP_PWD 未配置".to_string())?;
-    let host = std::env::var("PTRADE_IMAP_HOST").unwrap_or_else(|_| "imap.qq.com".into());
-    let port: u16 = std::env::var("PTRADE_IMAP_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(993);
-    Ok((host, port, user, pwd))
-}
-
-/// 同步 IMAP 拉取: 连配置端点 → 搜索昨日以来 subject 含 ptrade_ 的邮件 →
-/// heartbeat 记主题 / exec 提取 .json 附件。通道级故障(连接/登录/网络)返回 Err
-/// 由外层钉钉告警; 单封邮件解析失败记 error 降级行继续(部分成功优于全失败)。
-fn fetch_mail_reports_blocking() -> Result<FetchSummary, String> {
-    let (host, port, user, pwd) = imap_endpoint()?;
+/// 同步 IMAP 拉取(连接参数来自通道行配置, 任务76 迁 DB): 连通道邮箱端点 →
+/// 搜索昨日以来 subject 含 ptrade_ 的邮件 → heartbeat 记主题 / exec 提取
+/// .json 附件。通道级故障(连接/登录/网络)返回 Err 由外层钉钉告警;
+/// 单封邮件解析失败记 error 降级行继续(部分成功优于全失败)。
+fn fetch_mail_reports_blocking(
+    host: String,
+    port: u16,
+    user: String,
+    pwd: String,
+) -> Result<FetchSummary, String> {
 
     use mail_parser::MimeHeaders;
 
@@ -193,26 +240,30 @@ fn imap_search_date(d: chrono::NaiveDate) -> String {
     )
 }
 
-/// exec json 入库 + 组装日报文本。
-async fn ingest_reports(db: &PgPool, summary: &FetchSummary) -> String {
+/// exec json 入库 + 组装日报文本(通道段落)。镜像路由依据 = 拉取邮箱归属的通道行,
+/// subject tag 仅作一致性校验(防执行器贴错 tag/串邮箱, 不一致告警不拒收)。
+async fn ingest_reports(db: &PgPool, summary: &FetchSummary, ch: &ChannelConfig) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(e) = &summary.error {
         lines.push(format!("⚠️ 拉取部分异常: {}", e));
     }
     if summary.execs.is_empty() && summary.heartbeats.is_empty() {
         // 当日既无回报也无心跳: 策略未运行/邮件未发/通道故障——按设计告警
-        return "⚠️ [PTrade实盘日报] 当日无 exec 回报且无心跳邮件——请检查 PTrade 策略状态与邮件通道(策略挂了? 15:00 后未发?)".to_string();
+        return format!(
+            "⚠️ [PTrade实盘日报·{}] 当日无 exec 回报且无心跳邮件——请检查 PTrade 策略状态与邮件通道(策略挂了? 15:00 后未发?)",
+            ch.channel_name
+        );
     }
     for hb in &summary.heartbeats {
         lines.push(format!("🫀 心跳: {}", hb));
     }
     for m in &summary.execs {
-        match ingest_one(db, m).await {
+        match ingest_one(db, m, ch).await {
             Ok(desc) => lines.push(desc),
             Err(e) => lines.push(format!("⚠️ {} 入库失败: {}", m.filename, e)),
         }
     }
-    format!("📊 [PTrade实盘日报]\n{}", lines.join("\n"))
+    format!("📊 [PTrade实盘日报·{}]\n{}", ch.channel_name, lines.join("\n"))
 }
 
 /// 从邮件主题提取通道tag: ptrade_exec_{sim|live}_{date} → "sim"/"live"。
@@ -224,25 +275,15 @@ fn channel_tag(subject: &str) -> Option<&str> {
     }
 }
 
-/// 镜像账户回写: 按通道tag找 ptrade_channel_config 对应账户, 同步 nav/cash/持仓。
-/// 首次回写且账户为空仓时顺带校准 initial_capital(以 PTrade 真实值为基准)。
+/// 镜像账户回写: 同步 nav/cash/持仓到通道行指定的镜像账户(任务76: 调用方
+/// 传入通道配置, 不再按 tag 反查)。首次回写且账户为空仓时顺带校准
+/// initial_capital(以 PTrade 真实值为基准)。
 async fn sync_mirror_account(
     db: &PgPool,
-    tag: &str,
+    ch: &ChannelConfig,
     v: &serde_json::Value,
 ) -> Result<Option<String>, String> {
-    let is_prod = tag == "live";
-    let account: Option<(String,)> = sqlx::query_as(
-        "SELECT paper_account_id FROM ptrade_channel_config
-         WHERE is_production = $1 AND enabled = true LIMIT 1",
-    )
-    .bind(is_prod)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| format!("mirror account: {}", e))?;
-    let Some((account_id,)) = account else {
-        return Ok(None); // 无对应通道配置: 仅入库不回写
-    };
+    let account_id = ch.account_id.as_str();
     let nav = v.get("nav_after").and_then(|x| x.as_f64());
     let cash = v.get("cash_after").and_then(|x| x.as_f64());
     let pos_arr = v.get("positions").and_then(|x| x.as_array());
@@ -271,7 +312,7 @@ async fn sync_mirror_account(
     let empty_before: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM paper_position WHERE paper_account_id=$1 AND quantity>0",
     )
-    .bind(&account_id)
+    .bind(account_id)
     .fetch_one(db)
     .await
     .map_err(|e| format!("mirror count: {}", e))?;
@@ -281,7 +322,7 @@ async fn sync_mirror_account(
                  total_trades = total_trades + $6
                  WHERE paper_account_id=$1",
     )
-    .bind(&account_id)
+    .bind(account_id)
     .bind(nav.map(dec))
     .bind(cash.map(dec))
     // 首次回写校准: 账户空仓且回报也无有效持仓(以 PTrade 真实值为基准)
@@ -301,7 +342,7 @@ async fn sync_mirror_account(
     let mut n_pos = 0i32;
     if let Some(positions) = pos_arr {
         PgPaperPositionRepo::new(db)
-            .delete_all_positions(&account_id)
+            .delete_all_positions(account_id)
             .await
             .map_err(|e| format!("mirror del: {}", e))?;
         for p in positions {
@@ -318,7 +359,7 @@ async fn sync_mirror_account(
             PgPaperPositionRepo::new(db)
                 .insert_mirror_position(
                     &format!("pp-{}", uuid::Uuid::new_v4()),
-                    &account_id,
+                    account_id,
                     &norm_sym(sym),
                     dec(qty),
                     dec(px),
@@ -367,7 +408,7 @@ async fn sync_mirror_account(
                  ON CONFLICT (order_id) DO NOTHING",
             )
             .bind(format!("po-{}", entrust))
-            .bind(&account_id)
+            .bind(account_id)
             .bind(norm_sym(sym))
             .bind(if filled > 0.0 { "buy" } else { "sell" })
             .bind(qty)
@@ -387,7 +428,7 @@ async fn sync_mirror_account(
                 entrust
             ))
             .bind(format!("po-{}", entrust))
-            .bind(&account_id)
+            .bind(account_id)
             .bind(norm_sym(sym))
             .bind(chrono::Utc::now()) // 回报处理时刻(成交时点回报未提供, 用入库时间)
             .bind(if filled > 0.0 { "buy" } else { "sell" })
@@ -413,7 +454,7 @@ async fn sync_mirror_account(
             "SELECT nav FROM paper_nav_snapshot WHERE paper_account_id=$1 AND snapshot_date < $2
              ORDER BY snapshot_date DESC LIMIT 1",
         )
-        .bind(&account_id)
+        .bind(account_id)
         .bind(td)
         .fetch_optional(db)
         .await
@@ -433,7 +474,7 @@ async fn sync_mirror_account(
                daily_return = EXCLUDED.daily_return",
         )
         .bind(format!("pns-{}-{}", account_id, td.format("%Y%m%d")))
-        .bind(&account_id)
+        .bind(account_id)
         .bind(td)
         .bind(dec(nav_v))
         .bind(cash.map(dec))
@@ -444,7 +485,7 @@ async fn sync_mirror_account(
         .await
         .map_err(|e| format!("mirror snapshot: {}", e))?;
     }
-    Ok(Some(account_id))
+    Ok(Some(account_id.to_string()))
 }
 
 /// 回报 positions_value 字段(持仓市值合计), 缺失时由 positions 求和兜底。
@@ -466,7 +507,7 @@ fn positions_value(v: &serde_json::Value) -> f64 {
         .unwrap_or(0.0)
 }
 
-async fn ingest_one(db: &PgPool, mail: &ExecMail) -> Result<String, String> {
+async fn ingest_one(db: &PgPool, mail: &ExecMail, ch: &ChannelConfig) -> Result<String, String> {
     let v: serde_json::Value =
         serde_json::from_slice(&mail.bytes).map_err(|e| format!("json: {}", e))?;
     let signal_id = v
@@ -513,10 +554,18 @@ async fn ingest_one(db: &PgPool, mail: &ExecMail) -> Result<String, String> {
     .await
     .map_err(|e| format!("db: {}", e))?;
 
-    let mirror = match channel_tag(&mail.subject) {
-        Some(tag) => sync_mirror_account(db, tag, &v).await?,
-        None => None, // 旧格式主题(无通道tag): 仅入库
-    };
+    // 镜像路由依据 = 拉取邮箱归属的通道; subject tag 仅一致性校验
+    // (执行器贴错 tag/串邮箱时告警, 不拒收——入库以邮箱归属为准)
+    if let Some(tag) = channel_tag(&mail.subject) {
+        let expect_prod = tag == "live";
+        if expect_prod != ch.is_production {
+            error!(
+                "[PTrade回报] 通道[{}] 拉到 tag={} 的邮件(与通道 production={} 不符, 疑贴错 tag/串邮箱)",
+                ch.channel_name, tag, ch.is_production
+            );
+        }
+    }
+    let mirror = sync_mirror_account(db, ch, &v).await?;
     Ok(format!(
         "📈 {} ({}){}: 订单 {} 笔, 未成交 {}, NAV {:.0}, 换手 {:.0}",
         signal_id,
