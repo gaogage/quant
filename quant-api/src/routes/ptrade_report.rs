@@ -1,19 +1,18 @@
 //! PTrade 实盘回报抓取（B1' 回报回流链, 2026-09-11）
 //!
 //! 16:30 定时任务(scheduled_task_config: ptrade_report_fetch):
-//! python3 拉 imap.qq.com 当日 ptrade_exec_*/ptrade_heartbeat_* 邮件 →
+//! 拉 imap.qq.com 当日 ptrade_exec_*/ptrade_heartbeat_* 邮件 →
 //! exec 附件解析入库(ptrade_execution_report) → 钉钉实盘日报。
 //! 心跳缺失 = 策略挂了或通道故障 → 告警(区分"无交易"与"故障")。
 //!
-//! Python 脚本经 include_str! 嵌入二进制, 运行时落盘 /tmp 执行——
-//! 免 Dockerfile COPY, 免镜像重建依赖脚本更新(换脚本需重编 Rust)。
+//! 任务75(2026-09-22) 全 Rust 化: 原 Python 脚本(include_str! 落盘 spawn python3)
+//! 重写为 imap 2.4 + rustls-connector + mail-parser 原生实现, 附件内存传递——
+//! 正式运行链路不再依赖 Python, 亦无 /tmp 中转文件。
 
 use sqlx::PgPool;
 use tracing::error;
 
 use crate::routes::shared::{PaperPositionRepository, PgPaperPositionRepo};
-
-const FETCH_SCRIPT: &str = include_str!("../../../scripts/ptrade_report_fetch.py");
 
 /// 定时任务入口(scheduler.rs "ptrade_report_fetch" 分支调用)。
 pub async fn run_ptrade_report_fetch(db: &PgPool) {
@@ -39,38 +38,151 @@ pub async fn run_ptrade_report_fetch(db: &PgPool) {
     }
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(Default)]
 struct FetchSummary {
     execs: Vec<ExecMail>,
     heartbeats: Vec<String>,
     error: Option<String>,
 }
 
-#[derive(serde::Deserialize, Default)]
+/// exec 邮件的 .json 附件(内存持有, 不落盘)。
 struct ExecMail {
-    path: String,
     subject: String,
+    filename: String,
+    bytes: Vec<u8>,
 }
 
 async fn fetch_mail_reports() -> Result<FetchSummary, String> {
-    // 脚本落盘 + 执行(容器内 python3 由 Dockerfile 提供)
-    let script_path = "/tmp/ptrade_report_fetch.py";
-    std::fs::write(script_path, FETCH_SCRIPT).map_err(|e| format!("script write: {}", e))?;
-    let out = tokio::process::Command::new("python3")
-        .arg(script_path)
-        .output()
+    // IMAP 会话是同步短任务(一日一次, 秒级), 阻塞实现包 spawn_blocking 即可
+    tokio::task::spawn_blocking(fetch_mail_reports_blocking)
         .await
-        .map_err(|e| format!("python3 spawn: {}", e))?;
-    if !out.status.success() {
-        return Err(format!(
-            "python3 exit {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str::<FetchSummary>(stdout.trim())
-        .map_err(|e| format!("summary parse: {} raw={}", e, stdout.trim()))
+        .map_err(|e| format!("blocking join: {}", e))?
+}
+
+/// IMAP 通道配置(全部环境变量注入, 代码零硬编码——任务75 配置化纪律):
+/// - PTRADE_IMAP_USER / PTRADE_IMAP_PWD: 必填, 缺失即 Err 由钉钉告警(fail fast,
+///   杜绝悄悄回落到错误账号)
+/// - PTRADE_IMAP_HOST / PTRADE_IMAP_PORT: 可选覆盖, 默认 QQ 邮箱端点(当前唯一
+///   事实通道, 换邮箱服务商时经 env 切换)
+fn imap_endpoint() -> Result<(String, u16, String, String), String> {
+    let user = std::env::var("PTRADE_IMAP_USER").map_err(|_| "PTRADE_IMAP_USER 未配置".to_string())?;
+    let pwd = std::env::var("PTRADE_IMAP_PWD").map_err(|_| "PTRADE_IMAP_PWD 未配置".to_string())?;
+    let host = std::env::var("PTRADE_IMAP_HOST").unwrap_or_else(|_| "imap.qq.com".into());
+    let port: u16 = std::env::var("PTRADE_IMAP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(993);
+    Ok((host, port, user, pwd))
+}
+
+/// 同步 IMAP 拉取: 连配置端点 → 搜索昨日以来 subject 含 ptrade_ 的邮件 →
+/// heartbeat 记主题 / exec 提取 .json 附件。通道级故障(连接/登录/网络)返回 Err
+/// 由外层钉钉告警; 单封邮件解析失败记 error 降级行继续(部分成功优于全失败)。
+fn fetch_mail_reports_blocking() -> Result<FetchSummary, String> {
+    let (host, port, user, pwd) = imap_endpoint()?;
+
+    use mail_parser::MimeHeaders;
+
+    // webpki 根证书编译期内嵌, 不依赖目标机系统 CA 装配差异
+    let tls = rustls_connector::RustlsConnector::new_with_webpki_root_certs()
+        .map_err(|e| format!("tls roots: {}", e))?;
+    let stream = std::net::TcpStream::connect((host.as_str(), port))
+        .map_err(|e| format!("tcp {}:{}: {}", host, port, e))?;
+    let tls_stream = tls
+        .connect(&host, stream)
+        .map_err(|e| format!("tls: {}", e))?;
+    let mut session = imap::Client::new(tls_stream)
+        .login(&user, &pwd)
+        .map_err(|e| format!("login: {}", e.0))?;
+    let result = (|| -> Result<FetchSummary, String> {
+        let mut summary = FetchSummary::default();
+        // 只搜昨天以来的(周六跑不到周五邮件无妨——周一 16:30 拉不到周五回报会触发
+        // 心跳缺失告警, 符合"区分无交易与故障"设计; 必要时人工查邮箱)
+        session
+            .select("INBOX")
+            .map_err(|e| format!("select: {}", e))?;
+        let yesterday = chrono::Local::now().date_naive() - chrono::Duration::days(1);
+        let criteria = format!(
+            "(SUBJECT \"ptrade_\" SINCE \"{}\")",
+            imap_search_date(yesterday)
+        );
+        let ids = session
+            .search(criteria.as_str())
+            .map_err(|e| format!("search: {}", e))?;
+        // HashSet 无序: 排序拼序列集一次性 FETCH, 减少往返
+        let mut seq: Vec<u32> = ids.into_iter().collect();
+        seq.sort_unstable();
+        if seq.is_empty() {
+            return Ok(summary);
+        }
+        let seq_set = seq
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let fetches = session
+            .fetch(&seq_set, "RFC822")
+            .map_err(|e| format!("fetch: {}", e))?;
+        for f in fetches.iter() {
+            let raw = match f.body() {
+                Some(b) => b,
+                None => continue,
+            };
+            let msg = match mail_parser::MessageParser::default().parse(raw) {
+                Some(m) => m,
+                None => {
+                    summary.error.get_or_insert_with(|| "部分邮件解析失败".into());
+                    continue;
+                }
+            };
+            let subject = msg.subject().unwrap_or_default().to_string();
+            if subject.starts_with("ptrade_heartbeat_") {
+                summary.heartbeats.push(subject);
+                continue;
+            }
+            if !subject.starts_with("ptrade_exec_") {
+                continue;
+            }
+            // 取第一个 .json 附件(执行器 send_email 单附件契约)
+            let att = msg.attachments().find(|p| {
+                p.attachment_name()
+                    .is_some_and(|n| n.to_ascii_lowercase().ends_with(".json"))
+            });
+            match att {
+                Some(part) => {
+                    let filename = part.attachment_name().unwrap_or_default().to_string();
+                    summary.execs.push(ExecMail {
+                        subject,
+                        filename,
+                        bytes: part.contents().to_vec(),
+                    });
+                }
+                None => {
+                    summary.error =
+                        Some(format!("exec 邮件无 .json 附件: {}", subject));
+                }
+            }
+        }
+        Ok(summary)
+    })();
+    // logout best-effort: 会话即将 drop, 失败不影响结果
+    let _ = session.logout();
+    result
+}
+
+/// IMAP SEARCH 的日期格式 `DD-Mon-YYYY`——英文月名手写表, 不依赖 chrono %b 的
+/// locale 行为(pure-rust-locales 特性)。
+fn imap_search_date(d: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{:02}-{}-{}",
+        d.day(),
+        MONTHS[(d.month() as usize) - 1],
+        d.year()
+    )
 }
 
 /// exec json 入库 + 组装日报文本。
@@ -87,9 +199,9 @@ async fn ingest_reports(db: &PgPool, summary: &FetchSummary) -> String {
         lines.push(format!("🫀 心跳: {}", hb));
     }
     for m in &summary.execs {
-        match ingest_one(db, &m.path, &m.subject).await {
+        match ingest_one(db, m).await {
             Ok(desc) => lines.push(desc),
-            Err(e) => lines.push(format!("⚠️ {} 入库失败: {}", m.path, e)),
+            Err(e) => lines.push(format!("⚠️ {} 入库失败: {}", m.filename, e)),
         }
     }
     format!("📊 [PTrade实盘日报]\n{}", lines.join("\n"))
@@ -346,10 +458,9 @@ fn positions_value(v: &serde_json::Value) -> f64 {
         .unwrap_or(0.0)
 }
 
-async fn ingest_one(db: &PgPool, path: &str, subject: &str) -> Result<String, String> {
-    let raw_str = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+async fn ingest_one(db: &PgPool, mail: &ExecMail) -> Result<String, String> {
     let v: serde_json::Value =
-        serde_json::from_str(&raw_str).map_err(|e| format!("json: {}", e))?;
+        serde_json::from_slice(&mail.bytes).map_err(|e| format!("json: {}", e))?;
     let signal_id = v
         .get("signal_id")
         .and_then(|x| x.as_str())
@@ -394,7 +505,7 @@ async fn ingest_one(db: &PgPool, path: &str, subject: &str) -> Result<String, St
     .await
     .map_err(|e| format!("db: {}", e))?;
 
-    let mirror = match channel_tag(subject) {
+    let mirror = match channel_tag(&mail.subject) {
         Some(tag) => sync_mirror_account(db, tag, &v).await?,
         None => None, // 旧格式主题(无通道tag): 仅入库
     };
@@ -432,4 +543,43 @@ async fn ensure_report_table(db: &PgPool) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imap_search_date_english_month_names() {
+        let fmt = |y, m, d| {
+            chrono::NaiveDate::from_ymd_opt(y, m, d).map(imap_search_date).unwrap()
+        };
+        assert_eq!(fmt(2026, 9, 21), "21-Sep-2026");
+        assert_eq!(fmt(2026, 1, 1), "01-Jan-2026");
+        assert_eq!(fmt(2026, 12, 31), "31-Dec-2026");
+        // 跨年边界: 昨天=12-31 时 SINCE 串仍须正确
+        assert_eq!(fmt(2025, 12, 31), "31-Dec-2025");
+    }
+
+    #[test]
+    fn channel_tag_routes_sim_and_live() {
+        assert_eq!(channel_tag("ptrade_exec_sim_20260922"), Some("sim"));
+        assert_eq!(channel_tag("ptrade_exec_live_20260922"), Some("live"));
+        // 旧格式(无 tag)与无关主题: 不路由
+        assert_eq!(channel_tag("ptrade_exec_20260917"), None);
+        assert_eq!(channel_tag("re: ptrade_exec_sim_x"), None);
+        assert_eq!(channel_tag(""), None);
+    }
+
+    #[test]
+    fn exec_mail_carries_attachment_in_memory() {
+        let m = ExecMail {
+            subject: "ptrade_exec_sim_20260922".into(),
+            filename: "exec_20260922.json".into(),
+            bytes: br#"{"signal_id":"v24_20260922_001"}"#.to_vec(),
+        };
+        let v: serde_json::Value = serde_json::from_slice(&m.bytes).unwrap();
+        assert_eq!(v["signal_id"], "v24_20260922_001");
+        assert!(m.filename.to_ascii_lowercase().ends_with(".json"));
+    }
 }
