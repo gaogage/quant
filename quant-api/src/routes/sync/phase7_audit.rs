@@ -6565,3 +6565,856 @@ mod third_batch {
         );
     }
 }
+
+// ── 第七批：中段 SQL 重型只读审计函数（真实本机 PG，全部 SELECT 零写入）──
+// 断言结构/数组长度/关键字段存在，不断言具体业务数值
+
+#[cfg(test)]
+mod seventh_batch {
+    use super::*;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+    }
+
+    // ── 纯函数 ──
+
+    #[test]
+    fn parse_futures_price_chain_coverage_date_handles_optional_formats() {
+        // None 直接 Ok(None)，不触发解析
+        assert_eq!(
+            parse_futures_price_chain_coverage_date(None, "start_date").unwrap(),
+            None
+        );
+        // YYYYMMDD 与 YYYY-MM-DD 两种格式都接受
+        assert_eq!(
+            parse_futures_price_chain_coverage_date(Some("20240131"), "start_date").unwrap(),
+            Some(date(2024, 1, 31))
+        );
+        assert_eq!(
+            parse_futures_price_chain_coverage_date(Some("2024-01-31"), "end_date").unwrap(),
+            Some(date(2024, 1, 31))
+        );
+        // 非法格式错误信息携带字段前缀
+        let err =
+            parse_futures_price_chain_coverage_date(Some("2024/01/31"), "start_date").unwrap_err();
+        assert_eq!(err, "start_date_date_must_be_yyyy_mm_dd_or_yyyymmdd");
+    }
+
+    #[test]
+    fn main_business_yyyymmdd_field_parses_strings_and_numbers() {
+        // 字符串载体容忍首尾空白
+        let string_row = json!({"end_date": " 20240331 "});
+        assert_eq!(
+            main_business_yyyymmdd_field(&string_row, "end_date"),
+            Some(date(2024, 3, 31))
+        );
+        // 数字载体按 to_string 归一后解析
+        let number_row = json!({"end_date": 20240331});
+        assert_eq!(
+            main_business_yyyymmdd_field(&number_row, "end_date"),
+            Some(date(2024, 3, 31))
+        );
+        // null 载体、非 YYYYMMDD 格式、缺失字段均返回 None
+        let null_row = json!({"end_date": null});
+        assert_eq!(main_business_yyyymmdd_field(&null_row, "end_date"), None);
+        let dashed_row = json!({"end_date": "2024-03-31"});
+        assert_eq!(main_business_yyyymmdd_field(&dashed_row, "end_date"), None);
+        let missing_row = json!({});
+        assert_eq!(main_business_yyyymmdd_field(&missing_row, "end_date"), None);
+    }
+
+    #[test]
+    fn futures_price_chain_summary_sql_constants_pin_pit_and_evidence_filters() {
+        // mapping 产品汇总固定查 mapping_pit 表并输出 PIT/弱证据过滤列
+        let mapping_sql = futures_price_chain_mapping_product_summary_sql();
+        assert!(mapping_sql.contains("FROM market_futures_product_exposure_mapping_pit"));
+        assert!(mapping_sql.contains("AS mapping_pit_violation_rows"));
+        assert!(mapping_sql.contains("AS weak_evidence_rows"));
+        assert!(mapping_sql.contains("GROUP BY upper(trim(product_symbol))"));
+
+        // 排除产品汇总固定限定 futures_price_chain_factor 作用域
+        let exclusion_sql = futures_price_chain_exclusion_product_summary_sql();
+        assert!(exclusion_sql.contains("FROM market_futures_product_exclusion_gate_pit"));
+        assert!(exclusion_sql.contains("gate_scope = 'futures_price_chain_factor'"));
+        assert!(exclusion_sql.contains("AS exclusion_pit_violation_rows"));
+        assert!(exclusion_sql.contains("AS weak_evidence_rows"));
+    }
+
+    // ── SQL 只读路径（真实本机 PG；全部 SELECT，零写入）──
+
+    #[tokio::test]
+    async fn build_equity_pledge_pressure_readiness_audit_reads_live_schema() {
+        let db = test_db().await;
+        let audit = build_equity_pledge_pressure_readiness_audit(&db)
+            .await
+            .expect("equity pledge readiness audit should be read-only and succeed");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.20c-equity-pledge-pressure-readiness-v1"
+        );
+        assert_eq!(audit["source_id"], "equity_pledge_pressure");
+        assert_eq!(audit["mode"], "read_only_schema_raw_pit_rowcount_audit");
+        // 两张质押表逐表审计
+        let tables = audit["tables"].as_array().expect("tables array");
+        assert_eq!(tables.len(), 2);
+        let names: Vec<&str> = tables
+            .iter()
+            .map(|table| table["table"].as_str().expect("table name"))
+            .collect();
+        assert!(names.contains(&"market_stock_pledge_stat"));
+        assert!(names.contains(&"market_stock_pledge_detail"));
+        for table in tables {
+            assert!(table["table_exists"].is_boolean());
+            assert!(table["row_count"].is_i64());
+            assert!(table["pit_violation_rows"].is_i64());
+            assert!(table["missing_constraints"].is_array());
+            assert!(table["passed"].is_boolean());
+        }
+        assert!(audit["schema_passed"].is_boolean());
+        assert!(audit["sync_attempt_breakdown"].is_array());
+        assert!(audit["decision"].is_object());
+        assert!(audit["pit_policy"].is_object());
+        assert!(audit["prohibited"].as_array().unwrap().len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn build_equity_pledge_pressure_coverage_audit_rejects_inverted_range() {
+        let db = test_db().await;
+        // start > end 在任何 SQL 之前被拒绝
+        let err = build_equity_pledge_pressure_coverage_audit(
+            &db,
+            EquityPledgeCoverageAuditReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "equity_pledge coverage start_date cannot be after end_date"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_equity_pledge_pressure_coverage_audit_summarizes_live_history() {
+        let db = test_db().await;
+        // 全历史窗口：只读聚合 stat/detail 两表
+        let audit = build_equity_pledge_pressure_coverage_audit(
+            &db,
+            EquityPledgeCoverageAuditReq {
+                start_date: None,
+                end_date: None,
+            },
+        )
+        .await
+        .expect("equity pledge coverage audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.20d-equity-pledge-pressure-coverage-audit-v1"
+        );
+        assert_eq!(
+            audit["mode"],
+            "read_only_year_symbol_ann_date_coverage_duplicate_audit"
+        );
+        // 未指定窗口时日期区间序列化为 null
+        assert!(audit["date_range"]["start_date"].is_null());
+        assert!(audit["date_range"]["end_date"].is_null());
+
+        let raw = &audit["raw_summary"];
+        assert!(raw["raw_rows"].is_i64());
+        assert!(raw["pit_violation_rows"].is_i64());
+        assert!(raw["duplicate_source_row_hash_count"].is_i64());
+        assert!(raw["stat_pledge_ratio_out_of_range_count"].is_i64());
+        assert!(raw["detail_release_before_start_count"].is_i64());
+        // 本地库 stat/detail 两表均有数据
+        assert!(raw["raw_rows"].as_i64().unwrap() > 0);
+
+        let breadth = &audit["symbol_breadth_vs_main_chinext_non_st"];
+        assert!(breadth["reference_symbols"].as_i64().unwrap() > 0);
+        assert!(breadth["coverage_ratio"].is_f64());
+
+        let years = audit["year_breakdown"].as_array().expect("year breakdown");
+        assert!(!years.is_empty());
+        for year in years {
+            assert!(year["source"].is_string());
+            assert!(year["year"].is_i64());
+            assert!(year["rows"].is_i64());
+        }
+        assert!(audit["sync_attempt_breakdown"].is_array());
+        assert!(audit["decision"].is_object());
+        assert_eq!(
+            audit["promotion_gate"]["factor_builder"],
+            "blocked_until_coverage_readiness_and_pit_pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_readiness_audit_reads_live_schema() {
+        let db = test_db().await;
+        let audit = build_margin_detail_readiness_audit(&db)
+            .await
+            .expect("margin detail readiness audit");
+
+        assert_eq!(audit["audit_version"], "p3.22d-margin-detail-readiness-v1");
+        assert_eq!(audit["source_id"], "margin_detail_leverage_crowding");
+        assert_eq!(
+            audit["mode"],
+            "read_only_schema_raw_pit_quality_rowcount_audit"
+        );
+        // 单表审计：market_stock_margin_detail
+        let tables = audit["tables"].as_array().expect("tables array");
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0]["table"], "market_stock_margin_detail");
+        assert!(tables[0]["table_exists"].as_bool().unwrap());
+        assert!(tables[0]["row_count"].as_i64().unwrap() > 0);
+        // 负数调整列拆分 rzche/rqchl
+        assert!(tables[0]["negative_adjustment_rows"]["rzche_negative_rows"].is_i64());
+        assert!(tables[0]["negative_adjustment_rows"]["rqchl_negative_rows"].is_i64());
+        assert!(audit["schema_passed"].is_boolean());
+        assert!(audit["decision"].is_object());
+        assert!(audit["quality_policy"]["core_nonnegative_fields"].is_array());
+        assert!(audit["pit_policy"]["source_published_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_correlation_audit_blocks_without_table() {
+        let db = test_db().await;
+        // 表缺失标记直接短路，不触发任何关联查询
+        let blocked = build_margin_detail_correlation_audit(&db, None, None, false)
+            .await
+            .expect("blocked short-circuit");
+        assert_eq!(
+            blocked["status"],
+            "blocked_until_margin_detail_table_exists"
+        );
+        assert_eq!(
+            blocked["decision"],
+            "blocked_until_correlation_sample_available"
+        );
+        assert_eq!(blocked["sample_rows"], 0);
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_correlation_audit_screens_live_quarter() {
+        let db = test_db().await;
+        // 2024Q1 真实数据线性相关性筛查（LAG + 双 JOIN 的只读聚合）
+        let audit = build_margin_detail_correlation_audit(
+            &db,
+            Some(date(2024, 1, 1)),
+            Some(date(2024, 3, 31)),
+            true,
+        )
+        .await
+        .expect("correlation screen");
+
+        // 走到 completed 分支（是否通过由数据决定，只断言状态枚举与结构）
+        let status = audit["status"].as_str().expect("status string");
+        assert!(
+            status == "completed_low_linear_correlation_screen_passed"
+                || status == "completed_correlation_screen_not_passed_or_needs_review"
+        );
+        assert!(audit["decision"].is_string());
+        assert!(audit["sample_rows"].as_i64().unwrap() > 0);
+        assert!(audit["gate_note"].is_string());
+        // 四组相关性键齐备（值可为 null，例如样本退化时 CORR 返回 null）
+        let correlations = &audit["correlations"];
+        assert!(
+            correlations["margin_buy_to_amount_vs_moneyflow_net_to_amount"].is_null()
+                || correlations["margin_buy_to_amount_vs_moneyflow_net_to_amount"].is_f64()
+        );
+        assert!(
+            correlations["margin_buy_to_amount_vs_ln_amount_liquidity"].is_null()
+                || correlations["margin_buy_to_amount_vs_ln_amount_liquidity"].is_f64()
+        );
+        assert!(
+            correlations["margin_buy_to_amount_vs_abs_return_price_volume"].is_null()
+                || correlations["margin_buy_to_amount_vs_abs_return_price_volume"].is_f64()
+        );
+        assert!(
+            correlations["financing_balance_chg1_vs_moneyflow_net_to_amount"].is_null()
+                || correlations["financing_balance_chg1_vs_moneyflow_net_to_amount"].is_f64()
+        );
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_coverage_audit_rejects_inverted_range() {
+        let db = test_db().await;
+        let err = build_margin_detail_coverage_audit(
+            &db,
+            MarginDetailCoverageAuditReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "margin_detail coverage start_date cannot be after end_date"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_coverage_audit_reports_live_history() {
+        let db = test_db().await;
+        // 2024 全年窗口：覆盖/年份/市场三维聚合 + 内嵌 correlation 审计
+        let audit = build_margin_detail_coverage_audit(
+            &db,
+            MarginDetailCoverageAuditReq {
+                start_date: Some("20240101".to_string()),
+                end_date: Some("20241231".to_string()),
+            },
+        )
+        .await
+        .expect("margin detail coverage audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.22d-margin-detail-coverage-audit-v1"
+        );
+        assert_eq!(
+            audit["mode"],
+            "read_only_year_market_symbol_pit_quality_correlation_audit"
+        );
+        assert_eq!(audit["date_range"]["start_date"], "2024-01-01");
+        assert_eq!(audit["date_range"]["end_date"], "2024-12-31");
+        assert_eq!(audit["date_range"]["effective_start_date"], "2024-01-01");
+        assert_eq!(audit["date_range"]["effective_end_date"], "2024-12-31");
+
+        let raw = &audit["raw_summary"];
+        assert!(raw["raw_rows"].as_i64().unwrap() > 0);
+        assert!(raw["symbols"].as_i64().unwrap() > 0);
+        assert!(raw["covered_trade_days"].as_i64().unwrap() > 0);
+        assert!(raw["open_trade_days"].as_i64().unwrap() > 0);
+        assert!(raw["covered_trade_day_ratio"].is_f64());
+        assert!(raw["pit_violation_rows"].is_i64());
+        assert!(raw["missing_source_published_at_rows"].is_i64());
+        assert!(raw["core_negative_rows"].is_i64());
+
+        let breadth = &audit["symbol_breadth_vs_listed_stock_universe"];
+        assert!(breadth["reference_symbols"].as_i64().unwrap() > 0);
+        assert!(breadth["note"].is_string());
+
+        // 年份分解按请求区间补齐（2024 单年必有且 min/max 日期非空）
+        let years = audit["year_breakdown"].as_array().expect("year breakdown");
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0]["year"], 2024);
+        assert!(years[0]["rows"].as_i64().unwrap() > 0);
+        assert!(years[0]["min_trade_date"].is_string());
+
+        // 市场分解至少覆盖一个市场（SH/SZ/BJ 分桶）
+        let markets = audit["market_breakdown"]
+            .as_array()
+            .expect("market breakdown");
+        assert!(!markets.is_empty());
+        for market in markets {
+            assert!(market["market"].is_string());
+            assert!(market["covered_trade_days"].is_i64());
+        }
+
+        // 内嵌 correlation 审计带决策与样本数
+        assert!(audit["correlation_audit"]["decision"].is_string());
+        assert!(audit["correlation_audit"]["sample_rows"].is_i64());
+        assert!(audit["readiness"].is_object());
+        assert!(audit["decision"].is_object());
+        assert_eq!(audit["promotion_gate"]["bounded_wfa"], "blocked");
+    }
+
+    #[tokio::test]
+    async fn build_shareholder_structure_readiness_audit_reads_live_schema() {
+        let db = test_db().await;
+        let audit = build_shareholder_structure_readiness_audit(&db)
+            .await
+            .expect("shareholder readiness audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.21c-shareholder-structure-readiness-v1"
+        );
+        assert_eq!(audit["source_id"], "shareholder_structure");
+        // 四张股东结构表逐表审计
+        let tables = audit["tables"].as_array().expect("tables array");
+        assert_eq!(tables.len(), 4);
+        let names: Vec<&str> = tables
+            .iter()
+            .map(|table| table["table"].as_str().expect("table name"))
+            .collect();
+        assert!(names.contains(&"market_stock_holder_number"));
+        assert!(names.contains(&"market_stock_top10_holders"));
+        assert!(names.contains(&"market_stock_top10_float_holders"));
+        assert!(names.contains(&"market_stock_holder_trade"));
+        for table in tables {
+            assert!(table["table_exists"].is_boolean());
+            assert!(table["pit_violation_rows"].is_i64());
+            assert!(table["missing_constraints"].is_array());
+            assert!(table["passed"].is_boolean());
+        }
+        assert!(audit["schema_passed"].is_boolean());
+        assert!(audit["sync_attempt_breakdown"].is_array());
+        assert!(audit["decision"].is_object());
+        assert!(audit["pit_policy"]["period_snapshot_rule"].is_string());
+    }
+
+    #[tokio::test]
+    async fn build_shareholder_structure_coverage_audit_rejects_inverted_range() {
+        let db = test_db().await;
+        let err = build_shareholder_structure_coverage_audit(
+            &db,
+            ShareholderStructureCoverageAuditReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "shareholder_structure coverage start_date cannot be after end_date"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_shareholder_structure_coverage_audit_walks_admissible_gates() {
+        let db = test_db().await;
+        let audit = build_shareholder_structure_coverage_audit(
+            &db,
+            ShareholderStructureCoverageAuditReq {
+                start_date: None,
+                end_date: None,
+            },
+        )
+        .await
+        .expect("shareholder coverage audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.21d-shareholder-structure-coverage-audit-v1"
+        );
+        assert_eq!(
+            audit["mode"],
+            "read_only_year_source_symbol_ann_date_coverage_duplicate_audit"
+        );
+
+        let schema_passed = audit["schema_passed"].as_bool().unwrap();
+        if schema_passed {
+            // schema 通过：完整覆盖审计分支
+            let raw = &audit["raw_summary"];
+            assert!(raw["raw_rows"].as_i64().unwrap() > 0);
+            assert!(raw["symbols"].as_i64().unwrap() > 0);
+            assert!(raw["pit_violation_rows"].is_i64());
+            assert!(raw["duplicate_source_row_hash_count"].is_i64());
+            assert!(raw["data_quality_violation_rows"].is_i64());
+
+            // 严格低扇出门只统计 holder_number/holder_trade
+            let strict = &audit["strict_low_fanout_admissible_summary"];
+            assert_eq!(
+                strict["gate_id"],
+                SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID
+            );
+            assert_eq!(
+                strict["source_scope"],
+                "holder_number_and_holder_trade_only"
+            );
+            assert!(strict["admissible_rows"].is_i64());
+            // excluded = raw - admissible，不允许为负
+            assert!(strict["excluded_rows"].as_i64().unwrap() >= 0);
+            assert!(strict["row_filter"]["holder_number"].is_string());
+            assert!(strict["requested_year_coverage"]["missing_years"].is_array());
+            assert!(strict["decision"].is_object()); // gate 返回 json 对象（status/admission_decision/next_step 三键）
+
+            assert!(
+                audit["symbol_breadth_vs_main_chinext_non_st"]["reference_symbols"]
+                    .as_i64()
+                    .unwrap()
+                    > 0
+            );
+            assert!(audit["requested_year_coverage"]["observed_years"]
+                .as_array()
+                .is_some());
+            let years = audit["year_breakdown"].as_array().expect("year breakdown");
+            assert!(!years.is_empty());
+            assert!(audit["decision"].is_object());
+            assert_eq!(audit["promotion_gate"]["v19_train_selection"], "blocked");
+        } else {
+            // schema 未通过：短路分支只带 readiness 审计与禁止清单
+            assert!(audit.get("raw_summary").is_none());
+            assert!(audit["readiness_audit"].is_object());
+            assert!(audit["decision"].is_object());
+            assert!(
+                audit["prohibited"]
+                    .as_array()
+                    .expect("prohibited list")
+                    .len()
+                    >= 3
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_futures_price_chain_mapping_audit_joins_raw_and_mapping_products() {
+        let db = test_db().await;
+        let audit = build_futures_price_chain_mapping_audit(&db)
+            .await
+            .expect("futures mapping audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.19m-futures-price-chain-mapping-audit-v1"
+        );
+        assert_eq!(audit["source_id"], "futures_price_chain");
+        assert_eq!(
+            audit["mode"],
+            "read_only_product_mapping_pit_coverage_audit"
+        );
+
+        let schema_passed = audit["schema_passed"].as_bool().unwrap();
+        if schema_passed {
+            // 完整分支：raw/mapping/exclusion 三侧产品汇总互相勾稽
+            let raw_products = audit["raw_products"].as_array().expect("raw products");
+            assert!(!raw_products.is_empty());
+            for product in raw_products {
+                let status = product["mapping_status"].as_str().expect("mapping status");
+                assert!(
+                    status == "mapped" || status == "excluded" || status == "missing",
+                    "未知 mapping_status: {status}"
+                );
+                assert!(product["raw_rows"].is_i64());
+                assert!(product["endpoints"].is_array());
+            }
+            assert!(audit["raw_product_count"].as_i64().unwrap() > 0);
+            assert!(audit["mapping_rows"].is_i64());
+            assert!(audit["exclusion_rows"].is_i64());
+            assert!(audit["mapped_raw_product_count"].is_i64());
+            assert!(audit["excluded_raw_product_count"].is_i64());
+            assert!(audit["missing_products"].is_array());
+            assert!(audit["invalid_interval_rows"].is_i64());
+            assert!(audit["mapping_pit_violation_rows"].is_i64());
+            assert!(audit["weak_evidence_rows"].is_i64());
+            let endpoints = audit["endpoint_breakdown"].as_array().expect("endpoints");
+            assert!(!endpoints.is_empty());
+            assert!(audit["mapping_products"].is_array());
+            assert!(audit["exclusion_products"].is_array());
+            assert!(audit["readiness_audit"].is_object());
+            assert_eq!(audit["promotion_gate"]["wfa_status"], "blocked");
+        } else {
+            // schema 未通过：短路分支只带 readiness 审计
+            assert!(audit.get("raw_products").is_none());
+            assert!(audit["readiness_audit"].is_object());
+            assert!(audit["decision"].is_object());
+        }
+        assert!(audit["pit_policy"]["mapping_filter"].is_string());
+    }
+
+    #[tokio::test]
+    async fn build_futures_price_chain_coverage_audit_rejects_inverted_range() {
+        let db = test_db().await;
+        let err = build_futures_price_chain_coverage_audit(
+            &db,
+            FuturesPriceChainCoverageAuditReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "futures_price_chain coverage start_date cannot be after end_date"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_futures_price_chain_coverage_audit_breaks_down_endpoint_years() {
+        let db = test_db().await;
+        let audit = build_futures_price_chain_coverage_audit(
+            &db,
+            FuturesPriceChainCoverageAuditReq {
+                start_date: None,
+                end_date: None,
+            },
+        )
+        .await
+        .expect("futures coverage audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.19p-futures-price-chain-coverage-audit-v1"
+        );
+        assert_eq!(
+            audit["mode"],
+            "read_only_full_history_bounded_sync_coverage_audit"
+        );
+        // 未指定窗口时 requested_range 序列化为 null
+        assert!(audit["requested_range"]["start_date"].is_null());
+        assert!(audit["requested_range"]["end_date"].is_null());
+
+        let schema_passed = audit["schema_passed"].as_bool().unwrap();
+        if schema_passed {
+            assert!(audit["raw_product_count"].as_i64().unwrap() > 0);
+            assert!(audit["covered_product_count"].is_i64());
+            assert!(audit["missing_product_count"].is_i64());
+            assert!(audit["missing_products"].is_array());
+            assert!(audit["raw_pit_violation_rows"].is_i64());
+            assert!(audit["failed_sync_attempt_count"].is_i64());
+            assert!(audit["non_open_sync_attempt_count"].is_i64());
+
+            // 端点×年份二维汇总与行级 coverage 勾稽
+            let endpoint_years = audit["endpoint_year_breakdown"]
+                .as_array()
+                .expect("endpoint year breakdown");
+            assert!(!endpoint_years.is_empty());
+            for entry in endpoint_years {
+                assert!(entry["trade_year"].is_i64());
+                assert!(entry["endpoint"].is_string());
+                assert!(entry["products"].is_array());
+                assert!(entry["exchanges"].is_array());
+            }
+            let breakdown = audit["coverage_breakdown"].as_array().expect("breakdown");
+            assert!(!breakdown.is_empty());
+            for row in breakdown {
+                let status = row["mapping_status"].as_str().expect("mapping status");
+                assert!(
+                    status == "mapped" || status == "excluded" || status == "missing",
+                    "未知 mapping_status: {status}"
+                );
+                assert!(row["trade_date_count"].is_i64());
+            }
+            assert!(audit["sync_attempt_breakdown"].is_array());
+            assert!(audit["mapping_audit_decision"].is_object());
+            assert!(audit["promotion_gate"].is_object());
+        } else {
+            assert!(audit["mapping_audit"].is_object());
+            assert!(audit["decision"].is_object());
+        }
+        assert!(audit["pit_policy"]["raw_available_at_policy"].is_string());
+    }
+
+    #[tokio::test]
+    async fn build_futures_price_chain_mapping_template_lists_sw2021_targets() {
+        let db = test_db().await;
+        let template = build_futures_price_chain_mapping_template(&db)
+            .await
+            .expect("mapping template");
+
+        assert_eq!(
+            template["audit_version"],
+            "p3.19n-futures-price-chain-mapping-template-v1"
+        );
+        assert_eq!(template["mode"], "read_only_mapping_template_no_write");
+        // 模板永不写库
+        assert_eq!(template["write_enabled"], false);
+
+        // SW2021 L1 目标宇宙来自真实行业成员表
+        let universe = &template["target_universe"];
+        assert_eq!(universe["classification_source"], "SW2021");
+        assert_eq!(universe["industry_level"], "L1");
+        assert!(universe["target_count"].as_i64().unwrap() > 0);
+        let targets = universe["targets"].as_array().expect("targets");
+        assert_eq!(
+            targets.len(),
+            universe["target_count"].as_i64().unwrap() as usize
+        );
+        for target in targets {
+            assert!(target["exposure_code"].is_string());
+            assert!(target["index_code"].is_string());
+            assert!(target["current_or_historical_symbols"].is_i64());
+        }
+
+        // 候选行只保留未排除产品，字段骨架与 required_candidate_fields 对齐
+        let candidates = template["candidate_rows"].as_array().expect("candidates");
+        assert_eq!(
+            template["mapping_candidate_product_count"]
+                .as_i64()
+                .unwrap() as usize,
+            candidates.len()
+        );
+        for candidate in candidates {
+            assert_eq!(candidate["exposure_type"], "sw_industry");
+            assert_eq!(candidate["mapping_version"], "p319n-product-sw2021-l1-v1");
+            assert_eq!(candidate["direction"], 1);
+            assert!(candidate["product_symbol"].is_string());
+            assert!(candidate["raw_product_summary"].is_object());
+        }
+        assert!(
+            template["required_candidate_fields"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 11
+        );
+        assert!(!template["guardrails"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn validate_futures_price_chain_mapping_candidates_rejects_malformed_rows() {
+        let db = test_db().await;
+        let result = validate_futures_price_chain_mapping_candidates(
+            &db,
+            FuturesPriceChainMappingValidateReq {
+                rows: vec![
+                    // 行一：仅 product_symbol 为空白，其余字段形态合法
+                    // （exposure_code 用 SW2021 L1 真实 index_code 格式 801010.SI——
+                    //  targets 比对的即是该列，裸 801010/110000 均会命中 unknown）
+                    FuturesPriceChainMappingCandidate {
+                        product_symbol: "   ".to_string(),
+                        exposure_type: "sw_industry".to_string(),
+                        exposure_code: "801010.SI".to_string(),
+                        direction: 1,
+                        weight: 1.0,
+                        valid_from: "2024-01-01".to_string(),
+                        valid_to: None,
+                        available_at: "2024-01-01".to_string(),
+                        source: "manual_review".to_string(),
+                        mapping_version: "p319n-product-sw2021-l1-v1".to_string(),
+                        evidence: json!({"review_note": "第七批测试候选"}),
+                    },
+                    // 行二：多处违规——未知品种/直连个股/方向权重越界/日期非法/来源证据缺失
+                    FuturesPriceChainMappingCandidate {
+                        product_symbol: "ZZZZ_NO_SUCH".to_string(),
+                        exposure_type: "stock_symbol".to_string(),
+                        exposure_code: "600000.SH".to_string(),
+                        direction: 0,
+                        weight: 2.0,
+                        valid_from: "bad-date".to_string(),
+                        valid_to: Some("2020-01-01".to_string()),
+                        available_at: "2024-01-01".to_string(),
+                        source: "   ".to_string(),
+                        mapping_version: String::new(),
+                        evidence: Value::Null,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("candidate validation");
+
+        assert_eq!(
+            result["audit_version"],
+            "p3.19n-futures-price-chain-mapping-validate-v1"
+        );
+        assert_eq!(result["write_enabled"], false);
+        assert_eq!(result["candidate_row_count"], 2);
+        assert_eq!(result["invalid_row_count"], 2);
+        assert_eq!(result["valid_row_count"], 0);
+        // 校验永不写库的护栏文案齐备
+        assert!(!result["guardrails"].as_array().unwrap().is_empty());
+
+        let rows = result["row_results"].as_array().expect("row results");
+        assert_eq!(rows.len(), 2);
+        // 行一只有 product_symbol 缺失一个错误
+        assert_eq!(rows[0]["passed"], false);
+        assert_eq!(rows[0]["errors"], json!(["product_symbol_required"]));
+        // 行二命中全部校验规则
+        assert_eq!(rows[1]["passed"], false);
+        let errors: Vec<&str> = rows[1]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|error| error.as_str())
+            .collect();
+        for expected in [
+            "unknown_raw_product_symbol",
+            "direct_stock_mapping_requires_separate_evidence_gate",
+            "direction_must_be_minus_one_or_one",
+            "weight_must_be_gt_0_and_lte_1",
+            "valid_from_invalid",
+            "source_required",
+            "mapping_version_required",
+            "evidence_required",
+        ] {
+            assert!(
+                errors.contains(&expected),
+                "缺少错误 {expected}: {errors:?}"
+            );
+        }
+        // 缺少来源链接/评审说明时给 warning 而非 error
+        assert_eq!(
+            rows[1]["warnings"],
+            json!(["evidence_should_include_source_url_or_review_note"])
+        );
+        // 全部行无效 → 覆盖产品数为 0，缺失集合即模板候选全集
+        assert_eq!(result["covered_product_count"], 0);
+        assert!(result["missing_product_count"].as_i64().unwrap() >= 0);
+        assert!(result["missing_products"].is_array());
+        assert!(result["decision"].is_object());
+    }
+
+    #[tokio::test]
+    async fn build_main_business_readiness_audit_reads_raw_ledger() {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let state = crate::AppState {
+            start_time: Utc::now(),
+            db: test_db().await,
+            tushare: quant_data::tushare::client::TushareClient::from_env()
+                .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)"),
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        };
+
+        // start > end 在查库之前被拒绝
+        let err = build_main_business_readiness_audit(
+            &state,
+            MainBusinessReadinessAuditReq {
+                start_date: Some("20250101".to_string()),
+                end_date: Some("20240101".to_string()),
+                business_type: None,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "start_date must be <= end_date");
+
+        // 2024 全年：4 个季度末的只读 readiness 审计（仅查 state.db，无 Tushare 调用）
+        let audit = build_main_business_readiness_audit(
+            &state,
+            MainBusinessReadinessAuditReq {
+                start_date: Some("20240101".to_string()),
+                end_date: Some("20241231".to_string()),
+                business_type: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect("main business readiness audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.19e-main-business-raw-readiness-v1"
+        );
+        assert_eq!(audit["dataset"], "main_business");
+        assert_eq!(audit["table"], "market_stock_main_business");
+        // business_type 缺省归一为 P
+        assert_eq!(audit["business_type"], "P");
+        assert_eq!(audit["date_range"]["start_date"], "20240101");
+        assert_eq!(audit["date_range"]["end_date"], "20241231");
+
+        let counts = &audit["counts"];
+        // 2024 全年恰好 4 个季度末
+        assert_eq!(counts["expected_period_count"], 4);
+        assert!(counts["row_count"].as_i64().unwrap() > 0);
+        assert!(counts["symbol_count"].as_i64().unwrap() > 0);
+        assert!(counts["pit_violation_rows"].is_i64());
+        assert!(counts["missing_available_at_raw_rows"].is_i64());
+
+        assert!(audit["range"]["min_end_date"].is_string());
+        // 明细最多 4 期且未触发截断
+        let breakdown = audit["period_breakdown"].as_array().expect("breakdown");
+        assert!(breakdown.len() <= 4);
+        assert_eq!(audit["truncated_period_breakdown"], false);
+        assert!(audit["readiness"].is_string());
+        assert!(audit["pit_contract"]["hard_rule"].is_string());
+        assert!(audit["blocking_reasons"].is_array());
+        assert!(audit["notes"].as_array().unwrap().len() >= 3);
+    }
+}

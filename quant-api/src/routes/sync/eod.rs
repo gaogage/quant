@@ -19,7 +19,11 @@ use crate::routes::scheduler::{
     ensure_prediction_coverage, load_active_etf_symbols_union, load_first_active_strategy_config,
     sync_limit_with_retry,
 };
-use crate::routes::shared::{PaperAccountRepository, PgPaperAccountRepo};
+use crate::routes::shared::{PaperAccountRepository, PgPaperAccountRepo, StrategyConfig};
+
+/// P0 EOD 隔离：EOD 非关键步骤（日线/ETF/指数/daily_basic/moneyflow/block_trade）的
+/// 统一 timeout 上限，各同步子函数共用（原为 sync_eod_data 内局部 const，拆分时提升为文件级）。
+const EOD_STEP_TIMEOUT_SECS: u64 = 1800; // 30 分钟
 
 /// 22:00 日终数据同步：事件优先 → 当日行情 → 复权兜底 → composite → 日报 → 复权全量 → ML → 质量检查。
 pub async fn sync_eod_data(
@@ -40,8 +44,31 @@ pub async fn sync_eod_data(
     .await
     .unwrap_or_default();
 
+    eod_sync_events(db, tushare, &date_str).await;
+    eod_sync_daily_bars_and_ets(db, tushare, &all_stocks, &etf_symbols, &date_str).await;
+    eod_sync_margin_detail(db, tushare, &date_str).await;
+    eod_materialize_margin_factors(db).await;
+    eod_sync_mfdc_factors(db, &date_str).await;
+    eod_spawn_forecast_increment(db, &date_str).await;
+    eod_spawn_repurchase_increment(db, &date_str).await;
+    eod_sync_index_and_basics(db, tushare, &date_str).await;
+    eod_adj_backfill_composite(db, date, &date_str).await;
+    eod_mark_all_accounts(db, date, is_trade).await;
+    eod_push_daily_report(db, date, is_trade).await;
+    eod_sync_adj_full_and_etf(db, tushare, date, &date_str, &etf_symbols).await;
+    eod_ml_and_quality(db, tushare, date, sc).await;
+
+    // 夜间信号预备链已迁移为独立定时任务 nightly_signal_prep(22:10 触发,
+    // 见 scheduled_task_config)——原 EOD 尾部 spawn 依赖主链完成时点,主链被
+    // forecast 拖到 00:00 后预备链才启动,违反关机约束。bar 22:01 入库即满足
+    // 预备链全部前置,22:10 独立触发可提前 ~2 小时完成。
+    Ok(())
+}
+
+/// 事件数据优先同步：停牌数据（涨跌停调序背景见体内注释，实际执行在日线段之后）。
+pub(crate) async fn eod_sync_events(db: &PgPool, tushare: &TushareClient, date_str: &str) {
     // ── 事件数据优先同步：即使后续 heavy EOD 任务失败，也不能让交易门禁缺停牌/涨跌停。──
-    if let Err(e) = quant_data::sync::sync_suspension(db, tushare, &date_str).await {
+    if let Err(e) = quant_data::sync::sync_suspension(db, tushare, date_str).await {
         warn!("[scheduler] EOD 停牌数据同步失败: {}", e);
     }
     // 2026-09-19 调序: 涨跌停同步(含 derive 方向补全)移到当日日线落库之后——
@@ -49,13 +76,21 @@ pub async fn sync_eod_data(
     // 挂 NULL 至次日 09:00 T+1 自愈)。日线在先后 derive 当晚即补全方向。
     // 停牌同步(suspension)不依赖日线, 保持事件优先段。日线同步有 30 分钟
     // timeout 但超时仅 warn 继续, 涨跌停同步不受其成败影响(独立执行)。
+}
 
+/// 当日日线（timeout 隔离）+ 涨跌停同步 + ETF 日线。
+pub(crate) async fn eod_sync_daily_bars_and_ets(
+    db: &PgPool,
+    tushare: &TushareClient,
+    all_stocks: &[String],
+    etf_symbols: &[String],
+    date_str: &str,
+) {
     // ── 当日日线 + ETF日线（收盘后通常已可获取）──
     // P0 EOD 隔离:日线/ETF/指数/daily_basic/moneyflow/block_trade 均为"非关键路径",
     // 用 timeout 包裹防卡死。daily_basic 是已知慢点(历史曾 3 小时卡死 running 永不完成,
     // 导致后续复权因子同步+兜底未执行,adj 视图退化为 raw 价,回测曲线崩坏)。
     // 超时则 warn 并继续,确保复权因子+兜底(关键路径)不被前序步骤短路。
-    const EOD_STEP_TIMEOUT_SECS: u64 = 1800; // 30 分钟
 
     // 注意:timeout 结果含 Box<dyn StdError>(非 Send),须在独立块内消费,
     // 避免变量跨越后续 await 点导致整个 spawn future 非 Send。
@@ -65,9 +100,9 @@ pub async fn sync_eod_data(
             quant_data::sync::sync_daily_bars(
                 db,
                 tushare,
-                &all_stocks,
-                &date_str,
-                &date_str,
+                all_stocks,
+                date_str,
+                date_str,
                 &format!("dv-eod-{}", date_str),
             ),
         )
@@ -87,19 +122,23 @@ pub async fn sync_eod_data(
     // 涨跌停同步(Tushare 名单 + derive 方向补全, 2026-09-19 调序至日线后):
     // derive 用当日 close/pre_close 推 U/D, 日线已落库时当晚补全方向。
     // 日线超时/失败时照常执行(名单仍写入, 方向留 NULL 次日 09:00 T+1 补)。
-    let limit_ok = sync_limit_with_retry(db, tushare, &date_str).await;
+    let limit_ok = sync_limit_with_retry(db, tushare, date_str).await;
     if !limit_ok {
         warn!("[scheduler] ⚠ 涨跌停数据同步失败 (已重试)");
     }
     let _ = quant_data::sync::sync_fund_daily(
         db,
         tushare,
-        &etf_symbols,
-        &date_str,
-        &date_str,
+        etf_symbols,
+        date_str,
+        date_str,
         &format!("etf-eod-{}", date_str),
     )
     .await;
+}
+
+/// 个股两融明细每日增量（[T-1, T] 区间拉取，margin_rq* 因子数据源）。
+pub(crate) async fn eod_sync_margin_detail(db: &PgPool, tushare: &TushareClient, date_str: &str) {
     // ── 个股两融明细每日增量（2026-09-08 接入，margin_rq* 因子数据源）──
     // 充值 token 权限接口；双 token fallback 后主 client 失败自动切 ALT。
     // 同步失败不阻塞 EOD 主链路（因子次日 T+1 保鲜窗口兜底）。
@@ -116,7 +155,7 @@ pub async fn sync_eod_data(
             tushare,
             &empty_syms,
             &prev_str,
-            &date_str,
+            date_str,
             &format!("margin-detail-eod-{}", date_str),
         )
         .await
@@ -126,6 +165,10 @@ pub async fn sync_eod_data(
             Err(e) => warn!("[scheduler] EOD 两融明细同步失败 {}: {}", date_str, e),
         }
     }
+}
+
+/// 两融因子每日增量物化（margin_rq_ratio_20d_std / margin_rqye_chg_20d_std 两块 SQL）。
+pub(crate) async fn eod_materialize_margin_factors(db: &PgPool) {
     // ── 两融因子每日增量物化（margin_rq*，生效日口径，与生产白名单 74 因子配套）──
     // 增量只算近 5 个数据日（20 日窗口因子由 SQL 窗口自动取足前置数据）。
     // 失败仅告警：因子缺数当季贡献为零，不会污染既有信号（白名单缺数告警会提示）。
@@ -192,6 +235,10 @@ pub async fn sync_eod_data(
             Err(e) => warn!("[scheduler] 两融因子 rqye_chg 增量物化失败: {}", e),
         }
     }
+}
+
+/// 东财主力资金流每日增量（moneyflow_dc raw 拉取 + mfdc_* 因子物化）。
+pub(crate) async fn eod_sync_mfdc_factors(db: &PgPool, date_str: &str) {
     // ── 东财主力资金流每日增量（2026-09-09 接入，mfdc_* 因子数据源，76 白名单配套）──
     // moneyflow_dc 按日全市场 6000 行；双 token fallback 兜权限。生效日 = 数据日+1。
     {
@@ -316,6 +363,10 @@ pub async fn sync_eod_data(
             Err(e) => warn!("[scheduler] 主力资金流因子 elg 物化失败: {}", e),
         }
     }
+}
+
+/// 业绩预告增量同步（后台 spawn，不阻塞主链）。
+pub(crate) async fn eod_spawn_forecast_increment(db: &PgPool, date_str: &str) {
     // ── 业绩预告增量同步（forecast 族因子数据源，2026-09-05 接入）──
     // forecast 接口要求 ann_date 或 ts_code 至少一个参数，按日增量拉当日公告。
     // 用充值 token（现行 token 无此接口权限）。同步失败不阻塞 EOD 主链路。
@@ -341,7 +392,7 @@ pub async fn sync_eod_data(
                     // forecast(业绩预告)是 forecast_* 因子数据源,非当日信号硬依赖
                     // (当晚缺则次日 9 点档补,影响=该 3 因子晚一天),spawn 后台不阻塞。
                     let db2 = db.clone();
-                    let ds = date_str.clone();
+                    let ds = date_str.to_string();
                     tokio::spawn(async move {
                         // 2026-09-15: 逐股(7210次×60/min=2h)改 ann_date 全市场单次拉取;
                         // 备用端点教训见 sync_forecast_by_day 文档注释
@@ -362,6 +413,10 @@ pub async fn sync_eod_data(
             }
         }
     }
+}
+
+/// 回购增量同步（后台 spawn，不阻塞主链）。
+pub(crate) async fn eod_spawn_repurchase_increment(db: &PgPool, date_str: &str) {
     // ── 回购增量同步（repurchase 族因子数据源，2026-09-18 接入）──
     // 2026-09-18 发现 market_stock_repurchase 停更于 06-18(三个月): sync_repurchase
     // 此前只有手动 HTTP 端点(bounded_raw dataset=repurchase), 未接任何调度链——
@@ -384,7 +439,7 @@ pub async fn sync_eod_data(
             match quant_data::tushare::client::TushareClient::new(rp_cfg) {
                 Ok(rp_client) => {
                     let db3 = db.clone();
-                    let ds3 = date_str.clone();
+                    let ds3 = date_str.to_string();
                     tokio::spawn(async move {
                         let start: String = match sqlx::query_as::<_, (Option<chrono::NaiveDate>,)>(
                             "SELECT MAX(ann_date) FROM market_stock_repurchase",
@@ -419,6 +474,14 @@ pub async fn sync_eod_data(
             }
         }
     }
+}
+
+/// 指数日线 + daily_basic + moneyflow + block_trade（均 timeout 隔离）。
+pub(crate) async fn eod_sync_index_and_basics(
+    db: &PgPool,
+    tushare: &TushareClient,
+    date_str: &str,
+) {
     // fund_daily 当日缺失时不做运行时兜底(运行时零 Python 依赖铁律,见 quant/AGENTS.md):
     // Tushare fund_daily 就绪率不稳定属数据源现实。缺失时日报当日收益显示 --
     // (snapshot.daily_return 置 NULL),次日 9:00 T+1 补齐后补盯市并补发昨日绩效。
@@ -430,8 +493,8 @@ pub async fn sync_eod_data(
         db,
         tushare,
         &index_codes,
-        &date_str,
-        &date_str,
+        date_str,
+        date_str,
         &format!("idx-eod-{}", date_str),
     )
     .await
@@ -459,8 +522,8 @@ pub async fn sync_eod_data(
                 db,
                 tushare,
                 &[],
-                &date_str,
-                &date_str,
+                date_str,
+                date_str,
                 &format!("dv-basic-eod-{}", date_str),
             ),
         )
@@ -482,8 +545,7 @@ pub async fn sync_eod_data(
     // 批量拉取：传空走 trade_date 全市场路径，1 次 API 调用几秒完成。
     let mf_n = {
         let mf_dv = format!("mf-eod-{}", date_str);
-        let mf_fut =
-            quant_data::sync::sync_moneyflow(db, tushare, &[], &date_str, &date_str, &mf_dv);
+        let mf_fut = quant_data::sync::sync_moneyflow(db, tushare, &[], date_str, date_str, &mf_dv);
         match tokio::time::timeout(
             tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS),
             mf_fut,
@@ -504,7 +566,7 @@ pub async fn sync_eod_data(
     // 大宗交易(market_stock_block_trade): v24 block_trade_inst 因子依赖。
     let bt_n = {
         let bt_dv = format!("bt-eod-{}", date_str);
-        let bt_fut = quant_data::sync::sync_block_trade(db, tushare, &bt_dv, &date_str, &date_str);
+        let bt_fut = quant_data::sync::sync_block_trade(db, tushare, &bt_dv, date_str, date_str);
         match tokio::time::timeout(
             tokio::time::Duration::from_secs(EOD_STEP_TIMEOUT_SECS),
             bt_fut,
@@ -521,7 +583,12 @@ pub async fn sync_eod_data(
     if bt_n > 0 {
         info!("[scheduler] EOD 大宗交易同步: {} 条", bt_n);
     }
+}
 
+/// 复权因子兜底（纯 DB 前向填充）+ composite 曲线刷新 + EOD 阶段汇总日志。
+/// 日报推送拆至 eod_push_daily_report（须在 eod_mark_all_accounts 之后执行，
+/// 依赖 re-mark 后的当日收盘口径 NAV 快照）。
+pub(crate) async fn eod_adj_backfill_composite(db: &PgPool, date: NaiveDate, date_str: &str) {
     // ── 复权因子兜底（快，纯 DB 前向填充）+ composite 合成 + 日报推送 ──
     // 关键优化：先 backfill（LATERAL 前值填充，几秒完成）→ composite 合成 → 立即推日报，
     // 让日报在 22:00 后几分钟内送达（不等 sync_adj_factor 逐只拉 7210 只 API，那要 2+ 小时）。
@@ -545,7 +612,10 @@ pub async fn sync_eod_data(
         "[scheduler] 22:00 EOD 同步 (事件+当日日线+ETF+指数+基础指标+复权兜底) ({})",
         date_str
     );
+}
 
+/// EOD 日终盯市：当日收盘价重估所有 active 模拟账户 + NAV 快照完整性门禁。
+pub(crate) async fn eod_mark_all_accounts(db: &PgPool, date: NaiveDate, is_trade: bool) {
     // ── EOD 日终盯市:用当日收盘价重估所有 active 模拟账户 ──
     // 14:45 调仓时当日 bar 未入库,mark_to_market 只能取昨收,NAV/daily_return 滞后一天;
     // 此处日线已同步(当日 close 已入库),re-mark + NAV 重算后再推日报,
@@ -602,7 +672,10 @@ pub async fn sync_eod_data(
             accounts.len()
         );
     }
+}
 
+/// 日报提前推送（composite 合成且日终盯市完成后立即推，不等复权因子全量）。
+pub(crate) async fn eod_push_daily_report(db: &PgPool, date: NaiveDate, is_trade: bool) {
     // 日报提前推送：composite 合成后立即推，不等 sync_adj_factor 全量同步。
     // 日报只需 NAV 快照（上方 EOD re-mark 已刷新为当日收盘口径）+ composite 曲线（已合成），
     // 不依赖复权因子全量完成。
@@ -612,15 +685,24 @@ pub async fn sync_eod_data(
             warn!("[scheduler] 实盘绩效日报生成失败: {}", e);
         }
     }
+}
 
+/// 复权因子全量同步 + ETF fund_adj + backfill 再次兜底。
+pub(crate) async fn eod_sync_adj_full_and_etf(
+    db: &PgPool,
+    tushare: &TushareClient,
+    date: NaiveDate,
+    date_str: &str,
+    etf_symbols: &[String],
+) {
     // ── 复权因子全量同步（批量拉取：传空走 trade_date 全市场路径，1 次 API 调用几秒完成）
     // + ML + 数据质量。这些是后台收尾任务，不阻塞日报。sync_adj_factor 会用真实值覆盖 backfill 的前值填充。
     let adj_n = quant_data::sync::sync_adj_factor(
         db,
         tushare,
         &[],
-        &date_str,
-        &date_str,
+        date_str,
+        date_str,
         &format!("dv-adj-eod-{}", date_str),
     )
     .await
@@ -640,9 +722,9 @@ pub async fn sync_eod_data(
         match quant_data::sync::sync_fund_adj(
             db,
             tushare,
-            &etf_symbols,
-            &date_str,
-            &date_str,
+            etf_symbols,
+            date_str,
+            date_str,
             &format!("dv-fund-adj-eod-{}", date_str),
         )
         .await
@@ -656,8 +738,21 @@ pub async fn sync_eod_data(
         }
     }
     // backfill 再次兜底（sync_adj_factor 部分失败时补全剩余）
-    crate::routes::sync::market_data::backfill_adj_factor_for_date(db, date, &dv_adj_id).await;
+    crate::routes::sync::market_data::backfill_adj_factor_for_date(
+        db,
+        date,
+        &format!("dv-adj-eod-{}", date_str),
+    )
+    .await;
+}
 
+/// ML 预测覆盖检查+补齐 + EOD 时点数据完整性质量检查。
+pub(crate) async fn eod_ml_and_quality(
+    db: &PgPool,
+    tushare: &TushareClient,
+    date: NaiveDate,
+    sc: Option<StrategyConfig>,
+) {
     // ── ML预测数据检查+补齐 ──
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     let pred_ok = match sc.as_ref() {
@@ -678,10 +773,4 @@ pub async fn sync_eod_data(
         crate::routes::data_quality::FactorFreshnessBaseline::PreviousTradeDate,
     )
     .await;
-
-    // 夜间信号预备链已迁移为独立定时任务 nightly_signal_prep(22:10 触发,
-    // 见 scheduled_task_config)——原 EOD 尾部 spawn 依赖主链完成时点,主链被
-    // forecast 拖到 00:00 后预备链才启动,违反关机约束。bar 22:01 入库即满足
-    // 预备链全部前置,22:10 独立触发可提前 ~2 小时完成。
-    Ok(())
 }
