@@ -3136,7 +3136,8 @@ mod ninth_batch {
         assert_eq!(score["uncontrolled_peer_summary"]["count"], json!(1));
         // 无任何控制且无对照 → 显式分 0，peer 分 0
         let plain = snapshot("plain", 4, full_elite_metrics(0.20), json!({}));
-        let score = build_portfolio_correlation_contribution_score(&plain, std::slice::from_ref(&plain));
+        let score =
+            build_portfolio_correlation_contribution_score(&plain, std::slice::from_ref(&plain));
         assert_eq!(score["explicit_control_score"], json!(0.0));
         assert_eq!(score["contribution_score"], json!(0.0));
         assert_eq!(
