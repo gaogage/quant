@@ -4734,3 +4734,1521 @@ mod sleeve_param_grid {
         }
     }
 }
+
+// ═══ 第十批测试：连库 handler + 参数校验早退 + 纯函数（2026-09-22）═══
+//
+// 覆盖面：
+// - 连库只读 handler：list_backtests / backtest_summary / backtest_equity_curve
+// - 连库写 handler：cleanup_stale_backtest_tasks_inner（超时状态迁移）
+// - 连库纯函数：resolve_effective_factor_coverage / resolve_warmup_start_date
+// - 参数校验早退（不触库）：run_backtest / run_factor_backtest / run_prediction_backtest
+//   —— 禁止真跑回测（会 spawn 重型引擎），只测 build/parse 阶段的 Err 早退分支
+// - 纯函数：decimal_from_f64 / positive_notional / apply_cost_model / optional_unit_f64 /
+//   optional_decimal_pct / optional_positive_decimal_pct / factor_rebalance_frequency /
+//   parse_execution_max_participation_rate / cost_model_snapshot / execution_rules_snapshot
+//
+// 写路径纪律：自造行键（task_id / combo_name）一律 zzz_test_bt10_{scope}_* 前缀，
+// 测试前置 + 结尾双端精确清理（子表先删：equity → result → task；mfv 独立无 FK）。
+// 共享父行（strategy_definition / strategy_version / data_version）幂等插入且不删，
+// 防并行测试互拆（第九批 experiment_run 实锤先例）。
+// cleanup-stale 候选查询扫全库超时 running/cancel_requested，并行测试的行可能进候选集
+// —— 断言只核验本测试自己造的行，updated_task_count 放宽为 >= 自己行数。
+#[cfg(test)]
+mod tenth_batch {
+    use super::*;
+
+    /// cleanup 三连测互斥锁：apply 模式走全库 UPDATE（超时 running/cancel_requested
+    /// 全部迁移终态），并行时先跑者会把后跑者刚造的候选行迁成终态，导致后者
+    /// updated_task_count=0 / dry_run 断言"行仍 running"失败——dry_run 与两个
+    /// apply 测试必须串行（REPORT_WRITE_TEST_LOCK 同款模式）。
+    static CLEANUP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    // ── 基础 helper ──
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 构造真实 AppState（PG + Tushare 经 dotenv 加载 quant/.env；
+    /// cargo test cwd=quant-api 时 ../.env 命中，与 second_batch/fourth_batch 先例一致）。
+    async fn test_state() -> Arc<AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let db = test_db().await;
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init（dotenv 加载 quant/.env 后需 TUSHARE_TOKEN）");
+        Arc::new(AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    /// handler 直调后解包响应体为 serde_json::Value（crud.rs second_batch 先例）。
+    async fn resp_json(resp: impl axum::response::IntoResponse) -> Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    /// NUMERIC 表列经 sqlx→serde 是字符串形态（rust_decimal 默认 serde=str），
+    /// jsonb 路径才是 number——本 helper 双形态取 f64，断言统一走近似比较。
+    fn json_decimal_f64(v: &Value) -> f64 {
+        v.as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| v.as_f64())
+            .unwrap_or_else(|| panic!("非数值形态: {v}"))
+    }
+
+    fn dec(value: &str) -> Decimal {
+        value.parse::<Decimal>().expect("合法 Decimal 字面量")
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("合法日期")
+    }
+
+    /// 按场景前缀双端清理本测试专属行（子表先删，FK CASCADE 兜底但仍显式删）。
+    async fn cleanup_scope(db: &sqlx::PgPool, scope: &str) {
+        let prefix = format!("zzz_test_bt10_{scope}%");
+        let _ = sqlx::query("DELETE FROM multi_factor_value WHERE combo_name LIKE $1")
+            .bind(&prefix)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM backtest_equity_curve WHERE task_id LIKE $1")
+            .bind(&prefix)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM backtest_result WHERE task_id LIKE $1")
+            .bind(&prefix)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM backtest_task WHERE task_id LIKE $1")
+            .bind(&prefix)
+            .execute(db)
+            .await;
+    }
+
+    /// 共享父行：strategy_definition → strategy_version（主 sv + list 专用隔离 sv）+ data_version。
+    /// 幂等插入，结尾不删（防并行测试互拆）。backtest_task 对两表均为 ON DELETE RESTRICT。
+    async fn seed_shared_parents(db: &sqlx::PgPool) {
+        sqlx::query(
+            "INSERT INTO strategy_definition
+               (strategy_id, strategy_code, name, strategy_type, status)
+             VALUES (999999910, 'zzz_test_bt10_strategy', 'zzz 第十批回测', 'zzz', 'active')
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(db)
+        .await
+        .expect("insert zzz strategy_definition");
+        for (sv, ver) in [
+            ("zzz_test_bt10_sv", "v10"),
+            ("zzz_test_bt10_lst_sv", "v10lst"),
+        ] {
+            sqlx::query(
+                "INSERT INTO strategy_version
+                   (strategy_version_id, strategy_code, version,
+                    parameter_schema, default_parameters, status)
+                 VALUES ($1, 'zzz_test_bt10_strategy', $2, '{}', '{}', 'active')
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(sv)
+            .bind(ver)
+            .execute(db)
+            .await
+            .expect("insert zzz strategy_version");
+        }
+        sqlx::query(
+            "INSERT INTO data_version
+               (data_version_id, name, source, start_date, end_date, tables, snapshot_hash)
+             VALUES ('zzz_test_bt10_dv', 'zzz 第十批数据', 'zzz',
+                     '2026-01-01', '2026-01-31', '{}', 'zzz-bt10')
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(db)
+        .await
+        .expect("insert zzz data_version");
+    }
+
+    /// 造 zzz backtest_task。心跳时间 = now() - heartbeat_age_secs（NULL 表示不写心跳，
+    /// 候选查询会 COALESCE 回退 started_at/created_at——本 helper 不写 started_at，
+    /// 故 NULL 时回退到 created_at = now() - created_age_secs）。
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_bt_task(
+        db: &sqlx::PgPool,
+        task_id: &str,
+        strategy_version_id: &str,
+        status: &str,
+        progress: i32,
+        created_age_secs: i32,
+        heartbeat_age_secs: Option<i32>,
+        heartbeat_timeout_secs: Option<i32>,
+        last_completed_date: Option<NaiveDate>,
+        error_message: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO backtest_task
+               (task_id, strategy_version_id, data_version_id, benchmark_symbol, symbols,
+                start_date, end_date, initial_capital, rebalance_frequency,
+                cost_model, slippage_model, execution_rules, parameters,
+                status, progress, last_heartbeat_at, heartbeat_timeout_seconds,
+                created_at, last_completed_date, error_message)
+             VALUES ($1, $2, 'zzz_test_bt10_dv', '000300.SH', ARRAY['ZZZ900.SH'],
+                     '2026-01-05', '2026-01-30', 100000, 'monthly',
+                     '{}', '{}', '{}', '{}',
+                     $3, $4,
+                     CASE WHEN $5::int IS NULL THEN NULL
+                          ELSE now() - ($5::int * interval '1 second') END,
+                     $6,
+                     now() - ($7::int * interval '1 second'),
+                     $8, $9)",
+        )
+        .bind(task_id)
+        .bind(strategy_version_id)
+        .bind(status)
+        .bind(progress)
+        .bind(heartbeat_age_secs)
+        .bind(heartbeat_timeout_secs)
+        .bind(created_age_secs)
+        .bind(last_completed_date)
+        .bind(error_message)
+        .execute(db)
+        .await
+        .expect("insert zzz backtest_task");
+    }
+
+    /// 造 zzz backtest_result（全指标列，值与断言配套）。
+    async fn insert_bt_result(db: &sqlx::PgPool, task_id: &str) {
+        sqlx::query(
+            "INSERT INTO backtest_result
+               (result_id, task_id, total_return, annualized_return, benchmark_return,
+                excess_return, sharpe_ratio, sortino_ratio, information_ratio,
+                max_drawdown, turnover, total_trades, win_rate, reproducibility_hash)
+             VALUES ($1, $2, 0.18, 0.20, 0.10, 0.08, 1.5, 1.8, 1.2,
+                     -0.05, 3.5, 42, 0.55, $3)",
+        )
+        .bind(format!("{task_id}_r"))
+        .bind(task_id)
+        .bind(format!("{task_id}-hash"))
+        .execute(db)
+        .await
+        .expect("insert zzz backtest_result");
+    }
+
+    /// 造 zzz backtest_equity_curve 点列（cash 固定 0，非被测列）。
+    async fn insert_bt_equity(db: &sqlx::PgPool, task_id: &str, points: &[(NaiveDate, f64)]) {
+        for (d, v) in points {
+            sqlx::query(
+                "INSERT INTO backtest_equity_curve
+                   (task_id, trade_date, portfolio_value, cash)
+                 VALUES ($1, $2, $3, 0)",
+            )
+            .bind(task_id)
+            .bind(d)
+            .bind(Decimal::from_f64(*v).expect("equity value to decimal"))
+            .execute(db)
+            .await
+            .expect("insert zzz equity point");
+        }
+    }
+
+    /// 造 zzz multi_factor_value（effective coverage 数据源，无 FK，
+    /// UNIQUE(combo_name, version, symbol, trade_date) 幂等跳过）。
+    async fn insert_mfv(
+        db: &sqlx::PgPool,
+        combo: &str,
+        symbol: &str,
+        trade_date: NaiveDate,
+        available_at: Option<NaiveDate>,
+    ) {
+        sqlx::query(
+            "INSERT INTO multi_factor_value
+               (combo_name, version, symbol, trade_date, raw_score, available_at)
+             VALUES ($1, '1.0.0', $2, $3, 1.0, $4)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(combo)
+        .bind(symbol)
+        .bind(trade_date)
+        .bind(available_at)
+        .execute(db)
+        .await
+        .expect("insert zzz multi_factor_value");
+    }
+
+    /// RunFactorBacktestReq 字段量大（约 70 个，serde default 全覆盖），
+    /// 经 serde_json::from_value 构造：必填仅 combo_name / start_date / end_date，
+    /// Option 字段缺失自动 None。extra 覆盖默认键。
+    fn factor_req(extra: Value) -> RunFactorBacktestReq {
+        let mut value = json!({
+            "combo_name": "zzz_test_bt10_combo",
+            "start_date": "20260101",
+            "end_date": "20260131",
+        });
+        let Some(base) = value.as_object_mut() else {
+            unreachable!("json! 对象字面量必为 object");
+        };
+        if let Some(ext) = extra.as_object() {
+            for (k, v) in ext {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+        serde_json::from_value(value).expect("RunFactorBacktestReq 反序列化")
+    }
+
+    // ── 纯函数：decimal / notional / cost model ──
+
+    #[test]
+    fn decimal_from_f64_accepts_finite_rejects_non_finite() {
+        assert_eq!(decimal_from_f64(2.5, "zzz_field").unwrap(), dec("2.5"));
+        assert_eq!(decimal_from_f64(0.0, "zzz_field").unwrap(), Decimal::ZERO);
+        assert_eq!(
+            decimal_from_f64(-0.0003, "zzz_field").unwrap(),
+            dec("-0.0003")
+        );
+        // from_f64 对 NaN/±Inf 返回 None → Err，报错文案含字段名
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = decimal_from_f64(bad, "zzz_field").expect_err("非有限值必须报错");
+            assert_eq!(err, "zzz_field must be a finite number", "实际错误: {err}");
+        }
+    }
+
+    #[test]
+    fn positive_notional_accepts_only_positive_finite() {
+        assert_eq!(positive_notional(100.0), Some(100.0));
+        assert_eq!(positive_notional(0.0001), Some(0.0001));
+        // 0 / 负数 / NaN / Inf 全部折叠为 None（signal_generator notional 语义）
+        assert_eq!(positive_notional(0.0), None);
+        assert_eq!(positive_notional(-1.0), None);
+        assert_eq!(positive_notional(f64::NAN), None);
+        assert_eq!(positive_notional(f64::INFINITY), None);
+    }
+
+    #[test]
+    fn apply_cost_model_without_request_returns_base_and_partial_overrides() {
+        // base 用非默认值，与 FeeConfig::default 区分，证明 None 分支原样透传
+        let base = FeeConfig {
+            commission_rate: dec("0.0011"),
+            min_commission: dec("2.5"),
+            tax_rate: dec("0.0012"),
+            slippage_bps: dec("0.0002"),
+            cost_multiplier: dec("1.4"),
+            impact_cost_coefficient: dec("0.7"),
+            impact_cost_exponent: dec("0.6"),
+            transfer_fee_rate: dec("0.000015"),
+        };
+        let untouched = apply_cost_model(base.clone(), None).expect("None 分支必须 Ok");
+        assert_eq!(untouched.commission_rate, dec("0.0011"));
+        assert_eq!(untouched.min_commission, dec("2.5"));
+        assert_eq!(untouched.tax_rate, dec("0.0012"));
+        assert_eq!(untouched.slippage_bps, dec("0.0002"));
+        assert_eq!(untouched.cost_multiplier, dec("1.4"));
+        assert_eq!(untouched.impact_cost_coefficient, dec("0.7"));
+        assert_eq!(untouched.impact_cost_exponent, dec("0.6"));
+        assert_eq!(untouched.transfer_fee_rate, dec("0.000015"));
+
+        // 部分覆盖：只给 2 个字段，其余 6 个保留 base
+        let req = CostModelReq {
+            commission_rate: Some(0.0005),
+            slippage_bps: Some(0.0003),
+            ..CostModelReq::default()
+        };
+        let partial = apply_cost_model(base, Some(&req)).expect("部分覆盖必须 Ok");
+        assert_eq!(partial.commission_rate, dec("0.0005"));
+        assert_eq!(partial.slippage_bps, dec("0.0003"));
+        assert_eq!(partial.min_commission, dec("2.5"));
+        assert_eq!(partial.tax_rate, dec("0.0012"));
+        assert_eq!(partial.transfer_fee_rate, dec("0.000015"));
+        assert_eq!(partial.impact_cost_exponent, dec("0.6"));
+    }
+
+    #[test]
+    fn apply_cost_model_rejects_non_finite_input() {
+        let req = CostModelReq {
+            commission_rate: Some(f64::NAN),
+            ..CostModelReq::default()
+        };
+        let err = apply_cost_model(FeeConfig::default(), Some(&req))
+            .expect_err("NaN commission_rate 必须报错");
+        assert_eq!(
+            err, "cost_model.commission_rate must be a finite number",
+            "实际错误: {err}"
+        );
+
+        let req = CostModelReq {
+            tax_rate: Some(f64::INFINITY),
+            ..CostModelReq::default()
+        };
+        let err =
+            apply_cost_model(FeeConfig::default(), Some(&req)).expect_err("Inf tax_rate 必须报错");
+        assert_eq!(
+            err, "cost_model.tax_rate must be a finite number",
+            "实际错误: {err}"
+        );
+    }
+
+    #[test]
+    fn optional_unit_f64_and_decimal_pct_enforce_unit_interval() {
+        // None 透传
+        assert_eq!(optional_unit_f64(None, "zzz_unit").unwrap(), None);
+        assert_eq!(optional_decimal_pct(None, "zzz_pct").unwrap(), None);
+        // 闭区间 [0, 1] 边界合法
+        assert_eq!(optional_unit_f64(Some(0.0), "zzz_unit").unwrap(), Some(0.0));
+        assert_eq!(optional_unit_f64(Some(1.0), "zzz_unit").unwrap(), Some(1.0));
+        assert_eq!(optional_unit_f64(Some(0.5), "zzz_unit").unwrap(), Some(0.5));
+        // decimal_pct 额外做 f64→Decimal 转换
+        assert_eq!(
+            optional_decimal_pct(Some(0.25), "zzz_pct").unwrap(),
+            Some(dec("0.25"))
+        );
+        // 越界 / 非有限值报错，文案含字段名
+        for bad in [1.5, -0.1, f64::NAN] {
+            assert!(
+                optional_unit_f64(Some(bad), "zzz_unit").is_err(),
+                "值 {bad}"
+            );
+            assert!(
+                optional_decimal_pct(Some(bad), "zzz_pct").is_err(),
+                "值 {bad}"
+            );
+        }
+        let err = optional_unit_f64(Some(1.5), "zzz_unit").expect_err("越界必须报错");
+        assert_eq!(err, "zzz_unit must be between 0 and 1", "实际错误: {err}");
+    }
+
+    #[test]
+    fn optional_positive_decimal_pct_excludes_zero_lower_bound() {
+        assert_eq!(
+            optional_positive_decimal_pct(None, "zzz_pos").unwrap(),
+            None
+        );
+        // 0 是 (0, 1] 的排他下界——与 optional_decimal_pct 的关键差异
+        let err = optional_positive_decimal_pct(Some(0.0), "zzz_pos").expect_err("0 必须报错");
+        assert_eq!(
+            err, "zzz_pos must be greater than 0 and at most 1",
+            "实际错误: {err}"
+        );
+        assert_eq!(
+            optional_positive_decimal_pct(Some(0.5), "zzz_pos").unwrap(),
+            Some(dec("0.5"))
+        );
+        assert_eq!(
+            optional_positive_decimal_pct(Some(1.0), "zzz_pos").unwrap(),
+            Some(dec("1.0"))
+        );
+        for bad in [1.2, -0.5, f64::NAN] {
+            assert!(
+                optional_positive_decimal_pct(Some(bad), "zzz_pos").is_err(),
+                "值 {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn factor_rebalance_frequency_maps_and_falls_back() {
+        assert_eq!(factor_rebalance_frequency("daily"), 1);
+        assert_eq!(factor_rebalance_frequency("weekly"), 5);
+        assert_eq!(factor_rebalance_frequency("monthly"), 20);
+        // quarterly 显式 60（2026-09-04 F1 实验修复的静默降频错配，回归锚点）
+        assert_eq!(factor_rebalance_frequency("quarterly"), 60);
+        // 整数字符串按交易日数解析
+        assert_eq!(factor_rebalance_frequency("7"), 7);
+        assert_eq!(factor_rebalance_frequency("15"), 15);
+        // 无法解析的值 fallback 到 20（与 monthly 等频）
+        assert_eq!(factor_rebalance_frequency("junk"), 20);
+        assert_eq!(factor_rebalance_frequency(""), 20);
+    }
+
+    #[test]
+    fn parse_execution_max_participation_rate_optional_paths() {
+        // 无 execution_rules → None
+        let req = factor_req(json!({}));
+        assert_eq!(parse_execution_max_participation_rate(&req).unwrap(), None);
+        // 有 rules 但字段缺省 → None
+        let req = factor_req(json!({ "execution_rules": { "execution_price": "open" } }));
+        assert_eq!(parse_execution_max_participation_rate(&req).unwrap(), None);
+        // 合法值 → Decimal
+        let req = factor_req(json!({ "execution_rules": { "max_participation_rate": 0.25 } }));
+        assert_eq!(
+            parse_execution_max_participation_rate(&req).unwrap(),
+            Some(dec("0.25"))
+        );
+        // null 字段 → None（JSON 路径无法携带 NaN，见下方直构用例）
+        let req = factor_req(json!({ "execution_rules": { "max_participation_rate": null } }));
+        assert_eq!(parse_execution_max_participation_rate(&req).unwrap(), None);
+
+        // 非有限值报错（ExecutionRulesReq 直构注入 f64::NAN）
+        let mut req = factor_req(json!({}));
+        req.execution_rules = Some(ExecutionRulesReq {
+            execution_timing: None,
+            execution_price: None,
+            execution_schedule_profile: None,
+            execution_carry_policy: None,
+            execution_daily_target_move_limit_pct: None,
+            execution_max_carry_days: None,
+            max_participation_rate: Some(f64::NAN),
+        });
+        let err = parse_execution_max_participation_rate(&req).expect_err("NaN 必须报错");
+        assert_eq!(
+            err, "execution_rules.max_participation_rate must be a finite number",
+            "实际错误: {err}"
+        );
+    }
+
+    #[test]
+    fn cost_model_snapshot_null_and_full_field_pass_through() {
+        // None → JSON null（parameters 快照语义：未配置即缺省）
+        assert!(cost_model_snapshot(&None).is_null());
+
+        let req = CostModelReq {
+            commission_rate: Some(0.0005),
+            impact_cost_exponent: Some(0.5),
+            ..CostModelReq::default()
+        };
+        let snap = cost_model_snapshot(&Some(req));
+        // Option<f64> → json number 或 null，全 8 键逐一透传
+        assert_eq!(snap["commission_rate"].as_f64(), Some(0.0005));
+        assert_eq!(snap["impact_cost_exponent"].as_f64(), Some(0.5));
+        assert!(snap["min_commission"].is_null());
+        assert!(snap["tax_rate"].is_null());
+        assert!(snap["slippage_bps"].is_null());
+        assert!(snap["cost_multiplier"].is_null());
+        assert!(snap["impact_cost_coefficient"].is_null());
+        assert!(snap["transfer_fee_rate"].is_null());
+        for key in [
+            "commission_rate",
+            "min_commission",
+            "tax_rate",
+            "slippage_bps",
+            "cost_multiplier",
+            "impact_cost_coefficient",
+            "impact_cost_exponent",
+            "transfer_fee_rate",
+        ] {
+            assert!(snap.get(key).is_some(), "缺少键 {key}");
+        }
+    }
+
+    #[test]
+    fn execution_rules_snapshot_null_and_field_pass_through() {
+        assert!(execution_rules_snapshot(&None).is_null());
+
+        let rules: ExecutionRulesReq =
+            serde_json::from_value(json!({ "execution_timing": "next_open" }))
+                .expect("ExecutionRulesReq 反序列化");
+        let rules = Some(rules);
+        let snap = execution_rules_snapshot(&rules);
+        assert_eq!(snap["execution_timing"].as_str(), Some("next_open"));
+        assert!(snap["execution_price"].is_null());
+        assert!(snap["execution_schedule_profile"].is_null());
+        assert!(snap["execution_carry_policy"].is_null());
+        assert!(snap["execution_daily_target_move_limit_pct"].is_null());
+        assert!(snap["execution_max_carry_days"].is_null());
+        assert!(snap["max_participation_rate"].is_null());
+
+        let rules: ExecutionRulesReq = serde_json::from_value(json!({
+            "execution_max_carry_days": 5,
+            "max_participation_rate": 0.2
+        }))
+        .expect("ExecutionRulesReq 反序列化");
+        let snap = execution_rules_snapshot(&Some(rules));
+        assert_eq!(snap["execution_max_carry_days"].as_u64(), Some(5));
+        assert_eq!(snap["max_participation_rate"].as_f64(), Some(0.2));
+        assert!(snap["execution_timing"].is_null());
+    }
+
+    // ── 连库纯函数：resolve_warmup_start_date ──
+    // 交易日历锚点（psql 实证）：2024-01 起开盘日序列
+    // 01-02, 01-03, 01-04, 01-05, 01-08, 01-09, 01-10, 01-11, 01-12, 01-15 …
+
+    #[tokio::test]
+    async fn resolve_warmup_zero_days_and_five_day_offset() {
+        let db = test_db().await;
+        // warmup=0 短路分支：不触库直接返回 requested_start
+        let requested = date(2024, 1, 2);
+        assert_eq!(
+            resolve_warmup_start_date(&db, requested, date(2024, 12, 31), 0)
+                .await
+                .expect("warmup=0 必须 Ok"),
+            requested
+        );
+        // OFFSET 5 = 第 6 个开盘日：01-02,03,04,05,08 → 09
+        assert_eq!(
+            resolve_warmup_start_date(&db, date(2024, 1, 2), date(2024, 12, 31), 5)
+                .await
+                .expect("warmup=5 必须 Ok"),
+            date(2024, 1, 9)
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_warmup_errors_when_calendar_exhausted() {
+        let db = test_db().await;
+        // 2024-01-02..05 只有 4 个开盘日（02,03,04,05），OFFSET 10 越界 → Err
+        let err = resolve_warmup_start_date(&db, date(2024, 1, 2), date(2024, 1, 5), 10)
+            .await
+            .expect_err("日历耗尽必须报错");
+        assert!(
+            err.contains("No open trading day found after 10 warmup trading days"),
+            "实际错误: {err}"
+        );
+        assert!(
+            err.contains("2024-01-02") && err.contains("2024-01-05"),
+            "错误信息须含起止日期: {err}"
+        );
+    }
+
+    // ── 连库纯函数：resolve_effective_factor_coverage ──
+
+    #[tokio::test]
+    async fn coverage_without_policy_or_disabled_skips_lookup() {
+        let db = test_db().await;
+        let requested = date(2026, 1, 1);
+        let end = date(2026, 1, 31);
+        // 无 policy：不触库（combo 不存在，若触库必 Err——组合断言证明短路）
+        let req = factor_req(json!({ "combo_name": "zzz_test_bt10_no_such_combo" }));
+        let (start, summary) = resolve_effective_factor_coverage(&db, &req, requested, end)
+            .await
+            .expect("无 policy 必须 Ok");
+        assert_eq!(start, requested);
+        assert!(summary.is_none());
+
+        // enabled=false：显式关闭同样短路
+        let req = factor_req(json!({
+            "combo_name": "zzz_test_bt10_no_such_combo",
+            "effective_coverage": { "enabled": false }
+        }));
+        let (start, summary) = resolve_effective_factor_coverage(&db, &req, requested, end)
+            .await
+            .expect("enabled=false 必须 Ok");
+        assert_eq!(start, requested);
+        assert!(summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn coverage_adjust_start_shifts_to_first_covered_day() {
+        let db = test_db().await;
+        let scope = "covadj";
+        cleanup_scope(&db, scope).await;
+        let combo = format!("zzz_test_bt10_{scope}_combo");
+        // 2 symbol × 2 天（01-05 / 01-06），available_at = trade_date（PIT 当日可见）
+        for day in [date(2026, 1, 5), date(2026, 1, 6)] {
+            insert_mfv(&db, &combo, "ZZZ900.SH", day, Some(day)).await;
+            insert_mfv(&db, &combo, "ZZZ901.SH", day, Some(day)).await;
+        }
+        let req = factor_req(json!({
+            "combo_name": combo,
+            "effective_coverage": {
+                "enabled": true, "mode": "adjust_start", "min_rows": 2,
+                "include_rebalance_warmup": false
+            }
+        }));
+        let (start, summary) =
+            resolve_effective_factor_coverage(&db, &req, date(2026, 1, 1), date(2026, 1, 31))
+                .await
+                .expect("adjust_start 必须 Ok");
+        // requested=01-01 早于首个满足 min_rows 的天 → 前移到 01-05
+        assert_eq!(start, date(2026, 1, 5));
+        let summary = summary.expect("开启 coverage 必产出 summary");
+        assert_eq!(summary.requested_start_date, date(2026, 1, 1));
+        assert_eq!(summary.effective_start_date, date(2026, 1, 5));
+        assert_eq!(summary.coverage_start_date, date(2026, 1, 5));
+        assert!(summary.adjusted);
+        assert_eq!(summary.mode, "adjust_start");
+        assert_eq!(summary.min_rows, 2);
+        assert_eq!(summary.observed_rows, 2);
+        assert_eq!(summary.warmup_start_date, None);
+        assert_eq!(summary.warmup_trading_days, None);
+        assert_eq!(summary.combo_name, combo);
+        assert_eq!(summary.version, "1.0.0");
+        assert_eq!(summary.universe_profile, None);
+        cleanup_scope(&db, scope).await;
+    }
+
+    #[tokio::test]
+    async fn coverage_guard_only_rejects_pre_coverage_start() {
+        let db = test_db().await;
+        let scope = "covguard";
+        cleanup_scope(&db, scope).await;
+        let combo = format!("zzz_test_bt10_{scope}_combo");
+        for day in [date(2026, 1, 5), date(2026, 1, 6)] {
+            insert_mfv(&db, &combo, "ZZZ900.SH", day, Some(day)).await;
+            insert_mfv(&db, &combo, "ZZZ901.SH", day, Some(day)).await;
+        }
+        let req = factor_req(json!({
+            "combo_name": combo,
+            "effective_coverage": {
+                "enabled": true, "mode": "guard_only", "min_rows": 2,
+                "include_rebalance_warmup": false
+            }
+        }));
+        // guard_only 不前移起点，requested 早于 coverage 起点直接拒绝
+        let err = resolve_effective_factor_coverage(&db, &req, date(2026, 1, 1), date(2026, 1, 31))
+            .await
+            .expect_err("guard_only 早起点必须报错");
+        assert!(
+            err.contains("requested start_date 2026-01-01 is before effective factor coverage start 2026-01-05"),
+            "实际错误: {err}"
+        );
+        cleanup_scope(&db, scope).await;
+    }
+
+    #[tokio::test]
+    async fn coverage_pit_window_excludes_future_available_rows() {
+        let db = test_db().await;
+        let scope = "covpit";
+        cleanup_scope(&db, scope).await;
+        let combo = format!("zzz_test_bt10_{scope}_combo");
+        // 01-05 两行 available_at=02-01（PIT 未来可见，不计入）
+        insert_mfv(
+            &db,
+            &combo,
+            "ZZZ900.SH",
+            date(2026, 1, 5),
+            Some(date(2026, 2, 1)),
+        )
+        .await;
+        insert_mfv(
+            &db,
+            &combo,
+            "ZZZ901.SH",
+            date(2026, 1, 5),
+            Some(date(2026, 2, 1)),
+        )
+        .await;
+        // 01-06 两行当日可见（计入）
+        insert_mfv(
+            &db,
+            &combo,
+            "ZZZ900.SH",
+            date(2026, 1, 6),
+            Some(date(2026, 1, 6)),
+        )
+        .await;
+        insert_mfv(
+            &db,
+            &combo,
+            "ZZZ901.SH",
+            date(2026, 1, 6),
+            Some(date(2026, 1, 6)),
+        )
+        .await;
+        let req = factor_req(json!({
+            "combo_name": combo,
+            "effective_coverage": {
+                "enabled": true, "mode": "adjust_start", "min_rows": 2,
+                "include_rebalance_warmup": false
+            }
+        }));
+        let (start, summary) =
+            resolve_effective_factor_coverage(&db, &req, date(2026, 1, 1), date(2026, 1, 31))
+                .await
+                .expect("PIT 过滤后仍有覆盖天");
+        // 01-05 整天被 PIT 排除 → 首个覆盖天 = 01-06
+        assert_eq!(start, date(2026, 1, 6));
+        let summary = summary.expect("summary 必产");
+        assert_eq!(summary.coverage_start_date, date(2026, 1, 6));
+        assert_eq!(summary.observed_rows, 2);
+        cleanup_scope(&db, scope).await;
+    }
+
+    #[tokio::test]
+    async fn coverage_missing_data_returns_error() {
+        let db = test_db().await;
+        let scope = "covmiss";
+        cleanup_scope(&db, scope).await;
+        let combo = format!("zzz_test_bt10_{scope}_combo");
+        // 只造 1 symbol × 1 天，min_rows=2 → 无任何天满足 HAVING → Err
+        insert_mfv(
+            &db,
+            &combo,
+            "ZZZ900.SH",
+            date(2026, 1, 5),
+            Some(date(2026, 1, 5)),
+        )
+        .await;
+        let req = factor_req(json!({
+            "combo_name": combo,
+            "effective_coverage": {
+                "enabled": true, "min_rows": 2, "include_rebalance_warmup": false
+            }
+        }));
+        let err = resolve_effective_factor_coverage(&db, &req, date(2026, 1, 1), date(2026, 1, 31))
+            .await
+            .expect_err("无覆盖数据必须报错");
+        assert!(
+            err.contains("No effective factor coverage found")
+                && err.contains(&combo)
+                && err.contains("min_rows=2"),
+            "实际错误: {err}"
+        );
+        cleanup_scope(&db, scope).await;
+    }
+
+    #[tokio::test]
+    async fn coverage_warmup_interacts_with_coverage_start() {
+        let db = test_db().await;
+        let scope = "covwarm";
+        cleanup_scope(&db, scope).await;
+        let combo = format!("zzz_test_bt10_{scope}_combo");
+        for day in [date(2026, 1, 5), date(2026, 1, 6)] {
+            insert_mfv(&db, &combo, "ZZZ900.SH", day, Some(day)).await;
+            insert_mfv(&db, &combo, "ZZZ901.SH", day, Some(day)).await;
+        }
+        // warmup_trading_days=1：2026-01-01 起第 2 个开盘日 = 01-06
+        // （2026 首个开盘日 01-05，OFFSET 1 → 01-06）
+        let req = factor_req(json!({
+            "combo_name": combo,
+            "effective_coverage": {
+                "enabled": true, "mode": "adjust_start", "min_rows": 2,
+                "include_rebalance_warmup": true, "warmup_trading_days": 1
+            }
+        }));
+        let (start, summary) =
+            resolve_effective_factor_coverage(&db, &req, date(2026, 1, 1), date(2026, 1, 31))
+                .await
+                .expect("warmup 交互必须 Ok");
+        // first_eligible = max(warmup_start=01-06, coverage_start=01-05) = 01-06
+        assert_eq!(start, date(2026, 1, 6));
+        let summary = summary.expect("summary 必产");
+        assert_eq!(summary.warmup_start_date, Some(date(2026, 1, 6)));
+        assert_eq!(summary.warmup_trading_days, Some(1));
+        assert_eq!(summary.effective_start_date, date(2026, 1, 6));
+        assert!(summary.adjusted);
+        cleanup_scope(&db, scope).await;
+    }
+
+    // ── 连库 handler：list_backtests ──
+
+    #[tokio::test]
+    async fn list_backtests_unknown_filter_returns_empty_items() {
+        let state = test_state().await;
+        // 不存在的 strategy_version_id 过滤 → 空列表；
+        // 同时断言分页归一化：page=0 → 1，page_size=999 → clamp 200
+        let query = BacktestListQuery {
+            strategy_version_id: Some("zzz_test_bt10_nonexistent".into()),
+            page: Some(0),
+            page_size: Some(999),
+            ..BacktestListQuery::default()
+        };
+        let body = resp_json(list_backtests(State(state), Query(query)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(0));
+        assert_eq!(body["data"]["page"].as_i64(), Some(1));
+        assert_eq!(body["data"]["page_size"].as_i64(), Some(200));
+        assert_eq!(body["data"]["items"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn list_backtests_joins_metrics_orders_desc_and_pages() {
+        let state = test_state().await;
+        let db = test_db().await;
+        let scope = "lst";
+        cleanup_scope(&db, scope).await;
+        seed_shared_parents(&db).await;
+        // 3 行按 created_at 拉开 1 小时级差（禁同毫秒碰撞）：
+        //   t_a(-3h, running, 无 result) / t_b(-2h, completed, 有 result) / t_c(-1h, completed, 无 result)
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_lst_t_a",
+            "zzz_test_bt10_lst_sv",
+            "running",
+            40,
+            10_800,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_lst_t_b",
+            "zzz_test_bt10_lst_sv",
+            "completed",
+            100,
+            7_200,
+            None,
+            None,
+            Some(date(2026, 1, 28)),
+            None,
+        )
+        .await;
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_lst_t_c",
+            "zzz_test_bt10_lst_sv",
+            "completed",
+            70,
+            3_600,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_bt_result(&db, "zzz_test_bt10_lst_t_b").await;
+
+        // 第一页 size=2：created_at DESC → t_c, t_b
+        let query = BacktestListQuery {
+            strategy_version_id: Some("zzz_test_bt10_lst_sv".into()),
+            page: Some(1),
+            page_size: Some(2),
+            ..BacktestListQuery::default()
+        };
+        let body = resp_json(list_backtests(State(state.clone()), Query(query)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(0));
+        let items = body["data"]["items"].as_array().expect("items 数组");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["task_id"].as_str(), Some("zzz_test_bt10_lst_t_c"));
+        assert_eq!(items[1]["task_id"].as_str(), Some("zzz_test_bt10_lst_t_b"));
+        // 公共字段（symbols 数组 / NaiveDate str / progress number / status 过滤器未启用）
+        assert_eq!(items[0]["status"].as_str(), Some("completed"));
+        assert_eq!(
+            items[0]["strategy_version_id"].as_str(),
+            Some("zzz_test_bt10_lst_sv")
+        );
+        assert_eq!(
+            items[0]["data_version_id"].as_str(),
+            Some("zzz_test_bt10_dv")
+        );
+        assert_eq!(
+            items[0]["symbols"].as_array().map(|a| a[0].as_str()),
+            Some(Some("ZZZ900.SH"))
+        );
+        assert_eq!(items[0]["start_date"].as_str(), Some("2026-01-05"));
+        assert_eq!(items[0]["end_date"].as_str(), Some("2026-01-30"));
+        assert_eq!(items[0]["benchmark_symbol"].as_str(), Some("000300.SH"));
+        assert_eq!(items[0]["progress"].as_i64(), Some(70));
+        // LEFT JOIN 无 result → metrics 全 null
+        assert!(items[0]["metrics"]["total_return"].is_null());
+        assert!(items[0]["metrics"]["total_trades"].is_null());
+        // 有 result → NUMERIC 列字符串形态，近似断言
+        assert!((json_decimal_f64(&items[1]["metrics"]["total_return"]) - 0.18).abs() < 1e-9);
+        assert!((json_decimal_f64(&items[1]["metrics"]["sharpe_ratio"]) - 1.5).abs() < 1e-9);
+        assert!((json_decimal_f64(&items[1]["metrics"]["max_drawdown"]) - (-0.05)).abs() < 1e-9);
+        assert_eq!(items[1]["metrics"]["total_trades"].as_i64(), Some(42));
+        assert_eq!(items[1]["last_completed_date"].as_str(), Some("2026-01-28"));
+        assert!(items[0]["last_completed_date"].is_null());
+
+        // 第二页 size=2 → 余 1 行 t_a
+        let query = BacktestListQuery {
+            strategy_version_id: Some("zzz_test_bt10_lst_sv".into()),
+            page: Some(2),
+            page_size: Some(2),
+            ..BacktestListQuery::default()
+        };
+        let body = resp_json(list_backtests(State(state), Query(query)).await).await;
+        let items = body["data"]["items"].as_array().expect("items 数组");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["task_id"].as_str(), Some("zzz_test_bt10_lst_t_a"));
+        assert_eq!(items[0]["status"].as_str(), Some("running"));
+        cleanup_scope(&db, scope).await;
+    }
+
+    // ── 连库 handler：backtest_summary ──
+
+    #[tokio::test]
+    async fn backtest_summary_unknown_task_reports_not_found() {
+        let state = test_state().await;
+        let body = resp_json(
+            backtest_summary(State(state), Path("zzz_test_bt10_no_such_task".to_string())).await,
+        )
+        .await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(body["message"].as_str(), Some("backtest summary not found"));
+    }
+
+    #[tokio::test]
+    async fn backtest_summary_task_without_result_reports_not_found() {
+        let state = test_state().await;
+        let db = test_db().await;
+        let scope = "sum0";
+        cleanup_scope(&db, scope).await;
+        seed_shared_parents(&db).await;
+        // task 存在但 backtest_result 缺失 → 第二级 not found 分支
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_sum0_task1",
+            "zzz_test_bt10_sv",
+            "running",
+            50,
+            600,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let body = resp_json(
+            backtest_summary(State(state), Path("zzz_test_bt10_sum0_task1".to_string())).await,
+        )
+        .await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(body["message"].as_str(), Some("backtest summary not found"));
+        cleanup_scope(&db, scope).await;
+    }
+
+    #[tokio::test]
+    async fn backtest_summary_returns_task_and_metric_blocks() {
+        let state = test_state().await;
+        let db = test_db().await;
+        let scope = "sum1";
+        cleanup_scope(&db, scope).await;
+        seed_shared_parents(&db).await;
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_sum1_task1",
+            "zzz_test_bt10_sv",
+            "completed",
+            100,
+            600,
+            None,
+            None,
+            Some(date(2026, 1, 28)),
+            None,
+        )
+        .await;
+        insert_bt_result(&db, "zzz_test_bt10_sum1_task1").await;
+
+        let body = resp_json(
+            backtest_summary(State(state), Path("zzz_test_bt10_sum1_task1".to_string())).await,
+        )
+        .await;
+        assert_eq!(body["code"].as_i64(), Some(0));
+        let task = &body["data"]["task"];
+        assert_eq!(task["task_id"].as_str(), Some("zzz_test_bt10_sum1_task1"));
+        assert_eq!(task["status"].as_str(), Some("completed"));
+        assert_eq!(
+            task["strategy_version_id"].as_str(),
+            Some("zzz_test_bt10_sv")
+        );
+        assert_eq!(task["data_version_id"].as_str(), Some("zzz_test_bt10_dv"));
+        assert_eq!(task["start_date"].as_str(), Some("2026-01-05"));
+        assert_eq!(task["end_date"].as_str(), Some("2026-01-30"));
+        assert_eq!(task["benchmark_symbol"].as_str(), Some("000300.SH"));
+        assert_eq!(task["progress"].as_i64(), Some(100));
+        assert_eq!(task["last_completed_date"].as_str(), Some("2026-01-28"));
+        let metrics = &body["data"]["metrics"];
+        assert!((json_decimal_f64(&metrics["total_return"]) - 0.18).abs() < 1e-9);
+        assert!((json_decimal_f64(&metrics["annualized_return"]) - 0.20).abs() < 1e-9);
+        assert!((json_decimal_f64(&metrics["benchmark_return"]) - 0.10).abs() < 1e-9);
+        assert!((json_decimal_f64(&metrics["excess_return"]) - 0.08).abs() < 1e-9);
+        assert!((json_decimal_f64(&metrics["sharpe_ratio"]) - 1.5).abs() < 1e-9);
+        assert!((json_decimal_f64(&metrics["sortino_ratio"]) - 1.8).abs() < 1e-9);
+        assert!((json_decimal_f64(&metrics["information_ratio"]) - 1.2).abs() < 1e-9);
+        assert!((json_decimal_f64(&metrics["max_drawdown"]) - (-0.05)).abs() < 1e-9);
+        assert!((json_decimal_f64(&metrics["turnover"]) - 3.5).abs() < 1e-9);
+        assert_eq!(metrics["total_trades"].as_i64(), Some(42));
+        assert!((json_decimal_f64(&metrics["win_rate"]) - 0.55).abs() < 1e-9);
+        assert_eq!(
+            metrics["reproducibility_hash"].as_str(),
+            Some("zzz_test_bt10_sum1_task1-hash")
+        );
+        cleanup_scope(&db, scope).await;
+    }
+
+    // ── 连库 handler：backtest_equity_curve ──
+
+    #[tokio::test]
+    async fn backtest_equity_curve_unknown_task_returns_empty_points() {
+        let state = test_state().await;
+        let body = resp_json(
+            backtest_equity_curve(
+                State(state),
+                Path("zzz_test_bt10_no_such_task".to_string()),
+                Query(EquityCurveQuery::default()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"].as_i64(), Some(0));
+        assert_eq!(
+            body["data"]["task_id"].as_str(),
+            Some("zzz_test_bt10_no_such_task")
+        );
+        assert_eq!(body["data"]["points"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn backtest_equity_curve_returns_points_with_date_window() {
+        let state = test_state().await;
+        let db = test_db().await;
+        let scope = "eq1";
+        cleanup_scope(&db, scope).await;
+        seed_shared_parents(&db).await;
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_eq1_task1",
+            "zzz_test_bt10_sv",
+            "completed",
+            100,
+            600,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_bt_equity(
+            &db,
+            "zzz_test_bt10_eq1_task1",
+            &[
+                (date(2026, 1, 5), 1_000_000.0),
+                (date(2026, 1, 6), 1_005_000.0),
+                (date(2026, 1, 7), 1_012_000.0),
+            ],
+        )
+        .await;
+
+        // 无窗口：全量 3 点按 trade_date 升序
+        let body = resp_json(
+            backtest_equity_curve(
+                State(state.clone()),
+                Path("zzz_test_bt10_eq1_task1".to_string()),
+                Query(EquityCurveQuery::default()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"].as_i64(), Some(0));
+        let points = body["data"]["points"].as_array().expect("points 数组");
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0]["trade_date"].as_str(), Some("2026-01-05"));
+        assert_eq!(points[2]["trade_date"].as_str(), Some("2026-01-07"));
+        assert!((json_decimal_f64(&points[0]["portfolio_value"]) - 1_000_000.0).abs() < 1e-6);
+        assert!((json_decimal_f64(&points[2]["portfolio_value"]) - 1_012_000.0).abs() < 1e-6);
+
+        // start 窗口：只剩 06 / 07 两点
+        let query = EquityCurveQuery {
+            start_date: Some("20260106".into()),
+            end_date: None,
+        };
+        let body = resp_json(
+            backtest_equity_curve(
+                State(state.clone()),
+                Path("zzz_test_bt10_eq1_task1".to_string()),
+                Query(query),
+            )
+            .await,
+        )
+        .await;
+        let points = body["data"]["points"].as_array().expect("points 数组");
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0]["trade_date"].as_str(), Some("2026-01-06"));
+
+        // 双端闭区间 [06, 06]：单点
+        let query = EquityCurveQuery {
+            start_date: Some("20260106".into()),
+            end_date: Some("20260106".into()),
+        };
+        let body = resp_json(
+            backtest_equity_curve(
+                State(state),
+                Path("zzz_test_bt10_eq1_task1".to_string()),
+                Query(query),
+            )
+            .await,
+        )
+        .await;
+        let points = body["data"]["points"].as_array().expect("points 数组");
+        assert_eq!(points.len(), 1);
+        assert!((json_decimal_f64(&points[0]["portfolio_value"]) - 1_005_000.0).abs() < 1e-6);
+        cleanup_scope(&db, scope).await;
+    }
+
+    #[tokio::test]
+    async fn backtest_equity_curve_rejects_malformed_date_query() {
+        let state = test_state().await;
+        // 2026 年 1 月 32 日：YYYYMMDD 词法合法但日期语义非法 → parse_yyyymmdd 拒绝
+        let query = EquityCurveQuery {
+            start_date: Some("20260132".into()),
+            end_date: None,
+        };
+        let body = resp_json(
+            backtest_equity_curve(
+                State(state.clone()),
+                Path("zzz_test_bt10_eqx".to_string()),
+                Query(query),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("start_date must use YYYYMMDD format")
+        );
+
+        // 非数字同样拒绝（end_date 分支）
+        let query = EquityCurveQuery {
+            start_date: None,
+            end_date: Some("not-a-date".into()),
+        };
+        let body = resp_json(
+            backtest_equity_curve(
+                State(state),
+                Path("zzz_test_bt10_eqx".to_string()),
+                Query(query),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("end_date must use YYYYMMDD format")
+        );
+    }
+
+    // ── 连库写 handler：cleanup_stale_backtest_tasks_inner ──
+    // 候选查询扫全库超时行，断言只核验本测试自己造的行；计数放宽 >= 自己行数。
+
+    #[tokio::test]
+    async fn cleanup_stale_dry_run_keeps_rows_untouched() {
+        let _cleanup_guard = CLEANUP_TEST_LOCK.lock().await;
+        let db = test_db().await;
+        let scope = "cln1";
+        cleanup_scope(&db, scope).await;
+        seed_shared_parents(&db).await;
+        // 心跳 2 天前 + 行级超时 60s → 稳定进候选集
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_cln1_t1",
+            "zzz_test_bt10_sv",
+            "running",
+            40,
+            172_800,
+            Some(172_800),
+            Some(60),
+            None,
+            None,
+        )
+        .await;
+        // dry_run 缺省 = true
+        let req = CleanupStaleBacktestTasksReq {
+            dry_run: None,
+            default_timeout_seconds: None,
+            limit: None,
+        };
+        let report = cleanup_stale_backtest_tasks_inner(&db, req)
+            .await
+            .expect("dry_run 必须 Ok");
+        assert_eq!(report["dry_run"].as_bool(), Some(true));
+        assert_eq!(report["updated_task_count"].as_i64(), Some(0));
+        assert!(
+            report["candidate_count"].as_i64().unwrap_or(0) >= 1,
+            "至少含本测试造的行"
+        );
+        // 候选数组含自己的行且 next_status 预测为 timeout
+        let candidates = report["candidates"].as_array().expect("candidates 数组");
+        let mine = candidates
+            .iter()
+            .find(|c| c["task_id"].as_str() == Some("zzz_test_bt10_cln1_t1"))
+            .expect("自己的行必须出现在候选集");
+        assert_eq!(mine["status"].as_str(), Some("running"));
+        assert_eq!(mine["next_status"].as_str(), Some("timeout"));
+        assert_eq!(mine["progress"].as_i64(), Some(40));
+        assert_eq!(mine["heartbeat_timeout_seconds"].as_i64(), Some(60));
+        assert!(mine["last_heartbeat_at"].is_string());
+        assert!(mine["observed_at"].is_string());
+        // dry_run 不落库：行状态保持 running
+        let (status,): (String,) = sqlx::query_as(
+            "SELECT status FROM backtest_task WHERE task_id = 'zzz_test_bt10_cln1_t1'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("dry_run 后行仍在");
+        assert_eq!(status, "running");
+        cleanup_scope(&db, scope).await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_apply_marks_running_timeout() {
+        let _cleanup_guard = CLEANUP_TEST_LOCK.lock().await;
+        let db = test_db().await;
+        let scope = "cln2";
+        cleanup_scope(&db, scope).await;
+        seed_shared_parents(&db).await;
+        // 预置非空 error_message，验证 CONCAT 追加语义（原信息保留 + '; ' 连接）
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_cln2_t1",
+            "zzz_test_bt10_sv",
+            "running",
+            55,
+            172_800,
+            Some(172_800),
+            Some(60),
+            None,
+            Some("zzz prior failure"),
+        )
+        .await;
+        let req = CleanupStaleBacktestTasksReq {
+            dry_run: Some(false),
+            default_timeout_seconds: None,
+            // limit 放宽到上限，防并行测试的候选行挤占本行
+            limit: Some(1000),
+        };
+        let report = cleanup_stale_backtest_tasks_inner(&db, req)
+            .await
+            .expect("apply 必须 Ok");
+        assert_eq!(report["dry_run"].as_bool(), Some(false));
+        assert!(
+            report["updated_task_count"].as_i64().unwrap_or(0) >= 1,
+            "并行语义：至少更新本测试的行"
+        );
+        let (status, error_message, completed_at): (
+            String,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
+            "SELECT status, error_message, completed_at FROM backtest_task \
+                 WHERE task_id = 'zzz_test_bt10_cln2_t1'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("apply 后行仍在");
+        assert_eq!(status, "timeout");
+        let error = error_message.expect("error_message 必须被写入");
+        assert!(
+            error.starts_with("zzz prior failure; ")
+                && error.contains(
+                    "stale running backtest timed out by cleanup-stale: no heartbeat within configured timeout"
+                ),
+            "实际 error_message: {error}"
+        );
+        assert!(completed_at.is_some(), "completed_at 必须落库");
+        cleanup_scope(&db, scope).await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_apply_finalizes_cancel_requested() {
+        let _cleanup_guard = CLEANUP_TEST_LOCK.lock().await;
+        let db = test_db().await;
+        let scope = "cln3";
+        cleanup_scope(&db, scope).await;
+        seed_shared_parents(&db).await;
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_cln3_t1",
+            "zzz_test_bt10_sv",
+            "cancel_requested",
+            70,
+            172_800,
+            Some(172_800),
+            Some(60),
+            None,
+            None,
+        )
+        .await;
+        let req = CleanupStaleBacktestTasksReq {
+            dry_run: Some(false),
+            default_timeout_seconds: None,
+            limit: Some(1000),
+        };
+        let report = cleanup_stale_backtest_tasks_inner(&db, req)
+            .await
+            .expect("apply 必须 Ok");
+        // cancel_requested 的终态预测为 cancelled（非 timeout）
+        let candidates = report["candidates"].as_array().expect("candidates 数组");
+        let mine = candidates
+            .iter()
+            .find(|c| c["task_id"].as_str() == Some("zzz_test_bt10_cln3_t1"))
+            .expect("自己的行必须出现在候选集");
+        assert_eq!(mine["next_status"].as_str(), Some("cancelled"));
+        let (status, error_message): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, error_message FROM backtest_task \
+             WHERE task_id = 'zzz_test_bt10_cln3_t1'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("apply 后行仍在");
+        assert_eq!(status, "cancelled");
+        let error = error_message.expect("error_message 必须被写入");
+        assert!(
+            error.contains(
+                "stale cancel_requested backtest finalized by cleanup-stale: no worker acknowledgement within configured timeout"
+            ),
+            "实际 error_message: {error}"
+        );
+        cleanup_scope(&db, scope).await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_ignores_fresh_and_custom_timeout_rows() {
+        let db = test_db().await;
+        let scope = "cln4";
+        cleanup_scope(&db, scope).await;
+        seed_shared_parents(&db).await;
+        // 新鲜心跳（now()）+ 默认超时 → 未超时
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_cln4_fresh",
+            "zzz_test_bt10_sv",
+            "running",
+            10,
+            0,
+            Some(0),
+            None,
+            None,
+            None,
+        )
+        .await;
+        // 心跳 2 天前但行级超时 30 天（2_592_000s）→ 观察时间晚于超时线 → 未超时
+        insert_bt_task(
+            &db,
+            "zzz_test_bt10_cln4_bigto",
+            "zzz_test_bt10_sv",
+            "running",
+            10,
+            172_800,
+            Some(172_800),
+            Some(2_592_000),
+            None,
+            None,
+        )
+        .await;
+        let req = CleanupStaleBacktestTasksReq {
+            dry_run: Some(true),
+            default_timeout_seconds: None,
+            limit: None,
+        };
+        let report = cleanup_stale_backtest_tasks_inner(&db, req)
+            .await
+            .expect("dry_run 必须 Ok");
+        let candidates = report["candidates"].as_array().expect("candidates 数组");
+        for task_id in ["zzz_test_bt10_cln4_fresh", "zzz_test_bt10_cln4_bigto"] {
+            assert!(
+                candidates
+                    .iter()
+                    .all(|c| c["task_id"].as_str() != Some(task_id)),
+                "{task_id} 不应进入候选集"
+            );
+        }
+        cleanup_scope(&db, scope).await;
+    }
+
+    // ── 参数校验早退：run_backtest / run_factor_backtest / run_prediction_backtest ──
+    // 只测 build/parse 阶段 Err 早退（任何 DB 访问之前返回 code=1），禁止真跑回测。
+
+    fn plain_run_req(
+        symbols: Vec<String>,
+        weights: Option<Vec<f64>>,
+        start: &str,
+        end: &str,
+    ) -> RunBacktestReq {
+        serde_json::from_value(json!({
+            "strategy_version_id": "zzz_test_bt10_sv",
+            "data_version_id": "zzz_test_bt10_dv",
+            "symbols": symbols,
+            "weights": weights,
+            "start_date": start,
+            "end_date": end
+        }))
+        .expect("RunBacktestReq 反序列化")
+    }
+
+    #[tokio::test]
+    async fn run_backtest_rejects_symbol_weight_mismatches() {
+        let state = test_state().await;
+        // weights 数量与 symbols 不匹配 → build_backtest_config 第一道 Err（不触库）
+        let req = plain_run_req(
+            vec!["600000.SH".into(), "000001.SZ".into()],
+            Some(vec![0.5, 0.3, 0.2]),
+            "20260101",
+            "20260131",
+        );
+        let body = resp_json(run_backtest(State(state.clone()), Json(req)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("weights length must match symbols length")
+        );
+
+        // symbols 空 → 第一道校验
+        let req = plain_run_req(vec![], None, "20260101", "20260131");
+        let body = resp_json(run_backtest(State(state), Json(req)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(body["message"].as_str(), Some("symbols must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn run_backtest_rejects_invalid_date_window() {
+        let state = test_state().await;
+        // 非 YYYYMMDD 格式（连字符日期）
+        let req = plain_run_req(vec!["600000.SH".into()], None, "2026-01-01", "20260131");
+        let body = resp_json(run_backtest(State(state.clone()), Json(req)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("start_date must use YYYYMMDD format")
+        );
+
+        // end < start
+        let req = plain_run_req(vec!["600000.SH".into()], None, "20260201", "20260101");
+        let body = resp_json(run_backtest(State(state), Json(req)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("end_date must be greater than or equal to start_date")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_factor_backtest_rejects_malformed_dates_before_db_access() {
+        let state = test_state().await;
+        // execute_factor_backtest 第一行即 parse start_date，任何 DB 访问之前
+        let req = factor_req(json!({ "start_date": "20261301" }));
+        let body = resp_json(run_factor_backtest(State(state.clone()), Json(req)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("start_date must use YYYYMMDD format")
+        );
+
+        let req = factor_req(json!({ "start_date": "20260201", "end_date": "20260101" }));
+        let body = resp_json(run_factor_backtest(State(state), Json(req)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("end_date must be greater than or equal to start_date")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_prediction_backtest_rejects_blank_set_and_bad_dates() {
+        let state = test_state().await;
+        // 空白 prediction_set_id：trim 后为空 → execute_prediction_backtest 首道校验
+        let req: RunPredictionBacktestReq = serde_json::from_value(json!({
+            "prediction_set_id": "   ",
+            "start_date": "20260101",
+            "end_date": "20260131"
+        }))
+        .expect("RunPredictionBacktestReq 反序列化");
+        let body = resp_json(run_prediction_backtest(State(state.clone()), Json(req)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("prediction_set_id must not be empty")
+        );
+
+        // end < start
+        let req: RunPredictionBacktestReq = serde_json::from_value(json!({
+            "prediction_set_id": "zzz_test_bt10_ps",
+            "start_date": "20260131",
+            "end_date": "20260101"
+        }))
+        .expect("RunPredictionBacktestReq 反序列化");
+        let body = resp_json(run_prediction_backtest(State(state), Json(req)).await).await;
+        assert_eq!(body["code"].as_i64(), Some(1));
+        assert_eq!(
+            body["message"].as_str(),
+            Some("end_date must be greater than or equal to start_date")
+        );
+    }
+}

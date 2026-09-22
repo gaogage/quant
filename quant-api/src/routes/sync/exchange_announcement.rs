@@ -5792,3 +5792,1647 @@ mod fourth_batch {
         assert_eq!(report["plan"]["symbols"][0], "600000");
     }
 }
+
+/// 第十批：连库写入（upsert raw rows）、交易日历读取、审计中段 SQL 分支补齐、纯函数缺口。
+/// 造数窗口全部使用 2099/2100 年段（真实数据 2023-2025，零干扰）；
+/// 每个测试前置+结尾双端精确清理（前缀 zzz_test_ea10_ / zzz10），前缀键全局唯一可并行。
+#[cfg(test)]
+mod tenth_batch {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+    }
+
+    fn ts(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, mi, s)
+            .single()
+            .expect("valid datetime")
+    }
+
+    /// 裸 PG 连接（calendar/upsert 直调无需 Tushare 客户端的测试用）。
+    async fn test_db_pool() -> sqlx::PgPool {
+        dotenv::dotenv().ok();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 完整 AppState（审计 build 函数需要；同 fourth_batch::test_app_state）。
+    async fn test_app_state() -> crate::AppState {
+        dotenv::dotenv().ok();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        crate::AppState {
+            start_time: Utc::now(),
+            db,
+            tushare: quant_data::tushare::client::TushareClient::from_env()
+                .expect("Tushare client init（dotenv 加载 quant/.env 后需 TUSHARE_TOKEN）"),
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        }
+    }
+
+    async fn cleanup_ea10_raw_rows(db: &sqlx::PgPool, announcement_id_prefix: &str) {
+        sqlx::query(
+            "DELETE FROM market_exchange_announcement_text_raw WHERE announcement_id LIKE $1",
+        )
+        .bind(format!("{announcement_id_prefix}%"))
+        .execute(db)
+        .await
+        .expect("cleanup ea10 raw rows");
+    }
+
+    async fn cleanup_ea10_attempts(db: &sqlx::PgPool, symbol_prefix: &str) {
+        sqlx::query("DELETE FROM data_sync_attempt WHERE symbol LIKE $1")
+            .bind(format!("{symbol_prefix}%"))
+            .execute(db)
+            .await
+            .expect("cleanup ea10 attempts");
+    }
+
+    async fn cleanup_ea10_calendar(db: &sqlx::PgPool) {
+        sqlx::query("DELETE FROM market_trade_calendar WHERE exchange = 'zzz10_cx'")
+            .execute(db)
+            .await
+            .expect("cleanup ea10 calendar");
+    }
+
+    /// 审计造数通用行：质量-时间戳语义由 quality 参数推导（满足 CHECK 约束）。
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_ea10_raw_row(
+        db: &sqlx::PgPool,
+        announcement_id: &str,
+        symbol: &str,
+        category: &str,
+        title: &str,
+        announcement_time: NaiveDate,
+        available_at: NaiveDate,
+        quality: &str,
+        pdf_parse_status: &str,
+        event_type: Option<&str>,
+        evidence_spans: Value,
+        raw_payload_hash: &str,
+        text_content: Option<&str>,
+    ) {
+        let source_published_at_ts: Option<DateTime<Utc>> = (quality == "timestamp").then(|| {
+            announcement_time
+                .and_hms_opt(1, 2, 3)
+                .expect("valid time")
+                .and_utc()
+        });
+        let source_published_date: Option<NaiveDate> =
+            (quality == "date_only_next_session").then_some(announcement_time);
+        sqlx::query(
+            r#"
+            INSERT INTO market_exchange_announcement_text_raw
+            (vendor, vendor_endpoint, request_key, symbol, announcement_id,
+             announcement_category, announcement_title, announcement_time,
+             source_published_at, source_published_at_ts, source_published_date,
+             source_published_at_quality, available_at, announcement_url,
+             pdf_parse_status, event_type, evidence_spans, text_content,
+             raw_payload, raw_payload_hash)
+            VALUES ('zzz_test_ea10_vendor', 'zzz_test_ea10_audit_ep', 'zzz_test_ea10_seed', $1, $2,
+                    $3, $4, $5, 'zzz-source-published-at', $6, $7, $8, $9,
+                    'http://zzz.test/a.PDF', $10, $11, $12, $13, '{}'::jsonb, $14)
+            "#,
+        )
+        .bind(symbol)
+        .bind(announcement_id)
+        .bind(category)
+        .bind(title)
+        .bind(announcement_time)
+        .bind(source_published_at_ts)
+        .bind(source_published_date)
+        .bind(quality)
+        .bind(available_at)
+        .bind(pdf_parse_status)
+        .bind(event_type)
+        .bind(evidence_spans)
+        .bind(text_content)
+        .bind(raw_payload_hash)
+        .execute(db)
+        .await
+        .expect("seed ea10 raw row");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_ea10_attempt(
+        db: &sqlx::PgPool,
+        symbol: &str,
+        start: NaiveDate,
+        end: NaiveDate,
+        status: &str,
+        row_count: i64,
+        error_message: Option<&str>,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO data_sync_attempt (source, symbol, start_date, end_date, status, row_count, error_message)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(EXCHANGE_ANNOUNCEMENT_ORDER_CAPACITY_ATTEMPT_SOURCE)
+        .bind(symbol)
+        .bind(start)
+        .bind(end)
+        .bind(status)
+        .bind(row_count)
+        .bind(error_message)
+        .execute(db)
+        .await
+        .expect("seed ea10 attempt");
+    }
+
+    /// 分布数组按名称取 rows 计数（quality / pdf_parse_status / event_type 通用）。
+    fn dist_rows(entries: &Value, key: &str, name: &str) -> Option<i64> {
+        entries.as_array().and_then(|array| {
+            array
+                .iter()
+                .find(|entry| entry[key] == name)
+                .and_then(|entry| entry["rows"].as_i64())
+        })
+    }
+
+    fn coverage_audit_req(
+        start: &str,
+        end: &str,
+    ) -> ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq {
+        ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq {
+            start_date: Some(start.to_string()),
+            end_date: Some(end.to_string()),
+        }
+    }
+
+    // ── 纯函数：cninfo_percent_decode_strict 缺口分支 ──
+
+    #[test]
+    fn strict_percent_decode_decodes_utf8_and_keeps_plus_sign() {
+        // %XX 多字节序列解码为 UTF-8 中文；`+` 不转空格（与表单版 decode 的核心差异）
+        assert_eq!(cninfo_percent_decode_strict("%E4%B8%AD%E6%96%87"), "中文");
+        assert_eq!(cninfo_percent_decode_strict("a+b c"), "a+b c");
+        // RFC3339 正 offset 场景（2026-09-21 修复回归锚点）
+        assert_eq!(
+            cninfo_percent_decode_strict("2024-01-02T09%3A00%3A00%2B08%3A00"),
+            "2024-01-02T09:00:00+08:00"
+        );
+        // 混合：普通字符与转义共存
+        assert_eq!(cninfo_percent_decode_strict("id%3D42%26x%3D1"), "id=42&x=1");
+    }
+
+    #[test]
+    fn strict_percent_decode_keeps_invalid_and_truncated_percent_sequences() {
+        // 非法十六进制：原样保留 '%'，后续字符继续逐字节处理
+        assert_eq!(cninfo_percent_decode_strict("%GG"), "%GG");
+        assert_eq!(cninfo_percent_decode_strict("%zz%41"), "%zzA");
+        // 尾部截断：'%' 后不足两个字符（index + 2 < len 不成立）按字面保留
+        assert_eq!(cninfo_percent_decode_strict("abc%"), "abc%");
+        assert_eq!(cninfo_percent_decode_strict("a%4"), "a%4");
+        // 末位完整三字符序列仍正常解码
+        assert_eq!(cninfo_percent_decode_strict("%41"), "A");
+        assert_eq!(cninfo_percent_decode_strict("x%4F"), "xO");
+        // 空串
+        assert_eq!(cninfo_percent_decode_strict(""), "");
+    }
+
+    #[test]
+    fn strict_percent_decode_falls_back_to_original_on_invalid_utf8() {
+        // %FF 单字节不是合法 UTF-8 序列 → from_utf8 失败回退原始字符串
+        assert_eq!(cninfo_percent_decode_strict("%FF"), "%FF");
+        // 合法前缀 + 非法尾字节：整体解码失败同样回退原文
+        assert_eq!(cninfo_percent_decode_strict("ok%FF"), "ok%FF");
+    }
+
+    // ── 纯函数：probe 汇总缺口分支（只补 fourth_batch 未覆盖的形态）──
+
+    #[test]
+    fn pdf_detail_summary_counts_quality_without_ok_status() {
+        let probes = vec![
+            // 非 ok 状态但质量为 timestamp → timestamp/availability 仍计数（过滤不看 status）
+            json!({ "status": "error", "source_published_at_quality": "timestamp" }),
+            // ok + hash_stable 但缺 text_hash → 不计入 stable_hash_count
+            json!({ "status": "ok", "hash_stable": true }),
+            // ok + evidence_spans 非数组 → 不计入 evidence_span_count
+            json!({ "status": "ok", "evidence_spans": { "theme": "order_contract" } }),
+            // 非 ok + hash 三件套齐全 → stable 仍不计数
+            json!({ "status": "scanned_pdf_ocr_required", "hash_stable": true, "text_hash": "h" }),
+        ];
+        let summary = summarize_exchange_announcement_pdf_detail_probes(&probes);
+        assert_eq!(summary.parsed_pdf_count, 2);
+        assert_eq!(summary.stable_hash_count, 0);
+        assert_eq!(summary.timestamp_count, 1);
+        assert_eq!(summary.next_session_policy_count, 0);
+        assert_eq!(summary.availability_count, 1);
+        assert_eq!(summary.evidence_span_count, 0);
+        assert_eq!(summary.incomplete_link_metadata_count, 0);
+        assert_eq!(summary.scanned_pdf_count, 1);
+        assert_eq!(summary.runtime_not_configured_count, 0);
+    }
+
+    #[test]
+    fn pdf_detail_summary_empty_probes_report_all_zeroes() {
+        let summary = summarize_exchange_announcement_pdf_detail_probes(&[]);
+        assert_eq!(summary.parsed_pdf_count, 0);
+        assert_eq!(summary.stable_hash_count, 0);
+        assert_eq!(summary.availability_count, 0);
+        assert_eq!(summary.incomplete_link_metadata_count, 0);
+        assert_eq!(summary.runtime_not_configured_count, 0);
+    }
+
+    #[test]
+    fn ocr_blocked_summary_counts_error_timeout_and_partial_conditions() {
+        let probes = vec![
+            // error / timeout 状态计入 ocr_error_count（fourth_batch 只测过 ocr_error/pdf_fetch_error）
+            json!({ "status": "error" }),
+            json!({ "status": "timeout" }),
+            // ok 但 ocr_text_length=0 → 不计 ocr_text_count，且计入 no_target_span
+            json!({ "status": "ok", "ocr_text_length": 0 }),
+            // ok + hash_stable 但缺 ocr_text_hash → 不计 stable_hash_count
+            json!({ "status": "ok", "hash_stable": true }),
+            // 质量达标但缺 available_at → 不计 availability_count
+            json!({ "status": "scanned_pdf_ocr_required", "source_published_at_quality": "timestamp" }),
+            // 非 ok 状态带 evidence_spans → evidence_span_count 仍计数（过滤不看 status）
+            json!({ "status": "scanned_pdf_ocr_required", "evidence_spans": [{ "theme": "capacity" }] }),
+        ];
+        let summary = summarize_exchange_announcement_ocr_blocked_row_probes(&probes);
+        assert_eq!(summary.ocr_text_count, 0);
+        assert_eq!(summary.stable_hash_count, 0);
+        assert_eq!(summary.availability_count, 0);
+        assert_eq!(summary.quality_pass_count, 0);
+        assert_eq!(summary.evidence_span_count, 1);
+        assert_eq!(summary.runtime_missing_count, 0);
+        assert_eq!(summary.ocr_error_count, 2);
+        // no_target_span 判定=status=="ok" 且 evidence_spans 为空/缺失：probe3(ok,无spans)与
+        // probe4(ok,无spans)均命中，故为 2（非 1，此前漏算 probe4）
+        assert_eq!(summary.no_target_span_count, 2);
+        assert_eq!(summary.incomplete_raw_link_count, 0);
+    }
+
+    #[test]
+    fn ocr_blocked_summary_empty_probes_report_all_zeroes() {
+        let summary = summarize_exchange_announcement_ocr_blocked_row_probes(&[]);
+        assert_eq!(summary.ocr_text_count, 0);
+        assert_eq!(summary.stable_hash_count, 0);
+        assert_eq!(summary.availability_count, 0);
+        assert_eq!(summary.ocr_error_count, 0);
+        assert_eq!(summary.no_target_span_count, 0);
+    }
+
+    // ── 连库写入：upsert_exchange_announcement_order_capacity_raw_rows ──
+
+    fn zzz_upsert_row(
+        announcement_id: &str,
+        symbol: &str,
+        raw_payload_hash: &str,
+    ) -> ExchangeAnnouncementOrderCapacityRawRow {
+        ExchangeAnnouncementOrderCapacityRawRow {
+            vendor: "zzz_test_ea10_vendor".to_string(),
+            vendor_endpoint: "zzz_test_ea10_upsert_ep".to_string(),
+            request_key: format!("zzz_test_ea10_rk_{announcement_id}"),
+            symbol: symbol.to_string(),
+            symbol_name: Some("zzz测试股份".to_string()),
+            announcement_id: announcement_id.to_string(),
+            org_id: "gssz0600001".to_string(),
+            announcement_category: "日常经营".to_string(),
+            announcement_title: format!("zzz测试公告-{announcement_id}"),
+            announcement_time: date(2099, 3, 2),
+            source_published_at: "2099-03-02 09:00:00".to_string(),
+            source_published_at_ts: Some(ts(2099, 3, 2, 1, 2, 3)),
+            source_published_date: None,
+            source_published_at_quality: "timestamp".to_string(),
+            available_at: date(2099, 3, 3),
+            announcement_url: format!("http://zzz.test/{announcement_id}.PDF"),
+            pdf_final_url: Some(format!("http://zzz.test/final/{announcement_id}.PDF")),
+            text_content: Some(format!("zzz测试正文-{announcement_id}")),
+            text_hash: Some(format!("zzz-hash-{announcement_id}")),
+            timestamp_candidates: json!(["2099-03-02 09:00:00"]),
+            pdf_metadata_keys: json!(["title", "creationdate"]),
+            raw_payload: json!({ "zzz_key": announcement_id }),
+            raw_payload_hash: raw_payload_hash.to_string(),
+            parser_used: Some("pdftotext".to_string()),
+            parser_version: Some("v1".to_string()),
+            parser_errors: json!([]),
+            pdf_parse_status: "ok".to_string(),
+            event_type: Some("order_or_contract_signed".to_string()),
+            evidence_spans: json!([{ "theme": "order_contract", "quote": "签署合同" }]),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_raw_rows_returns_zero_for_empty_input() {
+        let db = test_db_pool().await;
+        cleanup_ea10_raw_rows(&db, "zzz_test_ea10_up1").await;
+        // 空切片早退：不触碰数据库即返回 Ok(0)
+        let saved =
+            upsert_exchange_announcement_order_capacity_raw_rows(&db, &[], "zzz_test_ea10_dv0")
+                .await
+                .expect("empty upsert");
+        assert_eq!(saved, 0);
+        cleanup_ea10_raw_rows(&db, "zzz_test_ea10_up1").await;
+    }
+
+    #[tokio::test]
+    async fn upsert_raw_rows_inserts_new_row_with_full_field_roundtrip() {
+        let db = test_db_pool().await;
+        cleanup_ea10_raw_rows(&db, "zzz_test_ea10_up2").await;
+
+        let row = zzz_upsert_row("zzz_test_ea10_up2", "zzz10ups2", "zzz_test_ea10_up2_hash");
+        let saved = upsert_exchange_announcement_order_capacity_raw_rows(
+            &db,
+            std::slice::from_ref(&row),
+            "zzz_test_ea10_dv2",
+        )
+        .await
+        .expect("insert upsert");
+        assert_eq!(saved, 1, "单行 INSERT 应影响 1 行");
+
+        let back_a: (
+            String,
+            Option<String>,
+            String,
+            Option<DateTime<Utc>>,
+            String,
+            NaiveDate,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+        ) = sqlx::query_as(
+            r#"
+                SELECT request_key, symbol_name, announcement_title, source_published_at_ts,
+                       source_published_at_quality, available_at, text_hash, text_hash_algorithm,
+                       announcement_url, event_type
+                FROM market_exchange_announcement_text_raw
+                WHERE vendor = 'zzz_test_ea10_vendor' AND announcement_id = 'zzz_test_ea10_up2'
+                "#,
+        )
+        .fetch_one(&db)
+        .await
+        .expect("read back inserted row (part a)");
+        assert_eq!(back_a.0, row.request_key);
+        assert_eq!(back_a.1.as_deref(), Some("zzz测试股份"));
+        assert_eq!(back_a.2, row.announcement_title);
+        assert_eq!(back_a.3, Some(ts(2099, 3, 2, 1, 2, 3)));
+        assert_eq!(back_a.4, "timestamp");
+        assert_eq!(back_a.5, date(2099, 3, 3));
+        assert_eq!(back_a.6.as_deref(), Some("zzz-hash-zzz_test_ea10_up2"));
+        assert_eq!(
+            back_a.7, "sha256",
+            "text_hash_algorithm 由实现固定写 sha256"
+        );
+        assert_eq!(back_a.8, row.announcement_url);
+        assert_eq!(back_a.9.as_deref(), Some("order_or_contract_signed"));
+
+        let back_b: (
+            Option<String>,
+            String,
+            Option<String>,
+            Value,
+            Value,
+            Value,
+            Value,
+            Value,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            r#"
+                SELECT pdf_final_url, pdf_parse_status, parser_used, evidence_spans, raw_payload,
+                       timestamp_candidates, pdf_metadata_keys, parser_errors, text_content,
+                       data_version_id
+                FROM market_exchange_announcement_text_raw
+                WHERE vendor = 'zzz_test_ea10_vendor' AND announcement_id = 'zzz_test_ea10_up2'
+                "#,
+        )
+        .fetch_one(&db)
+        .await
+        .expect("read back inserted row (part b)");
+        assert_eq!(
+            back_b.0.as_deref(),
+            Some("http://zzz.test/final/zzz_test_ea10_up2.PDF")
+        );
+        assert_eq!(back_b.1, "ok");
+        assert_eq!(back_b.2.as_deref(), Some("pdftotext"));
+        assert_eq!(back_b.3, row.evidence_spans);
+        assert_eq!(back_b.4, row.raw_payload);
+        assert_eq!(back_b.5, row.timestamp_candidates);
+        assert_eq!(back_b.6, row.pdf_metadata_keys);
+        assert_eq!(back_b.7, row.parser_errors);
+        assert_eq!(back_b.8.as_deref(), Some("zzz测试正文-zzz_test_ea10_up2"));
+        assert_eq!(back_b.9.as_deref(), Some("zzz_test_ea10_dv2"));
+
+        cleanup_ea10_raw_rows(&db, "zzz_test_ea10_up2").await;
+    }
+
+    #[tokio::test]
+    async fn upsert_raw_rows_rewrites_same_key_and_stays_idempotent() {
+        let db = test_db_pool().await;
+        cleanup_ea10_raw_rows(&db, "zzz_test_ea10_up3").await;
+
+        // 第一次：INSERT 分支
+        let mut row = zzz_upsert_row("zzz_test_ea10_up3", "zzz10ups3", "zzz_test_ea10_up3_hash");
+        let saved = upsert_exchange_announcement_order_capacity_raw_rows(
+            &db,
+            &[row.clone()],
+            "zzz_test_ea10_dv3a",
+        )
+        .await
+        .expect("first insert");
+        assert_eq!(saved, 1);
+
+        // 同 PK（vendor+endpoint+announcement_id+symbol+raw_payload_hash）再写 → UPDATE 分支
+        row.request_key = "zzz_test_ea10_up3_rewritten".to_string();
+        row.symbol_name = Some("zzz更新后名称".to_string());
+        row.announcement_title = "zzz更新后标题".to_string();
+        row.announcement_time = date(2099, 3, 5);
+        row.source_published_at_ts = Some(ts(2099, 3, 5, 5, 6, 7));
+        row.available_at = date(2099, 3, 6);
+        row.text_content = Some("zzz更新后正文".to_string());
+        row.text_hash = Some("zzz-hash-updated".to_string());
+        row.parser_used = Some("pdfplumber".to_string());
+        row.parser_version = Some("v2".to_string());
+        row.event_type = Some("capacity_expansion_or_commissioning".to_string());
+        row.evidence_spans = json!([{ "theme": "capacity" }]);
+        row.timestamp_candidates = json!(["2099-03-05 05:06:07"]);
+        row.pdf_metadata_keys = json!(["pages"]);
+        row.raw_payload = json!({ "zzz_key": "updated" });
+        let saved = upsert_exchange_announcement_order_capacity_raw_rows(
+            &db,
+            &[row.clone()],
+            "zzz_test_ea10_dv3b",
+        )
+        .await
+        .expect("conflict update");
+        assert_eq!(saved, 1, "同键 UPDATE 应影响 1 行");
+
+        let updated: (
+            String,
+            String,
+            Option<DateTime<Utc>>,
+            NaiveDate,
+            Option<String>,
+            Value,
+            Option<String>,
+        ) = sqlx::query_as(
+            r#"
+                SELECT request_key, announcement_title, source_published_at_ts, available_at,
+                       text_hash, evidence_spans, data_version_id
+                FROM market_exchange_announcement_text_raw
+                WHERE vendor = 'zzz_test_ea10_vendor' AND announcement_id = 'zzz_test_ea10_up3'
+                "#,
+        )
+        .fetch_one(&db)
+        .await
+        .expect("read back updated row");
+        assert_eq!(updated.0, "zzz_test_ea10_up3_rewritten");
+        assert_eq!(updated.1, "zzz更新后标题");
+        assert_eq!(updated.2, Some(ts(2099, 3, 5, 5, 6, 7)));
+        assert_eq!(updated.3, date(2099, 3, 6));
+        assert_eq!(updated.4.as_deref(), Some("zzz-hash-updated"));
+        assert_eq!(updated.5, json!([{ "theme": "capacity" }]));
+        assert_eq!(updated.6.as_deref(), Some("zzz_test_ea10_dv3b"));
+
+        // 第三次：完全相同的行再写 → 幂等，仍只有 1 行、字段不变
+        let saved = upsert_exchange_announcement_order_capacity_raw_rows(
+            &db,
+            &[row.clone()],
+            "zzz_test_ea10_dv3b",
+        )
+        .await
+        .expect("idempotent rewrite");
+        assert_eq!(saved, 1);
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM market_exchange_announcement_text_raw
+            WHERE vendor = 'zzz_test_ea10_vendor' AND announcement_id = 'zzz_test_ea10_up3'
+            "#,
+        )
+        .fetch_one(&db)
+        .await
+        .expect("count rows");
+        assert_eq!(count, 1, "幂等重写不得产生重复行");
+
+        cleanup_ea10_raw_rows(&db, "zzz_test_ea10_up3").await;
+    }
+
+    #[tokio::test]
+    async fn upsert_raw_rows_chunks_more_than_500_rows_in_single_call() {
+        let db = test_db_pool().await;
+        cleanup_ea10_raw_rows(&db, "zzz_test_ea10_chunk").await;
+
+        // 501 行 > chunk 上限 500 → 两个批次；每行 raw_payload_hash 唯一避免同语句内二次冲突
+        let rows: Vec<ExchangeAnnouncementOrderCapacityRawRow> = (0..501)
+            .map(|index| {
+                zzz_upsert_row(
+                    &format!("zzz_test_ea10_chunk_{index:03}"),
+                    "zzz10chunksym",
+                    &format!("zzz_test_ea10_chunk_hash_{index:03}"),
+                )
+            })
+            .collect();
+        let saved = upsert_exchange_announcement_order_capacity_raw_rows(
+            &db,
+            &rows,
+            "zzz_test_ea10_dv_chunk",
+        )
+        .await
+        .expect("chunked upsert");
+        assert_eq!(saved, 501, "两批合计应写入 501 行");
+
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM market_exchange_announcement_text_raw
+            WHERE announcement_id LIKE 'zzz_test_ea10_chunk_%'
+            "#,
+        )
+        .fetch_one(&db)
+        .await
+        .expect("count chunk rows");
+        assert_eq!(count, 501);
+
+        cleanup_ea10_raw_rows(&db, "zzz_test_ea10_chunk").await;
+    }
+
+    // ── 连库读：load_exchange_announcement_next_open_dates ──
+
+    #[tokio::test]
+    async fn next_open_dates_reads_open_calendar_with_14day_extension() {
+        let db = test_db_pool().await;
+        cleanup_ea10_calendar(&db).await;
+
+        let seed = |trade_date: NaiveDate, is_open: bool| {
+            sqlx::query(
+                "INSERT INTO market_trade_calendar (exchange, trade_date, is_open) VALUES ('zzz10_cx', $1, $2)",
+            )
+            .bind(trade_date)
+            .bind(is_open)
+        };
+        // 06-01 开但等于 start（严格 > 排除）；06-05/06-10/06-15 开（15 日超出 end 证明 +14 天扩展）；
+        // 06-20 闭市排除；06-24 开（= end+14 边界含）；06-30 开但超出扩展窗口排除
+        seed(date(2099, 6, 1), true).execute(&db).await.unwrap();
+        seed(date(2099, 6, 5), true).execute(&db).await.unwrap();
+        seed(date(2099, 6, 10), true).execute(&db).await.unwrap();
+        seed(date(2099, 6, 15), true).execute(&db).await.unwrap();
+        seed(date(2099, 6, 20), false).execute(&db).await.unwrap();
+        seed(date(2099, 6, 24), true).execute(&db).await.unwrap();
+        seed(date(2099, 6, 30), true).execute(&db).await.unwrap();
+
+        let open_dates =
+            load_exchange_announcement_next_open_dates(&db, date(2099, 6, 1), date(2099, 6, 10))
+                .await
+                .expect("load next open dates");
+        assert_eq!(
+            open_dates,
+            vec![
+                date(2099, 6, 5),
+                date(2099, 6, 10),
+                date(2099, 6, 15),
+                date(2099, 6, 24)
+            ],
+            "开市日升序；闭市日剔除；仅含 (start, end+14] 窗口"
+        );
+
+        cleanup_ea10_calendar(&db).await;
+    }
+
+    #[tokio::test]
+    async fn next_open_dates_returns_empty_for_window_without_open_days() {
+        let db = test_db_pool().await;
+        // 2099-08 无任何日历行（真实日历至 2026-12-31）→ 空序列分支
+        let open_dates =
+            load_exchange_announcement_next_open_dates(&db, date(2099, 8, 1), date(2099, 8, 5))
+                .await
+                .expect("load next open dates on empty window");
+        assert!(open_dates.is_empty());
+    }
+
+    // ── 连库审计中段：coverage_quality_audit SQL 分支 ──
+
+    #[tokio::test]
+    async fn coverage_audit_aggregates_seeded_rows_and_attempts() {
+        let state = test_app_state().await;
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_cove").await;
+        cleanup_ea10_attempts(&state.db, "zzz10coveatt").await;
+
+        let spans = json!([{ "theme": "order_contract" }]);
+        // e1：date_only_next_session 质量且 available_at > announcement_time（非 PIT 违规）
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_cove1",
+            "zzz10covea1",
+            "日常经营",
+            "关于对外投资的公告",
+            date(2099, 10, 5),
+            date(2099, 10, 6),
+            "date_only_next_session",
+            "ok",
+            None,
+            json!([]),
+            "zzz10cove_h1",
+            None,
+        )
+        .await;
+        // e2：可入样 target（真实经营标题 + spans）
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_cove2",
+            "zzz10covea2",
+            "日常经营",
+            "签订日常经营重大合同公告",
+            date(2099, 10, 6),
+            date(2099, 10, 7),
+            "timestamp",
+            "ok",
+            Some("order_or_contract_signed"),
+            spans.clone(),
+            "zzz10cove_h2",
+            None,
+        )
+        .await;
+        // e3：target 无 spans（missing evidence span）
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_cove3",
+            "zzz10covea3",
+            "日常经营",
+            "关于项目备案的公告",
+            date(2099, 10, 7),
+            date(2099, 10, 8),
+            "timestamp",
+            "ok",
+            Some("capacity_expansion_or_commissioning"),
+            json!([]),
+            "zzz10cove_h3",
+            None,
+        )
+        .await;
+        // e4：股权激励类 target → taxonomy_blocked
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_cove4",
+            "zzz10covea4",
+            "股权激励",
+            "股权激励计划公告",
+            date(2099, 10, 8),
+            date(2099, 10, 9),
+            "timestamp",
+            "ok",
+            Some("order_or_contract_signed"),
+            spans.clone(),
+            "zzz10cove_h4",
+            None,
+        )
+        .await;
+        // e5：风险标题（募集资金）非 target → 仅计 taxonomy_risk_category
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_cove5",
+            "zzz10covea5",
+            "日常经营",
+            "关于募集资金存放与实际使用情况的公告",
+            date(2099, 10, 9),
+            date(2099, 10, 10),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz10cove_h5",
+            None,
+        )
+        .await;
+        // e6：扫描件且标题不在 OCR 排除清单 → trainable blocking
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_cove6",
+            "zzz10covea6",
+            "日常经营",
+            "项目进展公告",
+            date(2099, 10, 10),
+            date(2099, 10, 11),
+            "timestamp",
+            "scanned_pdf_ocr_required",
+            None,
+            json!([]),
+            "zzz10cove_h6",
+            None,
+        )
+        .await;
+        // e7：扫描件 + 审计报告标题 → ocr_taxonomy_excluded（不阻塞）
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_cove7",
+            "zzz10covea7",
+            "日常经营",
+            "年度审计报告",
+            date(2099, 10, 11),
+            date(2099, 10, 12),
+            "timestamp",
+            "scanned_pdf_ocr_required",
+            None,
+            json!([]),
+            "zzz10cove_h7",
+            None,
+        )
+        .await;
+        // e8a/e8b：同 (vendor,endpoint,announcement_id,symbol) 不同 hash → duplicate_announcement_id_rows
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_cove8",
+            "zzz10covea8",
+            "日常经营",
+            "关于投资的公告",
+            date(2099, 10, 12),
+            date(2099, 10, 13),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz10cove_h8a",
+            None,
+        )
+        .await;
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_cove8",
+            "zzz10covea8",
+            "日常经营",
+            "关于投资的公告",
+            date(2099, 10, 13),
+            date(2099, 10, 14),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz10cove_h8b",
+            None,
+        )
+        .await;
+
+        seed_ea10_attempt(
+            &state.db,
+            "zzz10coveatt1",
+            date(2099, 10, 1),
+            date(2099, 10, 5),
+            "completed",
+            5,
+            None,
+        )
+        .await;
+        seed_ea10_attempt(
+            &state.db,
+            "zzz10coveatt2",
+            date(2099, 10, 1),
+            date(2099, 10, 2),
+            "completed",
+            0,
+            None,
+        )
+        .await;
+        seed_ea10_attempt(
+            &state.db,
+            "zzz10coveatt3:重大事项",
+            date(2099, 10, 1),
+            date(2099, 10, 3),
+            "failed",
+            0,
+            Some("'重大事项'"),
+        )
+        .await;
+        seed_ea10_attempt(
+            &state.db,
+            "zzz10coveatt4",
+            date(2099, 10, 4),
+            date(2099, 10, 4),
+            "failed",
+            0,
+            Some("boom"),
+        )
+        .await;
+
+        let report = build_exchange_announcement_order_capacity_coverage_quality_audit(
+            &state,
+            coverage_audit_req("20991001", "20991031"),
+        )
+        .await
+        .expect("coverage audit report");
+
+        assert_eq!(report["table_exists"], true);
+        let summary = &report["summary"];
+        assert_eq!(summary["row_count"], 9);
+        assert_eq!(summary["distinct_symbol_count"], 8);
+        assert_eq!(summary["distinct_category_count"], 2);
+        assert_eq!(summary["distinct_available_at_count"], 9);
+        assert_eq!(summary["pit_violation_rows"], 0);
+        assert_eq!(summary["missing_available_at_rows"], 0);
+        assert_eq!(summary["missing_source_published_at_quality_rows"], 0);
+        assert_eq!(summary["duplicate_announcement_id_rows"], 1);
+        assert_eq!(summary["duplicate_raw_payload_hash_groups"], 0);
+        assert_eq!(summary["evidence_span_rows"], 2);
+        assert_eq!(summary["target_event_rows"], 3);
+        assert_eq!(summary["target_event_missing_evidence_span_rows"], 1);
+        assert_eq!(summary["target_event_with_evidence_span_rows"], 2);
+        assert_eq!(summary["scanned_pdf_ocr_required_rows"], 2);
+        assert_eq!(summary["ocr_taxonomy_excluded_rows"], 1);
+        assert_eq!(summary["trainable_scanned_pdf_blocking_rows"], 1);
+        assert_eq!(summary["taxonomy_blocked_target_event_rows"], 1);
+        assert_eq!(
+            summary["taxonomy_risk_category_rows"], 3,
+            "e4 股权激励 + e5 募集资金标题 + e7 审计报告标题（风险词表含「审计报告」）"
+        );
+        assert_eq!(summary["admissible_target_event_rows"], 2);
+        // att1(completed,row=5) + att2(completed,row=0) 两条 completed → completed_attempts=2
+        assert_eq!(summary["completed_attempts"], 2);
+        assert_eq!(summary["completed_empty_attempts"], 1);
+        assert_eq!(summary["attempt_row_count"], 5);
+        assert_eq!(
+            summary["failed_attempts"], 1,
+            "仅非排除类失败计入 failed_attempts"
+        );
+        assert_eq!(summary["total_failed_attempts"], 2);
+        assert_eq!(summary["excluded_unsupported_category_failed_attempts"], 1);
+
+        // 分布：质量 8×timestamp + 1×date_only_next_session；解析状态 7×ok + 2×scanned
+        assert_eq!(
+            dist_rows(
+                &report["source_published_at_quality_distribution"],
+                "quality",
+                "timestamp"
+            ),
+            Some(8)
+        );
+        assert_eq!(
+            dist_rows(
+                &report["source_published_at_quality_distribution"],
+                "quality",
+                "date_only_next_session"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            dist_rows(
+                &report["parser_status_distribution"],
+                "pdf_parse_status",
+                "ok"
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            dist_rows(
+                &report["parser_status_distribution"],
+                "pdf_parse_status",
+                "scanned_pdf_ocr_required"
+            ),
+            Some(2)
+        );
+        // 事件分布：non_target 行带 target_event=false 标记
+        assert_eq!(
+            dist_rows(
+                &report["event_type_distribution"],
+                "event_type",
+                "non_target_or_unclassified"
+            ),
+            Some(6)
+        );
+        let non_target = report["event_type_distribution"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["event_type"] == "non_target_or_unclassified")
+            .expect("non target entry");
+        assert_eq!(non_target["target_event"], false);
+        // 年×类分布：2099 日常经营 8 行 / 股权激励 1 行（taxonomy_blocked=1）
+        let year_rows = report["year_category_breakdown"].as_array().unwrap();
+        let daily = year_rows
+            .iter()
+            .find(|entry| entry["year"] == 2099 && entry["category"] == "日常经营")
+            .expect("2099 日常经营 entry");
+        assert_eq!(daily["rows"], 8);
+        assert_eq!(daily["target_event_rows"], 2);
+        let equity = year_rows
+            .iter()
+            .find(|entry| entry["year"] == 2099 && entry["category"] == "股权激励")
+            .expect("2099 股权激励 entry");
+        assert_eq!(equity["rows"], 1);
+        assert_eq!(equity["taxonomy_blocked_target_event_rows"], 1);
+        // 符号分布：zzz10covea2 的 target 产出率为 1.0
+        let symbol_rows = report["symbol_event_breakdown"].as_array().unwrap();
+        let a2 = symbol_rows
+            .iter()
+            .find(|entry| entry["symbol"] == "zzz10covea2")
+            .expect("a2 symbol entry");
+        assert_eq!(a2["target_event_rows"], 1);
+        assert!((a2["target_event_yield_ratio"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+
+        // 失败 attempt 优先阻断决策；attempt/ocr/taxonomy 三门均 blocked
+        let decision = &report["decision"];
+        assert_eq!(decision["status"], "blocked_failed_sync_attempts_present");
+        assert_eq!(decision["attempt_failure_gate"]["status"], "blocked");
+        assert_eq!(
+            decision["attempt_failure_gate"]["blocking_failed_attempts"],
+            1
+        );
+        assert_eq!(decision["attempt_failure_gate"]["total_failed_attempts"], 2);
+        assert_eq!(
+            decision["attempt_failure_gate"]["excluded_unsupported_category_failed_attempts"],
+            1
+        );
+        assert_eq!(decision["ocr_quality_gate"]["status"], "blocked");
+        assert_eq!(decision["taxonomy_precision_gate"]["status"], "blocked");
+        assert_eq!(
+            decision["taxonomy_precision_gate"]["admissible_target_event_rows"],
+            2
+        );
+        assert_eq!(
+            decision["bounded_sync"],
+            "blocked_until_small_batch_audit_passes"
+        );
+
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_cove").await;
+        cleanup_ea10_attempts(&state.db, "zzz10coveatt").await;
+    }
+
+    #[tokio::test]
+    async fn coverage_audit_blocks_on_raw_pit_duplicate_and_missing_quality() {
+        let state = test_app_state().await;
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_covf").await;
+
+        // f1：date_only_next_session 且 available_at == announcement_time → PIT 违规
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_covf1",
+            "zzz10covfa1",
+            "日常经营",
+            "关于对外投资的公告",
+            date(2099, 11, 5),
+            date(2099, 11, 5),
+            "date_only_next_session",
+            "ok",
+            None,
+            json!([]),
+            "zzz10covf_h1",
+            None,
+        )
+        .await;
+        // f2：质量 missing → missing_source_published_at_quality_rows
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_covf2",
+            "zzz10covfa2",
+            "日常经营",
+            "关于项目备案的公告",
+            date(2099, 11, 6),
+            date(2099, 11, 7),
+            "missing",
+            "ok",
+            None,
+            json!([]),
+            "zzz10covf_h2",
+            None,
+        )
+        .await;
+        // f3a/f3b：同 announcement 组 → duplicate_announcement_id_rows
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_covf3",
+            "zzz10covfa3",
+            "日常经营",
+            "关于投资的公告",
+            date(2099, 11, 7),
+            date(2099, 11, 8),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz10covf_h3a",
+            None,
+        )
+        .await;
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_covf3",
+            "zzz10covfa3",
+            "日常经营",
+            "关于投资的公告",
+            date(2099, 11, 8),
+            date(2099, 11, 9),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz10covf_h3b",
+            None,
+        )
+        .await;
+        // f4a/f4b：同 raw_payload_hash 不同 announcement_id → duplicate_raw_payload_hash_groups
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_covf4a",
+            "zzz10covfa4",
+            "日常经营",
+            "关于合作的公告",
+            date(2099, 11, 9),
+            date(2099, 11, 10),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz10covf_same_hash",
+            None,
+        )
+        .await;
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_covf4b",
+            "zzz10covfa4",
+            "日常经营",
+            "关于合作的公告",
+            date(2099, 11, 10),
+            date(2099, 11, 11),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz10covf_same_hash",
+            None,
+        )
+        .await;
+
+        let report = build_exchange_announcement_order_capacity_coverage_quality_audit(
+            &state,
+            coverage_audit_req("20991101", "20991130"),
+        )
+        .await
+        .expect("coverage audit report");
+
+        let summary = &report["summary"];
+        assert_eq!(summary["row_count"], 6);
+        assert_eq!(summary["pit_violation_rows"], 1);
+        assert_eq!(summary["missing_source_published_at_quality_rows"], 1);
+        assert_eq!(summary["duplicate_announcement_id_rows"], 1);
+        assert_eq!(summary["duplicate_raw_payload_hash_groups"], 1);
+        // 无失败 attempt → attempt 门 passed_or_not_observed；但原始质量失败优先阻断
+        let decision = &report["decision"];
+        assert_eq!(decision["status"], "blocked_raw_pit_or_quality_failed");
+        assert_eq!(
+            decision["next_step"],
+            "repair_or_exclude_bad_raw_rows_before_expanding_sync"
+        );
+        assert_eq!(
+            decision["attempt_failure_gate"]["status"],
+            "passed_or_not_observed"
+        );
+        assert_eq!(
+            decision["bounded_sync"],
+            "blocked_until_small_batch_audit_passes"
+        );
+
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_covf").await;
+    }
+
+    #[tokio::test]
+    async fn coverage_audit_empty_window_requires_bounded_sync() {
+        let state = test_app_state().await;
+        // 2099-12 无行、无 attempt：表存在但零覆盖 → 要求先跑 tiny sync
+        let report = build_exchange_announcement_order_capacity_coverage_quality_audit(
+            &state,
+            coverage_audit_req("20991201", "20991231"),
+        )
+        .await
+        .expect("coverage audit report");
+
+        assert_eq!(report["table_exists"], true);
+        assert_eq!(report["summary"]["row_count"], 0);
+        assert_eq!(report["summary"]["completed_attempts"], 0);
+        assert_eq!(
+            report["year_category_breakdown"].as_array().unwrap().len(),
+            0
+        );
+        assert_eq!(
+            report["symbol_event_breakdown"].as_array().unwrap().len(),
+            0
+        );
+        let decision = &report["decision"];
+        assert_eq!(
+            decision["status"],
+            "raw_table_present_bounded_sync_required"
+        );
+        assert_eq!(
+            decision["next_step"],
+            "run_one_tiny_exchange_announcement_raw_sync_then_rerun_audit"
+        );
+        assert_eq!(
+            decision["ocr_quality_gate"]["status"],
+            "passed_or_not_observed"
+        );
+        assert_eq!(
+            decision["taxonomy_precision_gate"]["status"],
+            "passed_or_not_observed"
+        );
+        assert_eq!(
+            decision["bounded_sync"],
+            "blocked_until_small_batch_audit_passes"
+        );
+    }
+
+    #[tokio::test]
+    async fn coverage_audit_synced_empty_window_passes_accounting_only() {
+        let state = test_app_state().await;
+        cleanup_ea10_attempts(&state.db, "zzz10emptyatt").await;
+
+        // 零行 + completed 空 attempt（row_count=0）→ 覆盖核算放行
+        seed_ea10_attempt(
+            &state.db,
+            "zzz10emptyatt1",
+            date(2100, 1, 1),
+            date(2100, 1, 2),
+            "completed",
+            0,
+            None,
+        )
+        .await;
+        let report = build_exchange_announcement_order_capacity_coverage_quality_audit(
+            &state,
+            coverage_audit_req("21000101", "21000131"),
+        )
+        .await
+        .expect("coverage audit report");
+
+        let summary = &report["summary"];
+        assert_eq!(summary["row_count"], 0);
+        assert_eq!(summary["completed_attempts"], 1);
+        assert_eq!(summary["completed_empty_attempts"], 1);
+        assert_eq!(summary["attempt_row_count"], 0);
+        let decision = &report["decision"];
+        assert_eq!(
+            decision["status"],
+            "synced_empty_no_event_rows_passed_for_coverage_accounting_only"
+        );
+        assert_eq!(
+            decision["next_step"],
+            "continue_next_tiny_slice_or_batch_then_rerun_full_window_audit"
+        );
+        assert_eq!(
+            decision["bounded_sync"],
+            "continue_bounded_sync_for_coverage_accounting_only"
+        );
+
+        cleanup_ea10_attempts(&state.db, "zzz10emptyatt").await;
+    }
+
+    #[tokio::test]
+    async fn coverage_audit_clean_target_rows_pass_small_batch_gate() {
+        let state = test_app_state().await;
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_covp").await;
+
+        // 单行干净 target（avail>time、timestamp 质量、spans 齐全、无重复/扫描/风险类）
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_covp1",
+            "zzz10covpa1",
+            "日常经营",
+            "签订日常经营重大合同公告",
+            date(2100, 2, 5),
+            date(2100, 2, 6),
+            "timestamp",
+            "ok",
+            Some("order_or_contract_signed"),
+            json!([{ "theme": "order_contract" }]),
+            "zzz10covp_h1",
+            Some("zzz干净样本文本"),
+        )
+        .await;
+        let report = build_exchange_announcement_order_capacity_coverage_quality_audit(
+            &state,
+            coverage_audit_req("21000201", "21000228"),
+        )
+        .await
+        .expect("coverage audit report");
+
+        let summary = &report["summary"];
+        assert_eq!(summary["row_count"], 1);
+        assert_eq!(summary["target_event_rows"], 1);
+        assert_eq!(summary["target_event_with_evidence_span_rows"], 1);
+        assert_eq!(summary["admissible_target_event_rows"], 1);
+        assert_eq!(summary["pit_violation_rows"], 0);
+        let decision = &report["decision"];
+        assert_eq!(
+            decision["status"],
+            "small_batch_coverage_pit_quality_passed_expand_bounded_sync_only"
+        );
+        assert_eq!(
+            decision["next_step"],
+            "expand_by_month_or_quarter_then_rerun_coverage_quality_audit"
+        );
+        assert_eq!(
+            decision["bounded_sync"],
+            "expand_bounded_sync_by_month_or_quarter_only"
+        );
+
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_covp").await;
+    }
+
+    #[tokio::test]
+    async fn coverage_audit_rejects_inverted_date_range() {
+        let state = test_app_state().await;
+        let error = build_exchange_announcement_order_capacity_coverage_quality_audit(
+            &state,
+            coverage_audit_req("20991231", "20991201"),
+        )
+        .await
+        .expect_err("inverted range");
+        assert!(
+            error.contains("start_date must be <= end_date"),
+            "实际错误: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn coverage_audit_defaults_to_full_history_window() {
+        let state = test_app_state().await;
+        // 缺省窗口：start=20140101，end=今天（覆盖 249 行真实数据，仅做聚合回显断言）
+        let req = ExchangeAnnouncementOrderCapacityCoverageQualityAuditReq {
+            start_date: None,
+            end_date: None,
+        };
+        let report = build_exchange_announcement_order_capacity_coverage_quality_audit(&state, req)
+            .await
+            .expect("default window audit");
+        assert_eq!(report["date_range"]["start_date"], "20140101");
+        let end_date = report["date_range"]["end_date"].as_str().unwrap();
+        assert_eq!(end_date.len(), 8, "缺省 end_date 应为 YYYYMMDD");
+        let parsed = NaiveDate::parse_from_str(end_date, "%Y%m%d").expect("parseable end_date");
+        let today = Utc::now().date_naive();
+        assert!(
+            (parsed - today).num_days().abs() <= 1,
+            "缺省 end_date 应为当天（跨天边界容忍 1 日）: {end_date}"
+        );
+    }
+
+    // ── 连库审计中段：manual_precision_sample_audit SQL 分支 ──
+
+    fn manual_audit_req(
+        start: &str,
+        end: &str,
+        limit: Option<i64>,
+        negative: Option<bool>,
+    ) -> ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq {
+        ExchangeAnnouncementOrderCapacityManualPrecisionSampleAuditReq {
+            start_date: Some(start.to_string()),
+            end_date: Some(end.to_string()),
+            limit,
+            include_negative_samples: negative,
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_precision_blocked_shortfall_with_taxonomy_exclusion_matrix() {
+        let state = test_app_state().await;
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_mpa").await;
+
+        let spans = json!([{ "theme": "order_contract" }]);
+        // h1/h2：可入样 target（真实经营标题）
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpa1",
+            "zzz10mpa1",
+            "日常经营",
+            "签订日常经营重大合同公告",
+            date(2099, 6, 2),
+            date(2099, 6, 3),
+            "date_only_next_session",
+            "ok",
+            Some("order_or_contract_signed"),
+            spans.clone(),
+            "zzz_test_ea10_mp_h1",
+            Some("zzz测试正文摘要"),
+        )
+        .await;
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpa2",
+            "zzz10mpa2",
+            "日常经营",
+            "投资建设产能项目公告",
+            date(2099, 6, 3),
+            date(2099, 6, 4),
+            "timestamp",
+            "ok",
+            Some("capacity_expansion_or_commissioning"),
+            spans.clone(),
+            "zzz_test_ea10_mp_h2",
+            None,
+        )
+        .await;
+        // h3：风险标题（募集资金）→ 排除出可入样宇宙
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpa3",
+            "zzz10mpa3",
+            "日常经营",
+            "关于募集资金存放与实际使用情况的公告",
+            date(2099, 6, 4),
+            date(2099, 6, 5),
+            "timestamp",
+            "ok",
+            Some("order_or_contract_signed"),
+            spans.clone(),
+            "zzz_test_ea10_mp_h3",
+            None,
+        )
+        .await;
+        // h4：股权激励类 → 排除
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpa4",
+            "zzz10mpa4",
+            "股权激励",
+            "股权激励计划公告",
+            date(2099, 6, 5),
+            date(2099, 6, 6),
+            "timestamp",
+            "ok",
+            Some("order_or_contract_signed"),
+            spans.clone(),
+            "zzz_test_ea10_mp_h4",
+            None,
+        )
+        .await;
+        // h5：target 无 spans → 排除
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpa5",
+            "zzz10mpa5",
+            "日常经营",
+            "签订日常经营重大合同公告",
+            date(2099, 6, 6),
+            date(2099, 6, 7),
+            "timestamp",
+            "ok",
+            Some("order_or_contract_signed"),
+            json!([]),
+            "zzz_test_ea10_mp_h5",
+            None,
+        )
+        .await;
+        // h6：扫描件 → 排除
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpa6",
+            "zzz10mpa6",
+            "日常经营",
+            "签订日常经营重大合同公告",
+            date(2099, 6, 7),
+            date(2099, 6, 8),
+            "timestamp",
+            "scanned_pdf_ocr_required",
+            Some("order_or_contract_signed"),
+            spans.clone(),
+            "zzz_test_ea10_mp_h6",
+            None,
+        )
+        .await;
+        // h7：负样本（风险标题 → review 项带 taxonomy_risk_reason）；h8：负样本（中性标题）
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpa7",
+            "zzz10mpa7",
+            "日常经营",
+            "独立董事专项意见公告",
+            date(2099, 6, 8),
+            date(2099, 6, 9),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz_test_ea10_mp_h7",
+            None,
+        )
+        .await;
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpa8",
+            "zzz10mpa8",
+            "日常经营",
+            "关于其他事项的公告",
+            date(2099, 6, 9),
+            date(2099, 6, 10),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz_test_ea10_mp_h8",
+            None,
+        )
+        .await;
+
+        let report = build_exchange_announcement_order_capacity_manual_precision_sample_audit(
+            &state,
+            manual_audit_req("20990601", "20990610", Some(3), Some(true)),
+        )
+        .await
+        .expect("manual precision report");
+
+        assert_eq!(
+            report["status"],
+            "blocked_insufficient_target_review_sample"
+        );
+        assert_eq!(
+            report["admissible_target_event_rows"], 2,
+            "仅 h1/h2 进入可入样宇宙"
+        );
+        assert_eq!(report["required_target_sample_size_min"], 3);
+        assert_eq!(report["target_sample_rows"], 2);
+        assert_eq!(report["negative_sample_rows"], 1);
+        assert_eq!(report["target_sample_shortfall"], 1);
+        assert_eq!(
+            report["next_step"],
+            "expand_pre_registered_coverage_until_minimum_target_review_sample_is_available"
+        );
+        assert_eq!(
+            report["promotion_gate"]["p310_status"],
+            "blocked_until_manual_precision_review_passes"
+        );
+        assert_eq!(report["sample_policy"]["negative_samples"], true);
+        assert_eq!(
+            report["sample_policy"]["negative_sample_limit"], 1,
+            "limit=3 → (3/10).clamp(1,20)=1"
+        );
+
+        // 样本序：按 raw_payload_hash 升序 → h1、h2 target + h7 negative（h7 < h8）
+        let items = report["review_items"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["sample_kind"], "target");
+        assert_eq!(items[0]["symbol"], "zzz10mpa1");
+        assert_eq!(items[0]["event_type"], "order_or_contract_signed");
+        assert_eq!(
+            items[0]["taxonomy_risk_reason"],
+            Value::Null,
+            "可入样 target 的风险原因为空"
+        );
+        assert_eq!(items[0]["text_excerpt"], "zzz测试正文摘要");
+        assert_eq!(items[0]["announcement_time"], "2099-06-02");
+        assert!(items[0]["manual_review_fields"]["reviewer"].is_null());
+        assert_eq!(items[1]["sample_kind"], "target");
+        assert_eq!(items[1]["symbol"], "zzz10mpa2");
+        assert_eq!(items[2]["sample_kind"], "negative");
+        assert_eq!(items[2]["symbol"], "zzz10mpa7");
+        assert_eq!(
+            items[2]["taxonomy_risk_reason"], "admin_finance_governance_false_positive",
+            "负样本带风险标题 → review 项标注 taxonomy 风险原因"
+        );
+        assert_eq!(items[2]["text_excerpt"], "");
+
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_mpa").await;
+    }
+
+    #[tokio::test]
+    async fn manual_precision_ready_when_target_sample_meets_required_limit() {
+        let state = test_app_state().await;
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_mpb").await;
+
+        let spans = json!([{ "theme": "capacity" }]);
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpb1",
+            "zzz10mpb1",
+            "日常经营",
+            "合资建厂公告",
+            date(2099, 7, 2),
+            date(2099, 7, 3),
+            "timestamp",
+            "ok",
+            Some("capacity_expansion_or_commissioning"),
+            spans.clone(),
+            "zzz_test_ea10_mp_b1",
+            None,
+        )
+        .await;
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpb2",
+            "zzz10mpb2",
+            "日常经营",
+            "投资建设高效电池产能公告",
+            date(2099, 7, 3),
+            date(2099, 7, 4),
+            "timestamp",
+            "ok",
+            Some("capacity_expansion_or_commissioning"),
+            spans.clone(),
+            "zzz_test_ea10_mp_b2",
+            None,
+        )
+        .await;
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpb3",
+            "zzz10mpb3",
+            "日常经营",
+            "关于其他事项的公告",
+            date(2099, 7, 4),
+            date(2099, 7, 5),
+            "timestamp",
+            "ok",
+            None,
+            json!([]),
+            "zzz_test_ea10_mp_b3",
+            None,
+        )
+        .await;
+
+        // limit=2：可入样 2 行刚好达标 → ready；negative_limit=(2/10).clamp(1,20)=1
+        let report = build_exchange_announcement_order_capacity_manual_precision_sample_audit(
+            &state,
+            manual_audit_req("20990701", "20990731", Some(2), Some(true)),
+        )
+        .await
+        .expect("manual precision report");
+
+        assert_eq!(report["status"], "manual_review_sample_ready");
+        assert_eq!(report["target_sample_rows"], 2);
+        assert_eq!(report["negative_sample_rows"], 1);
+        assert_eq!(report["target_sample_shortfall"], 0);
+        assert_eq!(
+            report["next_step"],
+            "record_human_labels_for_sample_then_compute_precision_before_correlation_audit"
+        );
+        assert_eq!(report["sample_policy"]["negative_sample_limit"], 1);
+        let items = report["review_items"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[2]["sample_kind"], "negative");
+
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_mpb").await;
+    }
+
+    #[tokio::test]
+    async fn manual_precision_negative_universe_empty_and_limit_clamped_to_200() {
+        let state = test_app_state().await;
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_mpc").await;
+
+        // 仅 1 行可入样 target，无负样本
+        seed_ea10_raw_row(
+            &state.db,
+            "zzz_test_ea10_mpc1",
+            "zzz10mpc1",
+            "日常经营",
+            "签订日常经营重大合同公告",
+            date(2099, 8, 2),
+            date(2099, 8, 3),
+            "timestamp",
+            "ok",
+            Some("order_or_contract_signed"),
+            json!([{ "theme": "order_contract" }]),
+            "zzz_test_ea10_mp_c1",
+            None,
+        )
+        .await;
+
+        // limit=1：负样本查询执行但宇宙为空 → negative_sample_rows=0，样本仍 ready
+        let report = build_exchange_announcement_order_capacity_manual_precision_sample_audit(
+            &state,
+            manual_audit_req("20990801", "20990831", Some(1), Some(true)),
+        )
+        .await
+        .expect("manual precision report");
+        assert_eq!(report["status"], "manual_review_sample_ready");
+        assert_eq!(report["target_sample_rows"], 1);
+        assert_eq!(report["negative_sample_rows"], 0, "负样本宇宙为空");
+        assert_eq!(report["sample_policy"]["negative_sample_limit"], 1);
+        assert_eq!(report["review_items"].as_array().unwrap().len(), 1);
+
+        // limit=500 → clamp 到 200 → shortfall 199 阻断
+        let clamped = build_exchange_announcement_order_capacity_manual_precision_sample_audit(
+            &state,
+            manual_audit_req("20990801", "20990831", Some(500), Some(true)),
+        )
+        .await
+        .expect("manual precision report");
+        assert_eq!(
+            clamped["required_target_sample_size_min"], 200,
+            "limit 钳制到上限 200"
+        );
+        assert_eq!(clamped["target_sample_rows"], 1);
+        assert_eq!(clamped["target_sample_shortfall"], 199);
+        assert_eq!(
+            clamped["status"],
+            "blocked_insufficient_target_review_sample"
+        );
+
+        cleanup_ea10_raw_rows(&state.db, "zzz_test_ea10_mpc").await;
+    }
+
+    #[tokio::test]
+    async fn manual_precision_rejects_inverted_date_range() {
+        let state = test_app_state().await;
+        let error = build_exchange_announcement_order_capacity_manual_precision_sample_audit(
+            &state,
+            manual_audit_req("20990610", "20990601", None, None),
+        )
+        .await
+        .expect_err("inverted range");
+        assert!(
+            error.contains("start_date cannot be after end_date"),
+            "实际错误: {error}"
+        );
+    }
+}
