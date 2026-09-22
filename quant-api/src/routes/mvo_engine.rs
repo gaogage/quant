@@ -226,6 +226,7 @@ pub async fn run_daily_simulation(
 
 /// 账号上下文（任务74 从 run_daily_simulation 步骤 0 拆出）。
 /// init_cap 保留 Decimal 原值供重置 UPDATE 绑定（bit 级等价）；init_cap_f 供 NAV 计算。
+#[derive(Debug)]
 pub(crate) struct AccountContext {
     pub init_cap: Decimal,
     pub init_cap_f: f64,
@@ -2101,5 +2102,1005 @@ mod final_optimization {
                 m.sharpe
             );
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 第十一批测试（任务74 等价拆分后六个 pub(crate) 子函数直测）
+//
+// 覆盖：resolve_daily_regime / compute_day_returns（纯函数），
+// AccountContext 字段语义（纯构造），load_account_context /
+// load_simulation_dates / preload_csi300_map / reset_account_if_needed（连库）。
+// 连库测试 DATABASE_URL 缺省 postgres://gaocheng@localhost/quant（本地 quant 库）。
+// zzz_test_mvo11_ 前缀独占键，前置+结尾双端清理；共享父行幂等插入不删（防并行互拆）。
+// ═══════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod eleventh_batch {
+    use super::*;
+    use crate::routes::strategy::{
+        AssetClass, AssetStrategy, MvoParams, ResolvedStrategy, SecurityConfig, StrategyType,
+    };
+    use std::collections::HashMap;
+
+    // ── 并行互斥锁（第十批同款纪律）──
+    // ctx/dates/reset 三组测试内共享 cleanup scope 或同 account id，
+    // cargo test 默认并行时必须组内串行，防先跑者 cleanup 拆后跑者的造数。
+    // preload 用独占 2099 时间窗（生产数据止于 2026），免锁。
+
+    static CTX_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    static DATES_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    static RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    // ── 基础 helper ──
+
+    fn dec(s: &str) -> Decimal {
+        s.parse::<Decimal>().expect("合法 Decimal 字面量")
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("合法日期")
+    }
+
+    async fn test_db() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 构造连续日历日线性价格 map（CSI300 内存缓存形态）。
+    /// 天数 >= 2，价格从 p0 匀速线性到 p1。
+    fn csi_map_linear(start: NaiveDate, days: i64, p0: f64, p1: f64) -> HashMap<NaiveDate, f64> {
+        (0..days)
+            .map(|i| {
+                (
+                    start + chrono::Duration::days(i),
+                    p0 + (p1 - p0) * i as f64 / (days - 1) as f64,
+                )
+            })
+            .collect()
+    }
+
+    /// 构造 MvoParams（resolve_daily_regime 只读 regime_policy 与
+    /// regime_bear_return_threshold 两个字段，其余值不参与被测逻辑）。
+    fn make_mvo(regime_policy: Option<&str>, bear_ret_threshold: f64) -> MvoParams {
+        MvoParams {
+            vol_target: 0.15,
+            allocation_mode: None,
+            mu_estimation: None,
+            leverage_cap: 2.0,
+            leverage_floor: 1.0,
+            default_weights: vec![],
+            min_stock: 0.2,
+            momentum_blend_ratio: 0.5,
+            ga_population: 50,
+            ga_generations: 100,
+            ga_elite_count: 4,
+            regime_bull_threshold: 0.2,
+            regime_bear_threshold: -0.05,
+            regime_bull_min_stock: 0.3,
+            regime_bear_min_stock: 0.1,
+            deep_bear_threshold: -0.10,
+            deep_bear_exposure: 0.60,
+            dynamic_target_cap: 0.12,
+            dynamic_target_floor: 0.04,
+            risk_free_rate: 0.02,
+            grid_step: 0.01,
+            leverage_regime_threshold: 0.1,
+            slippage_pct: 0.002,
+            mvo_objective: "minvariance".into(),
+            kelly_fraction: 0.15,
+            score_candidate_pool_size: 200,
+            regime_policy: regime_policy.map(String::from),
+            regime_bear_return_threshold: bear_ret_threshold,
+            etf_premium_gate: 0.01,
+        }
+    }
+
+    /// 构造 a_share asset（load_simulation_dates 只读 asset_class 与
+    /// security.equity_curve_task_id）。
+    fn a_share_asset(task_id: Option<&str>) -> AssetStrategy {
+        AssetStrategy {
+            strategy_id: "zzz_test_mvo11_a_share".into(),
+            asset_class: AssetClass::AShare,
+            security: SecurityConfig {
+                signal_source: "fixed".into(),
+                combo_name: String::new(),
+                top_n: 0,
+                prediction_set_id: None,
+                prediction_blend_weight: 0.0,
+                score_direction: "asc".into(),
+                candidate_tier: String::new(),
+                equity_curve_task_id: task_id.map(String::from),
+                fixed_symbols: vec![],
+                default_weights: vec![],
+                max_single: 0.0,
+                max_single_bull: 0.0,
+            },
+        }
+    }
+
+    fn make_rs(mvo: Option<MvoParams>, assets: Vec<AssetStrategy>) -> ResolvedStrategy {
+        ResolvedStrategy {
+            strategy_id: "zzz_test_mvo11_strategy".into(),
+            name: "zzz 第十一批".into(),
+            strategy_type: StrategyType::Composite,
+            mvo,
+            assets,
+            etf_symbols: vec![],
+            rebalance_freq: "monthly".into(),
+        }
+    }
+
+    // ── DB 造数/清理 helper ──
+
+    /// 按场景前缀双端清理本测试专属行（paper_account 子表先删，FK CASCADE 兜底
+    /// 但仍显式删；tenth_batch 同款纪律）。
+    async fn cleanup_scope(db: &PgPool, scope: &str) {
+        let prefix = format!("zzz_test_mvo11_{}%", scope);
+        let _ = sqlx::query("DELETE FROM paper_nav_snapshot WHERE paper_account_id LIKE $1")
+            .bind(&prefix)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM paper_position WHERE paper_account_id LIKE $1")
+            .bind(&prefix)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id LIKE $1")
+            .bind(&prefix)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM backtest_equity_curve WHERE task_id LIKE $1")
+            .bind(&prefix)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM backtest_task WHERE task_id LIKE $1")
+            .bind(&prefix)
+            .execute(db)
+            .await;
+    }
+
+    /// CSI300 远未来造数窗（2097-2100，生产数据止于 2026，零重叠）清理。
+    async fn cleanup_csi300_window(db: &PgPool) {
+        let _ = sqlx::query(
+            "DELETE FROM market_index_daily_bar
+             WHERE symbol = '000300.SH' AND trade_date >= '2097-01-01' AND trade_date <= '2100-12-31'",
+        )
+        .execute(db)
+        .await;
+    }
+
+    /// 共享父行：strategy_definition → strategy_version + data_version。
+    /// 幂等插入，结尾不删（防并行测试互拆；backtest_equity_curve 对
+    /// backtest_task 是 ON DELETE CASCADE，task 行先删即可）。
+    async fn seed_shared_parents(db: &PgPool) {
+        sqlx::query(
+            "INSERT INTO strategy_definition
+               (strategy_id, strategy_code, name, strategy_type, status)
+             VALUES (999999110, 'zzz_test_mvo11_strategy', 'zzz 第十一批', 'zzz', 'active')
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(db)
+        .await
+        .expect("insert zzz strategy_definition");
+        sqlx::query(
+            "INSERT INTO strategy_version
+               (strategy_version_id, strategy_code, version,
+                parameter_schema, default_parameters, status)
+             VALUES ('zzz_test_mvo11_sv', 'zzz_test_mvo11_strategy', 'v11', '{}', '{}', 'active')
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(db)
+        .await
+        .expect("insert zzz strategy_version");
+        sqlx::query(
+            "INSERT INTO data_version
+               (data_version_id, name, source, start_date, end_date, tables, snapshot_hash)
+             VALUES ('zzz_test_mvo11_dv', 'zzz 第十一批数据', 'zzz',
+                     '2026-01-01', '2026-01-31', '{}', 'zzz-mvo11')
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(db)
+        .await
+        .expect("insert zzz data_version");
+    }
+
+    /// 造 zzz backtest_task（backtest_equity_curve 的 FK 父行）。
+    async fn insert_bt_task(db: &PgPool, task_id: &str) {
+        sqlx::query(
+            "INSERT INTO backtest_task
+               (task_id, strategy_version_id, data_version_id, benchmark_symbol, symbols,
+                start_date, end_date, initial_capital, rebalance_frequency,
+                cost_model, slippage_model, execution_rules, parameters, status)
+             VALUES ($1, 'zzz_test_mvo11_sv', 'zzz_test_mvo11_dv', '000300.SH',
+                     ARRAY['ZZZ900.SH'], '2026-01-05', '2026-01-30', 100000, 'monthly',
+                     '{}', '{}', '{}', '{}', 'completed')",
+        )
+        .bind(task_id)
+        .execute(db)
+        .await
+        .expect("insert zzz backtest_task");
+    }
+
+    /// 造 zzz backtest_equity_curve 点列（cash 固定 0，非被测列）。
+    async fn insert_curve(db: &PgPool, task_id: &str, points: &[(NaiveDate, &str)]) {
+        for (d, v) in points {
+            sqlx::query(
+                "INSERT INTO backtest_equity_curve
+                   (task_id, trade_date, portfolio_value, cash)
+                 VALUES ($1, $2, $3, 0)",
+            )
+            .bind(task_id)
+            .bind(d)
+            .bind(dec(v))
+            .execute(db)
+            .await
+            .expect("insert zzz backtest_equity_curve");
+        }
+    }
+
+    /// 造 zzz CSI300 日线（000300.SH 远未来窗，source='zzz' 标记测试行）。
+    async fn insert_csi300(db: &PgPool, rows: &[(NaiveDate, &str)]) {
+        for (d, c) in rows {
+            sqlx::query(
+                "INSERT INTO market_index_daily_bar
+                   (symbol, trade_date, close, source)
+                 VALUES ('000300.SH', $1, $2, 'zzz')",
+            )
+            .bind(d)
+            .bind(dec(c))
+            .execute(db)
+            .await
+            .expect("insert zzz market_index_daily_bar");
+        }
+    }
+
+    /// 造 zzz paper_account（脏值全套：current_nav/peak_nav/cash/
+    /// max_drawdown_pct/margin_amount/total_trades）。sv=None 写 NULL。
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_account_full(
+        db: &PgPool,
+        id: &str,
+        sv: Option<&str>,
+        init_cap: &str,
+        current_nav: &str,
+        peak_nav: &str,
+        cash: &str,
+        max_dd: &str,
+        margin: &str,
+        total_trades: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO paper_account
+               (paper_account_id, name, initial_capital, cash, status,
+                strategy_version_id, current_nav, peak_nav,
+                max_drawdown_pct, margin_amount, total_trades)
+             VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(id)
+        .bind(format!("zzz 第十一批 {id}"))
+        .bind(dec(init_cap))
+        .bind(dec(cash))
+        .bind(sv)
+        .bind(dec(current_nav))
+        .bind(dec(peak_nav))
+        .bind(dec(max_dd))
+        .bind(dec(margin))
+        .bind(total_trades)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_account");
+    }
+
+    /// 造 zzz paper_nav_snapshot 行。
+    async fn insert_snapshot(db: &PgPool, snap_id: &str, acct: &str, d: NaiveDate) {
+        sqlx::query(
+            "INSERT INTO paper_nav_snapshot
+               (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash, market_value)
+             VALUES ($1, $2, $3, 1500000, 500000, 1000000)",
+        )
+        .bind(snap_id)
+        .bind(acct)
+        .bind(d)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_nav_snapshot");
+    }
+
+    /// 造 zzz paper_position 行。
+    async fn insert_position(db: &PgPool, pos_id: &str, acct: &str, symbol: &str) {
+        sqlx::query(
+            "INSERT INTO paper_position
+               (paper_position_id, paper_account_id, symbol, quantity, avg_cost)
+             VALUES ($1, $2, $3, 100, 10.5)",
+        )
+        .bind(pos_id)
+        .bind(acct)
+        .bind(symbol)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_position");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // resolve_daily_regime（纯函数，regime_policy 分派）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// bwgv2 别名 1/3："bwgv2" 走 Bwgv2Config 路径。
+    /// map：130 个连续日历日 100→92 线性跌（总收益 -8%，vol≈0.0002 远低于 0.28，
+    /// 路径 dd=8% 低于 0.14）→ 仅 Bear 信号触发（-0.08 <= -0.03）→ 0.72。
+    #[test]
+    fn regime_bwgv2_alias_routes_to_bear_tier() {
+        let start = date(2030, 1, 7);
+        let map = csi_map_linear(start, 130, 100.0, 92.0);
+        let latest = start + chrono::Duration::days(129);
+        let rs = make_rs(Some(make_mvo(Some("bwgv2"), -0.03)), vec![]);
+        let exposure = resolve_daily_regime(&rs, &map, latest, -0.10, 0.55);
+        assert!(
+            (exposure - 0.72).abs() < 1e-9,
+            "bwgv2 Bear 档应为 0.72, 实际: {}",
+            exposure
+        );
+    }
+
+    /// bwgv2 别名 2/3："bear_window_guard_v2" 走同一路径。
+    #[test]
+    fn regime_bear_window_guard_v2_alias_routes_to_bear_tier() {
+        let start = date(2030, 1, 7);
+        let map = csi_map_linear(start, 130, 100.0, 92.0);
+        let latest = start + chrono::Duration::days(129);
+        let rs = make_rs(Some(make_mvo(Some("bear_window_guard_v2"), -0.03)), vec![]);
+        let exposure = resolve_daily_regime(&rs, &map, latest, -0.10, 0.55);
+        assert!(
+            (exposure - 0.72).abs() < 1e-9,
+            "bear_window_guard_v2 别名应同走 Bear 档 0.72, 实际: {}",
+            exposure
+        );
+    }
+
+    /// bwgv2 别名 3/3："quality_bear_window_guard_v2" 走同一路径。
+    #[test]
+    fn regime_quality_bear_window_guard_v2_alias_routes_to_bear_tier() {
+        let start = date(2030, 1, 7);
+        let map = csi_map_linear(start, 130, 100.0, 92.0);
+        let latest = start + chrono::Duration::days(129);
+        let rs = make_rs(
+            Some(make_mvo(Some("quality_bear_window_guard_v2"), -0.03)),
+            vec![],
+        );
+        let exposure = resolve_daily_regime(&rs, &map, latest, -0.10, 0.55);
+        assert!(
+            (exposure - 0.72).abs() < 1e-9,
+            "quality_bear_window_guard_v2 别名应同走 Bear 档 0.72, 实际: {}",
+            exposure
+        );
+    }
+
+    /// 阈值 regime_bear_return_threshold 确实从 MvoParams 读入 Bwgv2Config：
+    /// 同一张 -8% 的 map，阈值放宽到 -0.10 后不再触发 Bear（vol/dd 也不触发）→ 满仓。
+    #[test]
+    fn regime_bwgv2_bear_threshold_sourced_from_mvo_params() {
+        let start = date(2030, 1, 7);
+        let map = csi_map_linear(start, 130, 100.0, 92.0);
+        let latest = start + chrono::Duration::days(129);
+        // 总收益 -0.08 > -0.10 → Bear 不触发
+        let rs = make_rs(Some(make_mvo(Some("bwgv2"), -0.10)), vec![]);
+        let exposure = resolve_daily_regime(&rs, &map, latest, -0.10, 0.55);
+        assert!(
+            (exposure - 1.00).abs() < 1e-9,
+            "阈值 -0.10 时 -8% 不触发 Bear 应满仓, 实际: {}",
+            exposure
+        );
+    }
+
+    /// regime_policy=None → trailing-12m 路径：map 260 日 4000→3000
+    /// （最近 252 键 trailing ≈ -24% < -0.10）→ deep_bear_exposure 生效（0.55，
+    /// 非默认 0.60，证明参数透传）。
+    #[test]
+    fn regime_none_policy_uses_trailing_deep_bear() {
+        let start = date(2031, 1, 6);
+        let map = csi_map_linear(start, 260, 4000.0, 3000.0);
+        let latest = start + chrono::Duration::days(259);
+        let rs = make_rs(Some(make_mvo(None, -0.03)), vec![]);
+        let exposure = resolve_daily_regime(&rs, &map, latest, -0.10, 0.55);
+        assert!(
+            (exposure - 0.55).abs() < 1e-9,
+            "trailing 深熊应返回传入的 deep_bear_exposure=0.55, 实际: {}",
+            exposure
+        );
+    }
+
+    /// regime_policy 为未识别串（"trailing_12m"）→ 同走 trailing-12m 兜底路径。
+    #[test]
+    fn regime_unrecognized_policy_string_falls_back_to_trailing() {
+        let start = date(2031, 1, 6);
+        let map = csi_map_linear(start, 260, 4000.0, 3000.0);
+        let latest = start + chrono::Duration::days(259);
+        let rs = make_rs(Some(make_mvo(Some("trailing_12m"), -0.03)), vec![]);
+        let exposure = resolve_daily_regime(&rs, &map, latest, -0.10, 0.55);
+        assert!(
+            (exposure - 0.55).abs() < 1e-9,
+            "未识别串应兜底 trailing 深熊 0.55, 实际: {}",
+            exposure
+        );
+    }
+
+    /// mvo=None（asset 型策略）→ 同走 trailing-12m 路径；牛市 map → 满仓。
+    #[test]
+    fn regime_mvo_none_trailing_bull_keeps_full() {
+        let start = date(2032, 1, 5);
+        let map = csi_map_linear(start, 260, 3000.0, 4000.0);
+        let latest = start + chrono::Duration::days(259);
+        let rs = make_rs(None, vec![]);
+        let exposure = resolve_daily_regime(&rs, &map, latest, -0.10, 0.55);
+        assert!(
+            (exposure - 1.00).abs() < 1e-9,
+            "mvo=None 牛市应满仓, 实际: {}",
+            exposure
+        );
+    }
+
+    /// bwgv2 分支不使用 trailing 参数：同一张深跌 map（trailing 口径会给 0.55），
+    /// policy=bwgv2 时走 Bwgv2 语义（窗口 Bear 档 0.72），deep_bear_exposure 被忽略。
+    #[test]
+    fn regime_bwgv2_branch_ignores_trailing_deep_bear_params() {
+        let start = date(2031, 1, 6);
+        let map = csi_map_linear(start, 260, 4000.0, 3000.0);
+        let latest = start + chrono::Duration::days(259);
+        let rs = make_rs(Some(make_mvo(Some("bwgv2"), -0.03)), vec![]);
+        let exposure = resolve_daily_regime(&rs, &map, latest, -0.10, 0.55);
+        assert!(
+            (exposure - 0.72).abs() < 1e-9,
+            "bwgv2 应按自身窗口给 0.72, 实际: {}",
+            exposure
+        );
+        assert!(
+            (exposure - 0.55).abs() > 0.1,
+            "deep_bear_exposure=0.55 不应泄入 bwgv2 分支, 实际: {}",
+            exposure
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // compute_day_returns（纯函数，四分支）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// prev_nav>0 且 init_cap>0：net/cum 均按公式计算。
+    #[test]
+    fn day_returns_normal_path_computes_both() {
+        let (net, cum) = compute_day_returns(1_050_000.0, 1_000_000.0, 1_234_567.89);
+        let expected_net = 1_050_000.0f64 / 1_000_000.0 - 1.0;
+        let expected_cum = 1_050_000.0f64 / 1_234_567.89 - 1.0;
+        assert!(
+            (net - expected_net).abs() < 1e-12,
+            "net={net} 期望={expected_net}"
+        );
+        assert!(
+            (cum - expected_cum).abs() < 1e-12,
+            "cum={cum} 期望={expected_cum}"
+        );
+    }
+
+    /// prev_nav=0：net 记 0（防除零），cum 正常。
+    #[test]
+    fn day_returns_zero_prev_nav_records_zero_net() {
+        let (net, cum) = compute_day_returns(500_000.0, 0.0, 1_000_000.0);
+        assert_eq!(net, 0.0, "prev_nav=0 时 net 记 0");
+        assert!((cum - (-0.5)).abs() < 1e-12, "cum 应为 -0.5, 实际: {cum}");
+    }
+
+    /// init_cap=0：cum 记 0（防除零），net 正常。
+    #[test]
+    fn day_returns_zero_init_cap_records_zero_cum() {
+        let (net, cum) = compute_day_returns(1_100_000.0, 1_000_000.0, 0.0);
+        assert!((net - 0.1).abs() < 1e-12, "net 应为 0.1, 实际: {net}");
+        assert_eq!(cum, 0.0, "init_cap=0 时 cum 记 0");
+    }
+
+    /// prev_nav=0 且 init_cap=0：双 0。
+    #[test]
+    fn day_returns_both_zero_records_zero_pair() {
+        let (net, cum) = compute_day_returns(123_456.0, 0.0, 0.0);
+        assert_eq!(net, 0.0, "双 0 时 net 记 0");
+        assert_eq!(cum, 0.0, "双 0 时 cum 记 0");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // AccountContext 字段语义（纯构造，load 返回值可直接验证 compute 链）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// init_cap Decimal → init_cap_f 的转换链（load_account_context 内联路径：
+    /// to_string().parse()）对 NUMERIC(24,6) 精度无往返损失。
+    #[test]
+    fn account_context_decimal_to_f64_roundtrip_keeps_precision() {
+        let init_cap = dec("1234567.89");
+        let init_cap_f: f64 = init_cap.to_string().parse().unwrap_or(1_000_000.0);
+        assert!(
+            (init_cap_f - 1234567.89).abs() < 1e-6,
+            "两位小数往返: {init_cap_f}"
+        );
+        let init_cap6 = dec("1234567.890123");
+        let init_cap6_f: f64 = init_cap6.to_string().parse().unwrap_or(1_000_000.0);
+        assert!(
+            (init_cap6_f - 1234567.890123).abs() < 1e-6,
+            "六位小数（NUMERIC(24,6) 满 scale）往返: {init_cap6_f}"
+        );
+    }
+
+    /// 双字段语义：init_cap 供重置 UPDATE 绑定（Decimal 原值），init_cap_f 供
+    /// NAV 计算——模拟首日 prev_nav=init_cap_f 时 net 与 cum 相等。
+    #[test]
+    fn account_context_fields_drive_first_day_returns() {
+        let ctx = AccountContext {
+            init_cap: dec("1000000"),
+            init_cap_f: 1000000.0,
+        };
+        assert_eq!(ctx.init_cap, dec("1000000"), "Decimal 数值语义相等");
+        let (net, cum) = compute_day_returns(1_020_000.0, ctx.init_cap_f, ctx.init_cap_f);
+        assert!(
+            (net - 0.02).abs() < 1e-12 && (cum - 0.02).abs() < 1e-12,
+            "首日 prev=init 时 net/cum 应同为 2%: net={net} cum={cum}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // load_account_context（连库，zzz 账号三态）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// 账号不存在 → Err "account not found"。
+    #[tokio::test]
+    async fn load_ctx_missing_account_errors_not_found() {
+        let _guard = CTX_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_scope(&db, "ctx").await;
+        let err = load_account_context(&db, "zzz_test_mvo11_ctx_missing")
+            .await
+            .expect_err("不存在的账号应报错");
+        assert!(err.contains("account not found"), "err={err}");
+        cleanup_scope(&db, "ctx").await;
+    }
+
+    /// strategy_version_id 为 NULL → Err 未挂策略。
+    #[tokio::test]
+    async fn load_ctx_null_strategy_version_errors_unbound() {
+        let _guard = CTX_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_scope(&db, "ctx").await;
+        insert_account_full(
+            &db,
+            "zzz_test_mvo11_ctx_nullsv",
+            None,
+            "1000000",
+            "1000000",
+            "1000000",
+            "1000000",
+            "0",
+            "0",
+            0,
+        )
+        .await;
+        let err = load_account_context(&db, "zzz_test_mvo11_ctx_nullsv")
+            .await
+            .expect_err("NULL strategy_version_id 应报错");
+        assert!(err.contains("未挂策略"), "err={err}");
+        assert!(
+            err.contains("zzz_test_mvo11_ctx_nullsv"),
+            "错误信息应含账号回显: err={err}"
+        );
+        cleanup_scope(&db, "ctx").await;
+    }
+
+    /// strategy_version_id 为空串 → 同 Err 未挂策略。
+    #[tokio::test]
+    async fn load_ctx_empty_strategy_version_errors_unbound() {
+        let _guard = CTX_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_scope(&db, "ctx").await;
+        insert_account_full(
+            &db,
+            "zzz_test_mvo11_ctx_emptysv",
+            Some(""),
+            "1000000",
+            "1000000",
+            "1000000",
+            "1000000",
+            "0",
+            "0",
+            0,
+        )
+        .await;
+        let err = load_account_context(&db, "zzz_test_mvo11_ctx_emptysv")
+            .await
+            .expect_err("空串 strategy_version_id 应报错");
+        assert!(err.contains("未挂策略"), "err={err}");
+        cleanup_scope(&db, "ctx").await;
+    }
+
+    /// 正常账号 → Ok 双值；Decimal→f64 往返无损失。
+    #[tokio::test]
+    async fn load_ctx_ok_returns_dual_values_with_precision() {
+        let _guard = CTX_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_scope(&db, "ctx").await;
+        insert_account_full(
+            &db,
+            "zzz_test_mvo11_ctx_ok",
+            Some("zzz_test_mvo11_sv"),
+            "1234567.89",
+            "1500000.12",
+            "1600000.5",
+            "500000.25",
+            "0.1234",
+            "25000.50",
+            77,
+        )
+        .await;
+        let ctx = load_account_context(&db, "zzz_test_mvo11_ctx_ok")
+            .await
+            .expect("正常账号应 Ok");
+        assert_eq!(
+            ctx.init_cap,
+            dec("1234567.89"),
+            "NUMERIC(24,6) 读回 Decimal 数值相等（尾零无关）"
+        );
+        assert_eq!(
+            ctx.init_cap.to_string(),
+            "1234567.890000",
+            "DB scale=6 形态"
+        );
+        assert!(
+            (ctx.init_cap_f - 1234567.89).abs() < 1e-6,
+            "init_cap_f 往返: {}",
+            ctx.init_cap_f
+        );
+        cleanup_scope(&db, "ctx").await;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // load_simulation_dates（连库，task_id 缺失/空区间/正常）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// assets 无 a_share（只有 bond）→ Err equity_curve_task_id 缺失。
+    #[tokio::test]
+    async fn load_dates_without_a_share_asset_errors() {
+        let db = test_db().await;
+        let bond = AssetStrategy {
+            strategy_id: "zzz_test_mvo11_bond".into(),
+            asset_class: AssetClass::Bond,
+            security: a_share_asset(None).security,
+        };
+        let rs = make_rs(None, vec![bond]);
+        let err = load_simulation_dates(&db, &rs, date(2026, 1, 5), date(2026, 1, 30))
+            .await
+            .expect_err("无 a_share 应报错");
+        assert!(
+            err.contains("策略无 a_share asset") && err.contains("equity_curve_task_id 缺失"),
+            "err={err}"
+        );
+    }
+
+    /// a_share 存在但 equity_curve_task_id=None → 同 Err。
+    #[tokio::test]
+    async fn load_dates_a_share_without_task_id_errors() {
+        let db = test_db().await;
+        let rs = make_rs(None, vec![a_share_asset(None)]);
+        let err = load_simulation_dates(&db, &rs, date(2026, 1, 5), date(2026, 1, 30))
+            .await
+            .expect_err("task_id 缺失应报错");
+        assert!(
+            err.contains("策略无 a_share asset") && err.contains("equity_curve_task_id 缺失"),
+            "err={err}"
+        );
+    }
+
+    /// 有 task_id 但 backtest_equity_curve 无匹配区间行 → Err 含 task 与
+    /// 起止日期回显。
+    #[tokio::test]
+    async fn load_dates_empty_range_echoes_task_and_window() {
+        let _guard = DATES_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_scope(&db, "dates").await;
+        let rs = make_rs(
+            None,
+            vec![a_share_asset(Some("zzz_test_mvo11_dates_empty"))],
+        );
+        let err = load_simulation_dates(&db, &rs, date(2026, 3, 2), date(2026, 3, 31))
+            .await
+            .expect_err("空区间应报错");
+        assert!(err.contains("交易日序列为空"), "err={err}");
+        assert!(err.contains("zzz_test_mvo11_dates_empty"), "err={err}");
+        assert!(err.contains("2026-03-02"), "起日回显: err={err}");
+        assert!(err.contains("2026-03-31"), "止日回显: err={err}");
+        cleanup_scope(&db, "dates").await;
+    }
+
+    /// 正常：7 行曲线（start 前 1 行、start/end 边界各 1 行、区间中段 3 行乱序、
+    /// end 后 1 行）→ 返回 5 行升序、闭区间边界含入、task_id 原样返回。
+    #[tokio::test]
+    async fn load_dates_ok_sorted_with_inclusive_bounds() {
+        let _guard = DATES_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_scope(&db, "dates").await;
+        seed_shared_parents(&db).await;
+        let task_id = "zzz_test_mvo11_dates_task1";
+        insert_bt_task(&db, task_id).await;
+        // 乱序插入验证 ORDER BY trade_date 的排序语义
+        insert_curve(
+            &db,
+            task_id,
+            &[
+                (date(2026, 1, 20), "20"),
+                (date(2026, 1, 2), "99"), // start 前，排除
+                (date(2026, 1, 5), "5"),  // == start，闭区间含入
+                (date(2026, 2, 2), "99"), // end 后，排除
+                (date(2026, 1, 6), "6"),
+                (date(2026, 1, 30), "30"), // == end，闭区间含入
+                (date(2026, 1, 12), "12"),
+            ],
+        )
+        .await;
+        let rs = make_rs(None, vec![a_share_asset(Some(task_id))]);
+        let (ret_task, dates) =
+            load_simulation_dates(&db, &rs, date(2026, 1, 5), date(2026, 1, 30))
+                .await
+                .expect("正常区间应 Ok");
+        assert_eq!(ret_task, task_id, "task_id 原样返回");
+        assert_eq!(dates.len(), 5, "闭区间内 5 个交易日: {dates:?}");
+        let expect = vec![
+            date(2026, 1, 5),
+            date(2026, 1, 6),
+            date(2026, 1, 12),
+            date(2026, 1, 20),
+            date(2026, 1, 30),
+        ];
+        assert_eq!(dates, expect, "应升序且含边界日");
+        cleanup_scope(&db, "dates").await;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // preload_csi300_map（连库，close>0 过滤 + 400 天前置窗口边界）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// 造 7 行 000300.SH（close>0 与 <=0 混合 + -400d 边界行 + -401d 界外行 +
+    /// last 后界外行），dates=[首日, 末日] 两天：map 只含 close>0 的 3 行，
+    /// 窗口起点 = 首日-400 天（含）、-401 天不含、末日后不含。
+    #[tokio::test]
+    async fn preload_map_filters_and_window_bounds() {
+        let db = test_db().await;
+        cleanup_csi300_window(&db).await;
+        let first = date(2099, 1, 4);
+        let last = date(2099, 1, 8);
+        let d_minus400 = first - chrono::Duration::days(400);
+        let d_minus401 = d_minus400 - chrono::Duration::days(1);
+        insert_csi300(
+            &db,
+            &[
+                (d_minus401, "9999"), // 窗口前 1 天，排除
+                (d_minus400, "3900"), // == 首日-400d，闭边界含入
+                (first, "4000"),
+                (date(2099, 1, 5), "0"),  // close<=0，过滤
+                (date(2099, 1, 6), "-5"), // close<=0，过滤
+                (last, "4200"),
+                (date(2099, 1, 9), "4500"), // last 后，排除
+            ],
+        )
+        .await;
+        let dates = vec![first, last];
+        let map = preload_csi300_map(&db, &dates)
+            .await
+            .expect("preload 应 Ok");
+        assert_eq!(map.len(), 3, "close>0 且窗口内的 3 行: {map:?}");
+        assert!(map.contains_key(&d_minus400), "-400d 边界行应含入");
+        assert!(!map.contains_key(&d_minus401), "-401d 界外行应排除");
+        assert!(!map.contains_key(&date(2099, 1, 9)), "last 后行应排除");
+        assert!((map[&d_minus400] - 3900.0).abs() < 1e-9);
+        assert!((map[&first] - 4000.0).abs() < 1e-9);
+        assert!((map[&last] - 4200.0).abs() < 1e-9);
+        cleanup_csi300_window(&db).await;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // reset_account_if_needed（连库，false 不触碰 / true 全清归零 / 旁账户不受扰）
+    // ─────────────────────────────────────────────────────────────────
+
+    /// reset=false：账户字段与子表行均不触碰。
+    #[tokio::test]
+    async fn reset_false_leaves_account_and_children_untouched() {
+        let _guard = RESET_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_scope(&db, "reset").await;
+        let acct = "zzz_test_mvo11_reset_a";
+        insert_account_full(
+            &db,
+            acct,
+            Some("zzz_test_mvo11_sv"),
+            "1234567.89",
+            "1500000.12",
+            "1600000.5",
+            "500000.25",
+            "0.1234",
+            "25000.50",
+            77,
+        )
+        .await;
+        insert_snapshot(&db, "zzz_test_mvo11_rst_snap1", acct, date(2026, 1, 6)).await;
+        insert_snapshot(&db, "zzz_test_mvo11_rst_snap2", acct, date(2026, 1, 7)).await;
+        insert_position(&db, "zzz_test_mvo11_rst_pos1", acct, "ZZZ900.SH").await;
+
+        reset_account_if_needed(&db, acct, false, dec("9999999.99"))
+            .await
+            .expect("reset=false 应 Ok");
+
+        let (nav_txt,): (String,) = sqlx::query_as(
+            "SELECT current_nav::text FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(acct)
+        .fetch_one(&db)
+        .await
+        .expect("读回账户");
+        assert_eq!(nav_txt, "1500000.120000", "current_nav 不应被改写");
+        let snaps: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_nav_snapshot WHERE paper_account_id = $1",
+        )
+        .bind(acct)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(snaps, 2, "snapshot 行不应被删");
+        let pos: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM paper_position WHERE paper_account_id = $1")
+                .bind(acct)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(pos, 1, "position 行不应被删");
+        cleanup_scope(&db, "reset").await;
+    }
+
+    /// reset=true：子表 wipe 全空 + 账户行归零（current_nav/peak_nav/cash=
+    /// init_cap、max_drawdown_pct/margin_amount/total_trades=0）；init_cap 用
+    /// 非整数 Decimal 验证 NUMERIC 往返无精度损失。
+    #[tokio::test]
+    async fn reset_true_wipes_children_and_zeroes_account() {
+        let _guard = RESET_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_scope(&db, "reset").await;
+        let acct = "zzz_test_mvo11_reset_a";
+        insert_account_full(
+            &db,
+            acct,
+            Some("zzz_test_mvo11_sv"),
+            "1234567.89",
+            "1500000.12",
+            "1600000.5",
+            "500000.25",
+            "0.1234",
+            "25000.50",
+            77,
+        )
+        .await;
+        insert_snapshot(&db, "zzz_test_mvo11_rst_snap1", acct, date(2026, 1, 6)).await;
+        insert_snapshot(&db, "zzz_test_mvo11_rst_snap2", acct, date(2026, 1, 7)).await;
+        insert_position(&db, "zzz_test_mvo11_rst_pos1", acct, "ZZZ900.SH").await;
+        insert_position(&db, "zzz_test_mvo11_rst_pos2", acct, "ZZZ901.SH").await;
+
+        reset_account_if_needed(&db, acct, true, dec("1234567.89"))
+            .await
+            .expect("reset=true 应 Ok");
+
+        let snaps: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_nav_snapshot WHERE paper_account_id = $1",
+        )
+        .bind(acct)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(snaps, 0, "wipe 后 snapshot 应全空");
+        let pos: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM paper_position WHERE paper_account_id = $1")
+                .bind(acct)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(pos, 0, "wipe 后 position 应全空");
+
+        let (nav_txt, peak_txt, cash_txt, max_dd, margin, trades): (
+            String,
+            String,
+            String,
+            Decimal,
+            Decimal,
+            i32,
+        ) = sqlx::query_as(
+            "SELECT current_nav::text, peak_nav::text, cash::text,
+                    max_drawdown_pct, margin_amount, total_trades
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(acct)
+        .fetch_one(&db)
+        .await
+        .expect("读回归零账户");
+        // 字符串比较证明 NUMERIC(24,6) 往返形态无精度损失
+        assert_eq!(
+            nav_txt, "1234567.890000",
+            "current_nav=init_cap（DB scale 形态）"
+        );
+        assert_eq!(peak_txt, "1234567.890000", "peak_nav=init_cap");
+        assert_eq!(cash_txt, "1234567.890000", "cash=init_cap");
+        assert_eq!(max_dd, dec("0"), "max_drawdown_pct 归零");
+        assert_eq!(margin, dec("0"), "margin_amount 归零");
+        assert_eq!(trades, 0, "total_trades 归零");
+        let nav_dec = dec(&nav_txt);
+        assert_eq!(nav_dec, dec("1234567.89"), "Decimal 数值语义相等（无损失）");
+        cleanup_scope(&db, "reset").await;
+    }
+
+    /// reset=true 只清自己：并行安全证明——B 账户（脏值+子表行）在 A 重置后
+    /// 全部原样。
+    #[tokio::test]
+    async fn reset_true_spares_other_accounts() {
+        let _guard = RESET_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_scope(&db, "reset").await;
+        let a = "zzz_test_mvo11_reset_a";
+        let b = "zzz_test_mvo11_reset_b";
+        for (acct, suffix) in [(a, "a"), (b, "b")] {
+            insert_account_full(
+                &db,
+                acct,
+                Some("zzz_test_mvo11_sv"),
+                "1234567.89",
+                "1500000.12",
+                "1600000.5",
+                "500000.25",
+                "0.1234",
+                "25000.50",
+                77,
+            )
+            .await;
+            insert_snapshot(
+                &db,
+                &format!("zzz_test_mvo11_rst_s_{suffix}"),
+                acct,
+                date(2026, 1, 6),
+            )
+            .await;
+            insert_position(
+                &db,
+                &format!("zzz_test_mvo11_rst_p_{suffix}"),
+                acct,
+                "ZZZ900.SH",
+            )
+            .await;
+        }
+
+        reset_account_if_needed(&db, a, true, dec("1234567.89"))
+            .await
+            .expect("reset A 应 Ok");
+
+        let (nav_txt, trades): (String, i32) = sqlx::query_as(
+            "SELECT current_nav::text, total_trades FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(b)
+        .fetch_one(&db)
+        .await
+        .expect("读回 B 账户");
+        assert_eq!(nav_txt, "1500000.120000", "B 账户 current_nav 不受扰");
+        assert_eq!(trades, 77, "B 账户 total_trades 不受扰");
+        let b_snaps: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM paper_nav_snapshot WHERE paper_account_id = $1",
+        )
+        .bind(b)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(b_snaps, 1, "B 的 snapshot 行不受扰");
+        let b_pos: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM paper_position WHERE paper_account_id = $1")
+                .bind(b)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(b_pos, 1, "B 的 position 行不受扰");
+        cleanup_scope(&db, "reset").await;
     }
 }
