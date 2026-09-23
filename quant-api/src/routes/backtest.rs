@@ -217,6 +217,11 @@ async fn resolve_effective_factor_coverage(
     if !effective_coverage_enabled(policy) {
         return Ok((requested_start, None));
     }
+    // 2026-09-24 修复(夜间 sleeve 同步间歇失败)：请求起点对齐到 ≥它的首个交易日。
+    // today-10 类窗口起点恰落周末时(实测 2026-09-23-10=09-13 周日),非交易日请求
+    // 起点被 Guard 误判为"早于覆盖起点"(覆盖查询从下一交易日 09-14 起算,周日
+    // 本无物化行属正常)。对齐后 Guard/warmup 统一交易日口径。
+    let requested_start = align_to_next_trading_day(db, requested_start).await?;
 
     let mode = parse_effective_coverage_mode(policy.mode.as_deref())?;
     let min_rows = policy.min_rows.unwrap_or(req.top_n.max(1)).max(1);
@@ -286,6 +291,21 @@ async fn resolve_effective_factor_coverage(
             universe_profile: req.universe_profile.clone(),
         }),
     ))
+}
+
+/// 将日期对齐到 ≥它的首个交易日；日历缺失时保持原值（由覆盖查询自身报错兜底，
+/// 不在辅助路径提前拦截）。语义：非交易日不可能是任何因子覆盖/请求的合法起点。
+async fn align_to_next_trading_day(db: &sqlx::PgPool, d: NaiveDate) -> Result<NaiveDate, String> {
+    let aligned: Option<(NaiveDate,)> = sqlx::query_as(
+        "SELECT trade_date FROM market_trade_calendar
+         WHERE exchange = 'SSE' AND is_open = true AND trade_date >= $1
+         ORDER BY trade_date LIMIT 1",
+    )
+    .bind(d)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("align trading day: {e}"))?;
+    Ok(aligned.map(|(t,)| t).unwrap_or(d))
 }
 
 fn effective_factor_coverage_sql(universe_profile: TradableUniverseProfile) -> String {
@@ -5346,7 +5366,10 @@ mod tenth_batch {
         cleanup_scope(&db, scope).await;
         let combo = format!("zzz_test_bt10_{scope}_combo");
         // 2 symbol × 2 天（01-05 / 01-06），available_at = trade_date（PIT 当日可见）
-        for day in [date(2026, 1, 5), date(2026, 1, 6)] {
+        // 任务80 后续修复(2026-09-24)：requested 会对齐到首个交易日——造数与请求
+        // 均用交易日口径(01-05 交易日起请求,覆盖从 01-07 起 → 前移语义在交易日
+        // 口径下成立;非交易日起点对齐行为由专门测试覆盖)
+        for day in [date(2026, 1, 7), date(2026, 1, 8)] {
             insert_mfv(&db, &combo, "ZZZ900.SH", day, Some(day)).await;
             insert_mfv(&db, &combo, "ZZZ901.SH", day, Some(day)).await;
         }
@@ -5358,15 +5381,15 @@ mod tenth_batch {
             }
         }));
         let (start, summary) =
-            resolve_effective_factor_coverage(&db, &req, date(2026, 1, 1), date(2026, 1, 31))
+            resolve_effective_factor_coverage(&db, &req, date(2026, 1, 5), date(2026, 1, 31))
                 .await
                 .expect("adjust_start 必须 Ok");
-        // requested=01-01 早于首个满足 min_rows 的天 → 前移到 01-05
-        assert_eq!(start, date(2026, 1, 5));
+        // requested=01-05(交易日) 早于首个满足 min_rows 的天 → 前移到 01-07
+        assert_eq!(start, date(2026, 1, 7));
         let summary = summary.expect("开启 coverage 必产出 summary");
-        assert_eq!(summary.requested_start_date, date(2026, 1, 1));
-        assert_eq!(summary.effective_start_date, date(2026, 1, 5));
-        assert_eq!(summary.coverage_start_date, date(2026, 1, 5));
+        assert_eq!(summary.requested_start_date, date(2026, 1, 5));
+        assert_eq!(summary.effective_start_date, date(2026, 1, 7));
+        assert_eq!(summary.coverage_start_date, date(2026, 1, 7));
         assert!(summary.adjusted);
         assert_eq!(summary.mode, "adjust_start");
         assert_eq!(summary.min_rows, 2);
@@ -5385,6 +5408,38 @@ mod tenth_batch {
         let scope = "covguard";
         cleanup_scope(&db, scope).await;
         let combo = format!("zzz_test_bt10_{scope}_combo");
+        for day in [date(2026, 1, 7), date(2026, 1, 8)] {
+            insert_mfv(&db, &combo, "ZZZ900.SH", day, Some(day)).await;
+            insert_mfv(&db, &combo, "ZZZ901.SH", day, Some(day)).await;
+        }
+        let req = factor_req(json!({
+            "combo_name": combo,
+            "effective_coverage": {
+                "enabled": true, "mode": "guard_only", "min_rows": 2,
+                "include_rebalance_warmup": false
+            }
+        }));
+        // guard_only 不前移起点，requested(交易日 01-05) 早于 coverage 起点直接拒绝
+        let err = resolve_effective_factor_coverage(&db, &req, date(2026, 1, 5), date(2026, 1, 31))
+            .await
+            .expect_err("guard_only 早起点必须报错");
+        assert!(
+            err.contains("requested start_date 2026-01-05 is before effective factor coverage start 2026-01-07"),
+            "实际错误: {err}"
+        );
+        cleanup_scope(&db, scope).await;
+    }
+
+    /// 2026-09-24 对齐修复专项：非交易日请求起点(元旦 2026-01-01)对齐到首个
+    /// 交易日 01-05——夜间 sleeve 同步 today-10 恰落周末时 Guard 不再误判
+    /// (2026-09-23 22:10 实锤: 09-13 周日请求 vs 09-14 覆盖起点被拒)。
+    #[tokio::test]
+    async fn coverage_non_trading_requested_start_aligns_to_first_trading_day() {
+        let db = test_db().await;
+        let scope = "covalign";
+        cleanup_scope(&db, scope).await;
+        let combo = format!("zzz_test_bt10_{scope}_combo");
+        // 覆盖从首个交易日 01-05 起(真实日历: 2026-01-01~01-04 元旦闭市)
         for day in [date(2026, 1, 5), date(2026, 1, 6)] {
             insert_mfv(&db, &combo, "ZZZ900.SH", day, Some(day)).await;
             insert_mfv(&db, &combo, "ZZZ901.SH", day, Some(day)).await;
@@ -5396,14 +5451,15 @@ mod tenth_batch {
                 "include_rebalance_warmup": false
             }
         }));
-        // guard_only 不前移起点，requested 早于 coverage 起点直接拒绝
-        let err = resolve_effective_factor_coverage(&db, &req, date(2026, 1, 1), date(2026, 1, 31))
-            .await
-            .expect_err("guard_only 早起点必须报错");
-        assert!(
-            err.contains("requested start_date 2026-01-01 is before effective factor coverage start 2026-01-05"),
-            "实际错误: {err}"
-        );
+        // 请求 01-01(闭市) → 对齐 01-05 = 覆盖起点 → Guard 通过(修复前此处报错)
+        let (start, summary) =
+            resolve_effective_factor_coverage(&db, &req, date(2026, 1, 1), date(2026, 1, 31))
+                .await
+                .expect("非交易日起点对齐后 guard 应通过");
+        assert_eq!(start, date(2026, 1, 5), "guard_only 对齐后返回对齐起点");
+        let summary = summary.expect("summary 必产出");
+        assert_eq!(summary.requested_start_date, date(2026, 1, 5));
+        assert_eq!(summary.coverage_start_date, date(2026, 1, 5));
         cleanup_scope(&db, scope).await;
     }
 
