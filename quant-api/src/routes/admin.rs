@@ -487,10 +487,7 @@ pub async fn sync_status(
     let mut combo_all_ok = !pit_combos.is_empty(); // 无 active combo = 配置异常, 直接红
     let mut combo_parts: Vec<String> = Vec::new();
     for name in &pit_combos {
-        let last = combo_rows
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, d)| *d);
+        let last = combo_rows.iter().find(|(n, _)| n == name).map(|(_, d)| *d);
         let gap = admin_gap(today, last);
         if gap > 2 {
             combo_all_ok = false;
@@ -499,7 +496,8 @@ pub async fn sync_status(
         combo_parts.push(format!(
             "{} 最新{}",
             name,
-            last.map(|d| d.to_string()).unwrap_or_else(|| "无物化行".to_string())
+            last.map(|d| d.to_string())
+                .unwrap_or_else(|| "无物化行".to_string())
         ));
     }
     results.push(admin_status_item(
@@ -1120,9 +1118,16 @@ pub async fn repair_sync(
             let mut ok_list: Vec<String> = Vec::new();
             let mut fail_list: Vec<String> = Vec::new();
             for c in &pit_cfgs {
-                let horizon = c.combo_horizon.unwrap_or_else(|| {
-                    crate::routes::strategy_query::combo_horizon_from_name(&c.combo_name)
-                });
+                // 任务80: horizon 配置权威(名字推断退役)——无配置则告警跳过
+                let Some(horizon) = crate::routes::strategy_query::required_combo_horizon(
+                    &state.db,
+                    &c.combo_name,
+                    c.combo_horizon,
+                )
+                .await
+                else {
+                    continue;
+                };
                 let payload = serde_json::json!({
                     "combo_name": c.combo_name,
                     "version": "1.0.0",
@@ -1132,7 +1137,12 @@ pub async fn repair_sync(
                     "include_fundamentals": c.include_fundamentals,
                     "factor_whitelist": c.factor_whitelist,
                 });
-                match reqwest::Client::new().post(&url).json(&payload).send().await {
+                match reqwest::Client::new()
+                    .post(&url)
+                    .json(&payload)
+                    .send()
+                    .await
+                {
                     Ok(_) => ok_list.push(c.combo_name.clone()),
                     Err(e) => fail_list.push(format!("{}: {}", c.combo_name, e)),
                 }

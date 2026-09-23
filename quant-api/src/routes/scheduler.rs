@@ -707,8 +707,9 @@ mod tests {
 /// 不再依赖单一策略（v19）的 etf_symbols，确保多策略并行时所有策略 ETF 都被同步。
 // R6: 策略配置查询函数已迁到 strategy_query.rs，此处 re-export 转发保持调用方零改动。
 pub(crate) use crate::routes::strategy_query::{
-    combo_horizon_from_name, load_active_combo_materialize_configs, load_active_etf_symbols_union,
+    load_active_combo_materialize_configs, load_active_etf_symbols_union,
     load_active_factor_combos, load_first_active_strategy_config, load_strategy_config,
+    required_combo_horizon,
 };
 
 /// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
@@ -914,11 +915,12 @@ pub(crate) async fn dispatch_nightly_signal_prep(db: &PgPool, tushare: &TushareC
             })
             .collect();
         for cfg in &pit_combos {
-            // 显式 combo_horizon 列优先(2026-09-05: 名字推断曾把无 _h{N}
-            // 后缀的 combo 判错 horizon), 与 pit_combo_refresh 同规则。
-            let horizon = cfg
-                .combo_horizon
-                .unwrap_or_else(|| combo_horizon_from_name(&cfg.combo_name));
+            // 任务80: horizon 配置权威(列值→二次查配置→无则告警跳过,名字推断退役)
+            let Some(horizon) =
+                required_combo_horizon(&db2, &cfg.combo_name, cfg.combo_horizon).await
+            else {
+                continue;
+            };
             match crate::routes::factors::materialize_pit_combo_ext(
                 &db2,
                 &crate::routes::factors::PitComboMaterializeParams {
@@ -1080,11 +1082,12 @@ pub(crate) async fn dispatch_pit_combo_refresh(db: &PgPool, params: &serde_json:
         warn!("[scheduler] PIT combo 保鲜：无 active full_pit_icir* combo，跳过");
     }
     for cfg in &pit_combos {
-        // 显式 combo_horizon 列优先（2026-09-05：indneutral_val_v1 名字无
-        // _h{N} 后缀曾被推断为 1，而实际物化口径是 20——三段拼接根源）
-        let horizon = cfg
-            .combo_horizon
-            .unwrap_or_else(|| combo_horizon_from_name(&cfg.combo_name));
+        // 任务80: horizon 配置权威(列值→二次查配置→无则告警跳过,名字推断退役;
+        // 2026-09-05 indneutral 曾被推断 1 而实际口径 20——三段拼接根源)
+        let Some(horizon) = required_combo_horizon(db, &cfg.combo_name, cfg.combo_horizon).await
+        else {
+            continue;
+        };
         info!(
                     "[scheduler] PIT combo 保鲜: combo={} horizon={} include_fund={} whitelist={} 区间 {}~{}",
                     cfg.combo_name, horizon, cfg.include_fundamentals,
@@ -1854,7 +1857,10 @@ async fn run_tick(
                         &crate::routes::factors::PitComboMaterializeParams {
                             combo_name: &combo,
                             factor_version: "1.0.0",
-                            horizon: horizon_col.unwrap_or_else(|| combo_horizon_from_name(&combo)),
+                            horizon: match required_combo_horizon(db, &combo, horizon_col).await {
+                                Some(h) => h,
+                                None => continue,
+                            },
                             start_date: sync_date - chrono::Duration::days(7),
                             end_date: sync_date,
                             include_fundamentals: inc_fund,
@@ -2276,11 +2282,15 @@ pub async fn validate_pre_trade_data(
                     .map(|r| r.status().is_success())
                     .unwrap_or(false)
             } else {
+                // 任务80: 盘前兜底链同样配置权威——无配置行则告警跳过
+                let Some(bh) = required_combo_horizon(db, &factor_combo, None).await else {
+                    continue;
+                };
                 match crate::routes::factors::materialize_pit_combo(
                     db,
                     &factor_combo,
                     "1.0.0",
-                    combo_horizon_from_name(&factor_combo),
+                    bh,
                     materialize_start,
                     today,
                 )
@@ -4408,15 +4418,11 @@ mod twelfth_batch {
             .find(|c| c.combo_name == "full_pit_icir_zzz_test_sch12_h3")
             .expect("zzz combo 配置应被读取");
         assert_eq!(zzz.combo_horizon, Some(7), "显式列值: {zzz:?}");
-        assert_eq!(
-            combo_horizon_from_name("full_pit_icir_zzz_test_sch12_h3"),
-            3,
-            "名字推断 _h3 → 3"
-        );
-        let assembled = zzz
-            .combo_horizon
-            .unwrap_or_else(|| combo_horizon_from_name(&zzz.combo_name));
-        assert_eq!(assembled, 7, "列值必须压过名字推断(dispatch 同款仲裁)");
+        // 任务80: 名字推断退役, required_combo_horizon 是唯一组装路径
+        let assembled = required_combo_horizon(&db, &zzz.combo_name, zzz.combo_horizon)
+            .await
+            .expect("列值 Some(7) 应直接透传");
+        assert_eq!(assembled, 7, "配置权威: 列值即生效值(dispatch 同款路径)");
 
         // 生产 combo 的组装结果(现网真实生效口径)
         let ind = configs
@@ -4436,11 +4442,10 @@ mod twelfth_batch {
             f37.combo_horizon.is_some() && f37.combo_horizon == Some(20),
             "37f 显式列=20(任务79c 双修后现网配置): {f37:?}"
         );
-        assert_eq!(
-            combo_horizon_from_name("full_pit_icir_37f_h20_fund_v2"),
-            20,
-            "任务79c: 前导数字解析修复后, 名字推断与列值/命名意图三口径一致"
-        );
+        let h37 = required_combo_horizon(&db, "full_pit_icir_37f_h20_fund_v2", f37.combo_horizon)
+            .await
+            .expect("配置权威路径应返回列值");
+        assert_eq!(h37, 20, "任务80: 配置权威——列值 20 即生效口径");
         cleanup_sch12_strategy_rows(&db).await;
     }
 
