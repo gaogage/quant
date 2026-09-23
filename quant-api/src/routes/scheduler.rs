@@ -706,6 +706,507 @@ pub(crate) use crate::routes::strategy_query::{
     load_active_factor_combos, load_first_active_strategy_config, load_strategy_config,
 };
 
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_data_quality_check(db: &PgPool) {
+    // 手动触发口径: 调用者意图是"现在检查", 因子基准取 T 日(最严格)。
+    // 若在回填前时段手动触发而想看回填前状态, 误报可由告警文案"基准T日"自明。
+    crate::routes::data_quality::run_data_quality_check(
+        db,
+        crate::routes::data_quality::FactorFreshnessBaseline::LatestTradeDate,
+    )
+    .await;
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_equity_curve_update(db: &PgPool) {
+    // 自动同步所有活跃账号关联策略的权益曲线(combo 去重)。
+    // 消除硬编码 v19:v21/v21_lev/v23 等策略都会被同步。
+    // 异步 spawn 不阻塞 scheduler tick(sleeve 回测全量重跑 ~75s/个,串行会卡 run_tick)。
+    // 每日工作日 17:00 触发(原月度,v23 月中创建后 sleeve 滞后到下月才同步→门禁拦截)。
+    let db_clone = db.clone();
+    tokio::spawn(async move {
+        let results =
+            crate::routes::equity_curve_sync::sync_active_strategies_equity_curves(&db_clone).await;
+        for r in &results {
+            if r.status == "success" {
+                info!(
+                    "[scheduler] 权益曲线同步成功: {} task_id={:?} 更新策略 {:?}",
+                    r.strategy_id, r.task_id, r.updated_strategy_ids
+                );
+            } else {
+                warn!(
+                    "[scheduler] 权益曲线同步失败: {} err={:?}",
+                    r.strategy_id, r.error
+                );
+            }
+        }
+    });
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_mvo_equity_curve_update(db: &PgPool, params: &serde_json::Value) {
+    // 每日 21:00(EOD 数据全就绪后)重跑 MVO 动态后复权无成本基准曲线。
+    // 策略参数不变则历史段幂等覆盖、追加最新交易日。全周期重跑 ~分钟级,spawn 不阻塞 tick。
+    let strategy_id = params
+        .get("strategy_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("v24")
+        .to_string();
+    let benchmark_account_id = params
+        .get("benchmark_account_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pa-v24-mvo-bench")
+        .to_string();
+    let start_date = params
+        .get("start_date")
+        .and_then(|v| v.as_str())
+        .unwrap_or("20160104")
+        .to_string();
+    let end_date = chrono::Local::now()
+        .date_naive()
+        .format("%Y%m%d")
+        .to_string();
+    let leverage_multiplier = params
+        .get("leverage_multiplier")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0);
+    let db_clone = db.clone();
+    tokio::spawn(async move {
+        let req = crate::routes::historical_replay::MvoBenchmarkRequest {
+            strategy_id,
+            benchmark_account_id,
+            start_date,
+            end_date,
+            leverage_multiplier,
+        };
+        match crate::routes::historical_replay::run_mvo_benchmark_sync(&db_clone, req).await {
+            Ok(d) => info!("[scheduler] MVO 基准曲线同步成功: {}", d),
+            Err(e) => warn!("[scheduler] MVO 基准曲线同步失败: {}", e),
+        }
+    });
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_factor_backfill(db: &PgPool) {
+    // v24 因子全量回填:覆盖所有 active 策略依赖的全部因子类别
+    // （量价/财务/资金流/分析师/回购/大宗/流动性/市场风险）。
+    // 幂等刷新 BACKFILL_WINDOW_DAYS 窗口，保证盘中调仓依赖的 factor_value/multi_factor_value 新鲜。
+    // 可被 check_task_dependency_order 检查、可手动触发、可配 CRON。
+    let today = chrono::Local::now().date_naive();
+    let last_trade_date: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+        "SELECT trade_date FROM market_trade_calendar
+                 WHERE is_open = true AND trade_date <= $1
+                 ORDER BY trade_date DESC LIMIT 1",
+    )
+    .bind(today)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    let Some((sync_date,)) = last_trade_date else {
+        warn!("[scheduler] factor_backfill: 无交易日历数据,跳过");
+        return;
+    };
+    let sync_date_str = sync_date.format("%Y%m%d").to_string();
+    let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS)
+        .format("%Y%m%d")
+        .to_string();
+    trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_nightly_signal_prep(db: &PgPool, tushare: &TushareClient) {
+    // 夜间信号预备链(2026-09-11; 任务73 2026-09-22 前移 21:45,原 22:10):
+    // 独立触发不等 EOD 主链(主链被 forecast 拖到 00:00 的历史教训)。
+    // bar 前置: EOD 主链 21:30 起跑,日线步骤 21:31 入库即满足。
+    // 链: phase7 因子回补(正常 ~25m) → PIT 物化增量 → sleeve 曲线更新
+    //      → fund_nav 净值增量(2026-09-17, ETF 溢价门禁数据源)
+    //      → 收尾质量检查(T日基准, 任务71 2026-09-21)。
+    // 预计 22:55 完成,为 23:00 信号生成(任务73 倒挂修复:原 23:30 导出晚于
+    // 预备链最坏 23:45)与日终通知留窗。幂等,失败告警。
+    // 任务71 依赖编排修正: 回补由 fire-and-forget 改为等待终态后再物化
+    // (原实现在回填完成前物化, T 日 combo 行由 T-1 因子合成, 信号截面
+    // 静默滞后一交易日——multi_factor_value created_at 实锤)。
+    let db2 = db.clone();
+    let tushare2 = tushare.clone();
+    let date = chrono::Local::now().date_naive();
+    tokio::spawn(async move {
+        let t0 = std::time::Instant::now();
+        let sd = (date - chrono::Duration::days(190))
+            .format("%Y%m%d")
+            .to_string();
+        let ed = date.format("%Y%m%d").to_string();
+        let trigger_started = chrono::Utc::now();
+        trigger_v24_backfill_routes(&db2, &sd, &ed).await;
+        // 受理→任务行落库毫秒级, 但防末条路由尚未落库时 COUNT=0 提前返回
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        // 超时上限 60m(21:45+60m=22:45, 任务73 由 95m 收紧): 正常 25m 内
+        // 完成; 超时继续走物化, 信号侧物化新鲜度门禁拒发残缺截面(宁缺毋假),
+        // 且为 23:00 信号导出留 15m 缓冲(倒挂修复的一部分)。
+        wait_for_factor_backfill(
+            &db2,
+            trigger_started,
+            std::time::Duration::from_secs(60 * 60),
+        )
+        .await;
+        info!(
+            "[夜间预备] phase7 因子回补完成 累计{}s",
+            t0.elapsed().as_secs()
+        );
+        let wl: Option<Vec<String>> = sqlx::query_scalar(
+                    "SELECT factor_whitelist FROM strategy_config WHERE strategy_id='v24' AND status='active'",
+                )
+                .fetch_optional(&db2)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v: serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()));
+        let ind_neut: bool = sqlx::query_scalar(
+                    "SELECT ind_neutral FROM combo_materialization_log WHERE combo_name='full_pit_icir_indneutral_val_v1' ORDER BY materialized_at DESC LIMIT 1",
+                )
+                .fetch_optional(&db2)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+        match crate::routes::factors::materialize_pit_combo_ext(
+            &db2,
+            &crate::routes::factors::PitComboMaterializeParams {
+                combo_name: "full_pit_icir_indneutral_val_v1",
+                factor_version: "1.0.0",
+                horizon: 20,
+                start_date: date - chrono::Duration::days(120),
+                end_date: date,
+                include_fundamentals: true,
+                min_abs_ic_ir: None,
+                factor_whitelist: wl.as_deref(),
+                ind_neutral: ind_neut,
+            },
+        )
+        .await
+        {
+            Ok(rows) => info!(
+                "[夜间预备] PIT 物化 {} 行 累计{}s",
+                rows,
+                t0.elapsed().as_secs()
+            ),
+            Err(e) => {
+                error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e);
+            }
+        }
+        // 任务77(2026-09-23): nightly 链物化此前只覆盖 indneutral_val_v1,
+        // 生产信号 combo(37f_h20_fund_v2 等)仅靠早间 09:30 档保鲜——
+        // 新鲜度门禁首夜即拦截(早间截面由 T-1 因子合成, 行写入早于夜间
+        // 回填完成, 且早间截面行数不完整 3893/5573)。此处追加遍历其余
+        // active full_pit_icir* combo 的夜间物化(与 pit_combo_refresh
+        // 同口径, 120d 增量窗口), 早间 09:30 档降级为兜底。
+        let pit_combos: Vec<_> = load_active_combo_materialize_configs(&db2)
+            .await
+            .into_iter()
+            .filter(|c| {
+                c.combo_name.starts_with("full_pit_icir")
+                    && c.combo_name != "full_pit_icir_indneutral_val_v1" // 前段已专门物化(ind_neutral 自举参数特殊)
+            })
+            .collect();
+        for cfg in &pit_combos {
+            // 显式 combo_horizon 列优先(2026-09-05: 名字推断曾把无 _h{N}
+            // 后缀的 combo 判错 horizon), 与 pit_combo_refresh 同规则。
+            let horizon = cfg
+                .combo_horizon
+                .unwrap_or_else(|| combo_horizon_from_name(&cfg.combo_name));
+            match crate::routes::factors::materialize_pit_combo_ext(
+                &db2,
+                &crate::routes::factors::PitComboMaterializeParams {
+                    combo_name: &cfg.combo_name,
+                    factor_version: "1.0.0",
+                    horizon,
+                    start_date: date - chrono::Duration::days(120),
+                    end_date: date,
+                    include_fundamentals: cfg.include_fundamentals,
+                    min_abs_ic_ir: None,
+                    factor_whitelist: cfg.factor_whitelist.as_deref(),
+                    // scheduler 夜间物化不做行业中性化(与保鲜档同规则)
+                    ind_neutral: false,
+                },
+            )
+            .await
+            {
+                Ok(rows) => info!(
+                    "[夜间预备] PIT combo {} 夜间物化 {} 行 累计{}s",
+                    cfg.combo_name,
+                    rows,
+                    t0.elapsed().as_secs()
+                ),
+                Err(e) => warn!(
+                    "[夜间预备] PIT combo {} 夜间物化失败(次日9:30档兜底): {}",
+                    cfg.combo_name, e
+                ),
+            }
+        }
+        // 2026-09-18: 原写法 `results => for r in results` 实为迭代
+        // Result<SyncResult,String> —— Err 分支零次迭代被静默吞掉,
+        // 曲线同步异常时只打"更新完成"。改为显式三分支。
+        match crate::routes::equity_curve_sync::sync_strategy_equity_curve(
+            &db2,
+            "v24",
+            date - chrono::Duration::days(10),
+            date,
+            false,
+        )
+        .await
+        {
+            Ok(r) if r.status != "success" => {
+                warn!(
+                    "[夜间预备] 曲线同步未成功 {} {}: {:?}",
+                    r.strategy_id, r.status, r.error
+                );
+            }
+            Ok(_) => {}
+            Err(e) => warn!("[夜间预备] 曲线同步异常: {}", e),
+        }
+        info!(
+            "[夜间预备] sleeve 曲线更新完成 累计{}s",
+            t0.elapsed().as_secs()
+        );
+        // 基金净值增量(2026-09-17, ETF 溢价门禁数据源): 每标的增量秒级完成。
+        // 门禁对缺数据降级放行, 此处失败不阻断 23:30 信号(告警留痕)。
+        let etf_syms = load_active_etf_symbols_union(&db2).await;
+        match quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await {
+            Ok(n) => info!(
+                "[夜间预备] fund_nav 净值同步 {} 行 累计{}s",
+                n,
+                t0.elapsed().as_secs()
+            ),
+            Err(e) => warn!("[夜间预备] fund_nav 净值同步失败(门禁将降级放行): {}", e),
+        }
+        match quant_data::sync::sync_fund_div(&db2, &tushare2, &etf_syms).await {
+            Ok(n) => info!(
+                "[夜间预备] fund_div 分红同步 {} 条 累计{}s",
+                n,
+                t0.elapsed().as_secs()
+            ),
+            Err(e) => warn!("[夜间预备] fund_div 分红同步失败(ETF分红不入账): {}", e),
+        }
+        // 收尾哨兵(任务71): 因子回填+物化后的全量质量检查, T日基准——
+        // 22:01 EOD 尾那次是 T-1 基准(回填前时点), 真正的"信号前哨兵"
+        // 在这里: 真滞缓在此报出, 23:30 信号前留人工处置窗。
+        crate::routes::data_quality::run_data_quality_check(
+            &db2,
+            crate::routes::data_quality::FactorFreshnessBaseline::LatestTradeDate,
+        )
+        .await;
+        info!(
+            "[夜间预备] 链收尾质量检查完成(T日基准) 累计{}s",
+            t0.elapsed().as_secs()
+        );
+    });
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_ptrade_signal_export(
+    db: &PgPool,
+    tushare: &TushareClient,
+    params: &serde_json::Value,
+) {
+    // PTrade 实盘信号生成(2026-09-11, B1' 文件桥): 23:30 触发。
+    // 门禁→run-factor 截面→目标权重(与本文件模拟盘同源组件)→JSON→scp 推送。
+    // 依赖夜间预备链(22:10)的因子/物化/曲线在 23:20 前就绪。
+    // 详见 signal_export.rs 与 docs/projects/quant/PTrade实盘对接设计方案.md §5。
+    let db2 = db.clone();
+    let tushare2 = tushare.clone();
+    let params2 = params.clone();
+    tokio::spawn(async move {
+        // 溢价门禁净值兜底(2026-09-17): 22:10 链失败/EOD 拖延时补拉,
+        // 增量幂等秒级; 再失败则门禁降级放行(signal_export 内置)。
+        let etf_syms = load_active_etf_symbols_union(&db2).await;
+        if let Err(e) = quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await {
+            warn!("[PTrade信号] fund_nav 兜底同步失败(门禁降级放行): {}", e);
+        }
+        if let Err(e) = quant_data::sync::sync_fund_div(&db2, &tushare2, &etf_syms).await {
+            warn!("[PTrade信号] fund_div 兜底同步失败: {}", e);
+        }
+        crate::routes::signal_export::run_ptrade_signal_export(&db2, &params2).await;
+    });
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_ptrade_report_fetch(db: &PgPool) {
+    // PTrade 实盘回报抓取(2026-09-11, B1' 回报回流链): 16:30 触发。
+    // IMAP 拉当日 exec/heartbeat 邮件 → ptrade_execution_report 入库 → 钉钉日报。
+    // 心跳缺失告警(区分"无交易"与"策略挂了/通道故障")。见 ptrade_report.rs。
+    let db2 = db.clone();
+    tokio::spawn(async move {
+        crate::routes::ptrade_report::run_ptrade_report_fetch(&db2).await;
+    });
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_native_pv_increment(db: &PgPool) {
+    // quant-factor 原生量价 7 因子夜间增量(2026-09-16 治本): 23:00 触发。
+    // mom_5d/vol_20d/turn_20d/mom_20d/rsi_14d/amp_5d/bb_pos_20d 不在 phase7
+    // 回填体系内, 历史 5-12/7-15/9-05 三次断供全靠手动测试补数。此任务分批
+    // 增量计算(口径与 pv_std_backfill_2605 一致), 见 factors/native_pv.rs。
+    let db2 = db.clone();
+    tokio::spawn(async move {
+        crate::routes::factors::run_native_pv_increment(&db2).await;
+    });
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_pit_combo_refresh(db: &PgPool, params: &serde_json::Value) {
+    // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
+    // 防止随交易日推移 combo 分数过时。依赖：因子已重算 + 滚动 IC 已评估。
+    // 遍历所有 active 策略声明的 PIT combo（含 h1/h20），每个用 combo_name 推断的 horizon。
+    // 模拟实盘盘中调仓依赖：所有激活账号策略用到的 combo 都需每日刷新到最新交易日。
+    // phase7_price_volume_expanded_v1 等 non-ICIR combo 不走此路径（由 phase7 backfill 路由处理）。
+    let ver = params
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0.0");
+    // 增量区间：默认最近一年（覆盖当前+上季度，幂等刷新）
+    let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
+    let refresh_end = chrono::Utc::now().date_naive();
+    let pit_combos: Vec<_> = load_active_combo_materialize_configs(db)
+        .await
+        .into_iter()
+        .filter(|c| c.combo_name.starts_with("full_pit_icir"))
+        .collect();
+    if pit_combos.is_empty() {
+        warn!("[scheduler] PIT combo 保鲜：无 active full_pit_icir* combo，跳过");
+    }
+    for cfg in &pit_combos {
+        // 显式 combo_horizon 列优先（2026-09-05：indneutral_val_v1 名字无
+        // _h{N} 后缀曾被推断为 1，而实际物化口径是 20——三段拼接根源）
+        let horizon = cfg
+            .combo_horizon
+            .unwrap_or_else(|| combo_horizon_from_name(&cfg.combo_name));
+        info!(
+                    "[scheduler] PIT combo 保鲜: combo={} horizon={} include_fund={} whitelist={} 区间 {}~{}",
+                    cfg.combo_name, horizon, cfg.include_fundamentals,
+                    cfg.factor_whitelist.as_ref().map(|w| w.len()).unwrap_or(0), refresh_start, refresh_end
+                );
+        // 含基本面因子的 combo(如 v24 fund_v2)用 ext + include_fundamentals + factor_whitelist,
+        // 否则用默认黑名单物化会丢失 fin_/mf_/north_ 因子。
+        match crate::routes::factors::materialize_pit_combo_ext(
+            db,
+            &crate::routes::factors::PitComboMaterializeParams {
+                combo_name: &cfg.combo_name,
+                factor_version: ver,
+                horizon,
+                start_date: refresh_start,
+                end_date: refresh_end,
+                include_fundamentals: cfg.include_fundamentals,
+                // min_abs_ic_ir: 保鲜不加阈值(白名单已筛)
+                min_abs_ic_ir: None,
+                factor_whitelist: cfg.factor_whitelist.as_deref(),
+                // ind_neutral: scheduler 保鲜不做行业中性化(仅手动物化新 combo 时启用)
+                ind_neutral: false,
+            },
+        )
+        .await
+        {
+            Ok(rows) => info!(
+                "[scheduler] PIT combo {} 保鲜完成: {} 行",
+                cfg.combo_name, rows
+            ),
+            Err(e) => warn!("[scheduler] PIT combo {} 保鲜失败: {}", cfg.combo_name, e),
+        }
+    }
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_rolling_pit_eval(params: &serde_json::Value) {
+    // rolling PIT IC 评估调度化（2026-09-21，rolling IC 专项发现 A 修复）：
+    // factor_evaluation 此前无任何定时调用者，rolling 权重曾冻结 2.5 个月
+    // （2026-06-30 后停更，与 sync_fund_adj 缺调度同构——能力存在但无人调用）。
+    // IC 评估是 PIT combo 物化前置（ICIR 权重按 as-of 前最新评估），停更 =
+    // combo 权重对新市场结构停止适应。建议 cron 排非交易日（周六晨）。
+    // 走 background 路由异步执行不阻塞调度循环；horizon 20/60 各提交一遍
+    // （factor_evaluation 现存这两个 horizon 的评估序列）。
+    let api_base = self_api_base();
+    let client = reqwest::Client::new();
+    let end = chrono::Utc::now().date_naive();
+    let lookback = params
+        .get("lookback_days")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(370);
+    let start = end - chrono::Duration::days(lookback);
+    for horizon in [20i16, 60i16] {
+        let payload = serde_json::json!({
+            "start_date": start.format("%Y%m%d").to_string(),
+            "end_date": end.format("%Y%m%d").to_string(),
+            "horizon": horizon,
+        });
+        match client
+            .post(format!(
+                "{}/api/v1/quant/factors/evaluate-rolling-pit/background",
+                api_base
+            ))
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                info!(
+                    "[scheduler] rolling PIT IC 评估任务已提交(horizon={} 区间 {}~{}): {}",
+                    horizon,
+                    start,
+                    end,
+                    resp.status()
+                )
+            }
+            Err(e) => warn!(
+                "[scheduler] rolling PIT IC 评估任务提交失败(horizon={}): {}",
+                horizon, e
+            ),
+        }
+    }
+}
+
+/// 调度分派臂（任务79 从 run_scheduled_tasks 拆出，语义等价搬运）。
+pub(crate) async fn dispatch_market_level_source_freshness(
+    db: &PgPool,
+    params: &serde_json::Value,
+) {
+    let today = chrono::Utc::now().date_naive();
+    let api_base = self_api_base();
+    let client = reqwest::Client::new();
+    for source in market_level_freshness_sources(params) {
+        let latest = latest_market_level_trade_date(db, &source).await;
+        let Some(payload) = market_level_freshness_sync_payload(&source, latest, today) else {
+            warn!("[scheduler] P3.15 市场级源不支持自动同步: {}", source);
+            continue;
+        };
+        info!(
+            "[scheduler] P3.15 市场级源保鲜: source={} latest={:?}",
+            source, latest
+        );
+        match client
+            .post(format!("{}/api/v1/quant/data/sync-tasks", api_base))
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(result) => info!(
+                    "[scheduler] P3.15 市场级源同步任务返回: source={} result={}",
+                    source, result
+                ),
+                Err(error) => warn!(
+                    "[scheduler] P3.15 市场级源同步响应解析失败: source={} error={}",
+                    source, error
+                ),
+            },
+            Err(error) => warn!(
+                "[scheduler] P3.15 市场级源同步任务提交失败: source={} error={}",
+                source, error
+            ),
+        }
+    }
+}
+
 async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
     let now = chrono::Local::now();
     let tasks: Vec<(String, String, String, serde_json::Value)> = sqlx::query_as(
@@ -730,484 +1231,18 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
         // factor_evaluation 零新增（与 PIT 保鲜静默空转同一类缺陷）。
         let mut unhandled_task_type = false;
         match task_type.as_str() {
-            "data_quality_check" => {
-                // 手动触发口径: 调用者意图是"现在检查", 因子基准取 T 日(最严格)。
-                // 若在回填前时段手动触发而想看回填前状态, 误报可由告警文案"基准T日"自明。
-                crate::routes::data_quality::run_data_quality_check(
-                    db,
-                    crate::routes::data_quality::FactorFreshnessBaseline::LatestTradeDate,
-                )
-                .await;
-            }
-            "equity_curve_update" => {
-                // 自动同步所有活跃账号关联策略的权益曲线(combo 去重)。
-                // 消除硬编码 v19:v21/v21_lev/v23 等策略都会被同步。
-                // 异步 spawn 不阻塞 scheduler tick(sleeve 回测全量重跑 ~75s/个,串行会卡 run_tick)。
-                // 每日工作日 17:00 触发(原月度,v23 月中创建后 sleeve 滞后到下月才同步→门禁拦截)。
-                let db_clone = db.clone();
-                tokio::spawn(async move {
-                    let results =
-                        crate::routes::equity_curve_sync::sync_active_strategies_equity_curves(
-                            &db_clone,
-                        )
-                        .await;
-                    for r in &results {
-                        if r.status == "success" {
-                            info!(
-                                "[scheduler] 权益曲线同步成功: {} task_id={:?} 更新策略 {:?}",
-                                r.strategy_id, r.task_id, r.updated_strategy_ids
-                            );
-                        } else {
-                            warn!(
-                                "[scheduler] 权益曲线同步失败: {} err={:?}",
-                                r.strategy_id, r.error
-                            );
-                        }
-                    }
-                });
-            }
-            "mvo_equity_curve_update" => {
-                // 每日 21:00(EOD 数据全就绪后)重跑 MVO 动态后复权无成本基准曲线。
-                // 策略参数不变则历史段幂等覆盖、追加最新交易日。全周期重跑 ~分钟级,spawn 不阻塞 tick。
-                let strategy_id = params
-                    .get("strategy_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("v24")
-                    .to_string();
-                let benchmark_account_id = params
-                    .get("benchmark_account_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("pa-v24-mvo-bench")
-                    .to_string();
-                let start_date = params
-                    .get("start_date")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("20160104")
-                    .to_string();
-                let end_date = chrono::Local::now()
-                    .date_naive()
-                    .format("%Y%m%d")
-                    .to_string();
-                let leverage_multiplier = params
-                    .get("leverage_multiplier")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(1.0);
-                let db_clone = db.clone();
-                tokio::spawn(async move {
-                    let req = crate::routes::historical_replay::MvoBenchmarkRequest {
-                        strategy_id,
-                        benchmark_account_id,
-                        start_date,
-                        end_date,
-                        leverage_multiplier,
-                    };
-                    match crate::routes::historical_replay::run_mvo_benchmark_sync(&db_clone, req)
-                        .await
-                    {
-                        Ok(d) => info!("[scheduler] MVO 基准曲线同步成功: {}", d),
-                        Err(e) => warn!("[scheduler] MVO 基准曲线同步失败: {}", e),
-                    }
-                });
-            }
-            "factor_backfill" => {
-                // v24 因子全量回填:覆盖所有 active 策略依赖的全部因子类别
-                // （量价/财务/资金流/分析师/回购/大宗/流动性/市场风险）。
-                // 幂等刷新 BACKFILL_WINDOW_DAYS 窗口，保证盘中调仓依赖的 factor_value/multi_factor_value 新鲜。
-                // 可被 check_task_dependency_order 检查、可手动触发、可配 CRON。
-                let today = chrono::Local::now().date_naive();
-                let last_trade_date: Option<(chrono::NaiveDate,)> = sqlx::query_as(
-                    "SELECT trade_date FROM market_trade_calendar
-                     WHERE is_open = true AND trade_date <= $1
-                     ORDER BY trade_date DESC LIMIT 1",
-                )
-                .bind(today)
-                .fetch_optional(db)
-                .await
-                .ok()
-                .flatten();
-                let Some((sync_date,)) = last_trade_date else {
-                    warn!("[scheduler] factor_backfill: 无交易日历数据,跳过");
-                    continue;
-                };
-                let sync_date_str = sync_date.format("%Y%m%d").to_string();
-                let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS)
-                    .format("%Y%m%d")
-                    .to_string();
-                trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
-            }
-            "nightly_signal_prep" => {
-                // 夜间信号预备链(2026-09-11; 任务73 2026-09-22 前移 21:45,原 22:10):
-                // 独立触发不等 EOD 主链(主链被 forecast 拖到 00:00 的历史教训)。
-                // bar 前置: EOD 主链 21:30 起跑,日线步骤 21:31 入库即满足。
-                // 链: phase7 因子回补(正常 ~25m) → PIT 物化增量 → sleeve 曲线更新
-                //      → fund_nav 净值增量(2026-09-17, ETF 溢价门禁数据源)
-                //      → 收尾质量检查(T日基准, 任务71 2026-09-21)。
-                // 预计 22:55 完成,为 23:00 信号生成(任务73 倒挂修复:原 23:30 导出晚于
-                // 预备链最坏 23:45)与日终通知留窗。幂等,失败告警。
-                // 任务71 依赖编排修正: 回补由 fire-and-forget 改为等待终态后再物化
-                // (原实现在回填完成前物化, T 日 combo 行由 T-1 因子合成, 信号截面
-                // 静默滞后一交易日——multi_factor_value created_at 实锤)。
-                let db2 = db.clone();
-                let tushare2 = tushare.clone();
-                let date = chrono::Local::now().date_naive();
-                tokio::spawn(async move {
-                    let t0 = std::time::Instant::now();
-                    let sd = (date - chrono::Duration::days(190))
-                        .format("%Y%m%d")
-                        .to_string();
-                    let ed = date.format("%Y%m%d").to_string();
-                    let trigger_started = chrono::Utc::now();
-                    trigger_v24_backfill_routes(&db2, &sd, &ed).await;
-                    // 受理→任务行落库毫秒级, 但防末条路由尚未落库时 COUNT=0 提前返回
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    // 超时上限 60m(21:45+60m=22:45, 任务73 由 95m 收紧): 正常 25m 内
-                    // 完成; 超时继续走物化, 信号侧物化新鲜度门禁拒发残缺截面(宁缺毋假),
-                    // 且为 23:00 信号导出留 15m 缓冲(倒挂修复的一部分)。
-                    wait_for_factor_backfill(
-                        &db2,
-                        trigger_started,
-                        std::time::Duration::from_secs(60 * 60),
-                    )
-                    .await;
-                    info!(
-                        "[夜间预备] phase7 因子回补完成 累计{}s",
-                        t0.elapsed().as_secs()
-                    );
-                    let wl: Option<Vec<String>> = sqlx::query_scalar(
-                        "SELECT factor_whitelist FROM strategy_config WHERE strategy_id='v24' AND status='active'",
-                    )
-                    .fetch_optional(&db2)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|v: serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()));
-                    let ind_neut: bool = sqlx::query_scalar(
-                        "SELECT ind_neutral FROM combo_materialization_log WHERE combo_name='full_pit_icir_indneutral_val_v1' ORDER BY materialized_at DESC LIMIT 1",
-                    )
-                    .fetch_optional(&db2)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or(false);
-                    match crate::routes::factors::materialize_pit_combo_ext(
-                        &db2,
-                        &crate::routes::factors::PitComboMaterializeParams {
-                            combo_name: "full_pit_icir_indneutral_val_v1",
-                            factor_version: "1.0.0",
-                            horizon: 20,
-                            start_date: date - chrono::Duration::days(120),
-                            end_date: date,
-                            include_fundamentals: true,
-                            min_abs_ic_ir: None,
-                            factor_whitelist: wl.as_deref(),
-                            ind_neutral: ind_neut,
-                        },
-                    )
-                    .await
-                    {
-                        Ok(rows) => info!(
-                            "[夜间预备] PIT 物化 {} 行 累计{}s",
-                            rows,
-                            t0.elapsed().as_secs()
-                        ),
-                        Err(e) => {
-                            error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e);
-                        }
-                    }
-                    // 任务77(2026-09-23): nightly 链物化此前只覆盖 indneutral_val_v1,
-                    // 生产信号 combo(37f_h20_fund_v2 等)仅靠早间 09:30 档保鲜——
-                    // 新鲜度门禁首夜即拦截(早间截面由 T-1 因子合成, 行写入早于夜间
-                    // 回填完成, 且早间截面行数不完整 3893/5573)。此处追加遍历其余
-                    // active full_pit_icir* combo 的夜间物化(与 pit_combo_refresh
-                    // 同口径, 120d 增量窗口), 早间 09:30 档降级为兜底。
-                    let pit_combos: Vec<_> = load_active_combo_materialize_configs(&db2)
-                        .await
-                        .into_iter()
-                        .filter(|c| {
-                            c.combo_name.starts_with("full_pit_icir")
-                                && c.combo_name != "full_pit_icir_indneutral_val_v1" // 前段已专门物化(ind_neutral 自举参数特殊)
-                        })
-                        .collect();
-                    for cfg in &pit_combos {
-                        // 显式 combo_horizon 列优先(2026-09-05: 名字推断曾把无 _h{N}
-                        // 后缀的 combo 判错 horizon), 与 pit_combo_refresh 同规则。
-                        let horizon = cfg
-                            .combo_horizon
-                            .unwrap_or_else(|| combo_horizon_from_name(&cfg.combo_name));
-                        match crate::routes::factors::materialize_pit_combo_ext(
-                            &db2,
-                            &crate::routes::factors::PitComboMaterializeParams {
-                                combo_name: &cfg.combo_name,
-                                factor_version: "1.0.0",
-                                horizon,
-                                start_date: date - chrono::Duration::days(120),
-                                end_date: date,
-                                include_fundamentals: cfg.include_fundamentals,
-                                min_abs_ic_ir: None,
-                                factor_whitelist: cfg.factor_whitelist.as_deref(),
-                                // scheduler 夜间物化不做行业中性化(与保鲜档同规则)
-                                ind_neutral: false,
-                            },
-                        )
-                        .await
-                        {
-                            Ok(rows) => info!(
-                                "[夜间预备] PIT combo {} 夜间物化 {} 行 累计{}s",
-                                cfg.combo_name,
-                                rows,
-                                t0.elapsed().as_secs()
-                            ),
-                            Err(e) => warn!(
-                                "[夜间预备] PIT combo {} 夜间物化失败(次日9:30档兜底): {}",
-                                cfg.combo_name, e
-                            ),
-                        }
-                    }
-                    // 2026-09-18: 原写法 `results => for r in results` 实为迭代
-                    // Result<SyncResult,String> —— Err 分支零次迭代被静默吞掉,
-                    // 曲线同步异常时只打"更新完成"。改为显式三分支。
-                    match crate::routes::equity_curve_sync::sync_strategy_equity_curve(
-                        &db2,
-                        "v24",
-                        date - chrono::Duration::days(10),
-                        date,
-                        false,
-                    )
-                    .await
-                    {
-                        Ok(r) if r.status != "success" => {
-                            warn!(
-                                "[夜间预备] 曲线同步未成功 {} {}: {:?}",
-                                r.strategy_id, r.status, r.error
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(e) => warn!("[夜间预备] 曲线同步异常: {}", e),
-                    }
-                    info!(
-                        "[夜间预备] sleeve 曲线更新完成 累计{}s",
-                        t0.elapsed().as_secs()
-                    );
-                    // 基金净值增量(2026-09-17, ETF 溢价门禁数据源): 每标的增量秒级完成。
-                    // 门禁对缺数据降级放行, 此处失败不阻断 23:30 信号(告警留痕)。
-                    let etf_syms = load_active_etf_symbols_union(&db2).await;
-                    match quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await {
-                        Ok(n) => info!(
-                            "[夜间预备] fund_nav 净值同步 {} 行 累计{}s",
-                            n,
-                            t0.elapsed().as_secs()
-                        ),
-                        Err(e) => warn!("[夜间预备] fund_nav 净值同步失败(门禁将降级放行): {}", e),
-                    }
-                    match quant_data::sync::sync_fund_div(&db2, &tushare2, &etf_syms).await {
-                        Ok(n) => info!(
-                            "[夜间预备] fund_div 分红同步 {} 条 累计{}s",
-                            n,
-                            t0.elapsed().as_secs()
-                        ),
-                        Err(e) => warn!("[夜间预备] fund_div 分红同步失败(ETF分红不入账): {}", e),
-                    }
-                    // 收尾哨兵(任务71): 因子回填+物化后的全量质量检查, T日基准——
-                    // 22:01 EOD 尾那次是 T-1 基准(回填前时点), 真正的"信号前哨兵"
-                    // 在这里: 真滞缓在此报出, 23:30 信号前留人工处置窗。
-                    crate::routes::data_quality::run_data_quality_check(
-                        &db2,
-                        crate::routes::data_quality::FactorFreshnessBaseline::LatestTradeDate,
-                    )
-                    .await;
-                    info!(
-                        "[夜间预备] 链收尾质量检查完成(T日基准) 累计{}s",
-                        t0.elapsed().as_secs()
-                    );
-                });
-            }
-            "ptrade_signal_export" => {
-                // PTrade 实盘信号生成(2026-09-11, B1' 文件桥): 23:30 触发。
-                // 门禁→run-factor 截面→目标权重(与本文件模拟盘同源组件)→JSON→scp 推送。
-                // 依赖夜间预备链(22:10)的因子/物化/曲线在 23:20 前就绪。
-                // 详见 signal_export.rs 与 docs/projects/quant/PTrade实盘对接设计方案.md §5。
-                let db2 = db.clone();
-                let tushare2 = tushare.clone();
-                let params2 = params.clone();
-                tokio::spawn(async move {
-                    // 溢价门禁净值兜底(2026-09-17): 22:10 链失败/EOD 拖延时补拉,
-                    // 增量幂等秒级; 再失败则门禁降级放行(signal_export 内置)。
-                    let etf_syms = load_active_etf_symbols_union(&db2).await;
-                    if let Err(e) =
-                        quant_data::sync::sync_fund_nav(&db2, &tushare2, &etf_syms).await
-                    {
-                        warn!("[PTrade信号] fund_nav 兜底同步失败(门禁降级放行): {}", e);
-                    }
-                    if let Err(e) =
-                        quant_data::sync::sync_fund_div(&db2, &tushare2, &etf_syms).await
-                    {
-                        warn!("[PTrade信号] fund_div 兜底同步失败: {}", e);
-                    }
-                    crate::routes::signal_export::run_ptrade_signal_export(&db2, &params2).await;
-                });
-            }
-            "ptrade_report_fetch" => {
-                // PTrade 实盘回报抓取(2026-09-11, B1' 回报回流链): 16:30 触发。
-                // IMAP 拉当日 exec/heartbeat 邮件 → ptrade_execution_report 入库 → 钉钉日报。
-                // 心跳缺失告警(区分"无交易"与"策略挂了/通道故障")。见 ptrade_report.rs。
-                let db2 = db.clone();
-                tokio::spawn(async move {
-                    crate::routes::ptrade_report::run_ptrade_report_fetch(&db2).await;
-                });
-            }
-            "native_pv_increment" => {
-                // quant-factor 原生量价 7 因子夜间增量(2026-09-16 治本): 23:00 触发。
-                // mom_5d/vol_20d/turn_20d/mom_20d/rsi_14d/amp_5d/bb_pos_20d 不在 phase7
-                // 回填体系内, 历史 5-12/7-15/9-05 三次断供全靠手动测试补数。此任务分批
-                // 增量计算(口径与 pv_std_backfill_2605 一致), 见 factors/native_pv.rs。
-                let db2 = db.clone();
-                tokio::spawn(async move {
-                    crate::routes::factors::run_native_pv_increment(&db2).await;
-                });
-            }
-            "pit_combo_refresh" => {
-                // PIT 滚动 ICIR combo 数据保鲜：增量物化最近季度（幂等）。
-                // 防止随交易日推移 combo 分数过时。依赖：因子已重算 + 滚动 IC 已评估。
-                // 遍历所有 active 策略声明的 PIT combo（含 h1/h20），每个用 combo_name 推断的 horizon。
-                // 模拟实盘盘中调仓依赖：所有激活账号策略用到的 combo 都需每日刷新到最新交易日。
-                // phase7_price_volume_expanded_v1 等 non-ICIR combo 不走此路径（由 phase7 backfill 路由处理）。
-                let ver = params
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("1.0.0");
-                // 增量区间：默认最近一年（覆盖当前+上季度，幂等刷新）
-                let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
-                let refresh_end = chrono::Utc::now().date_naive();
-                let pit_combos: Vec<_> = load_active_combo_materialize_configs(db)
-                    .await
-                    .into_iter()
-                    .filter(|c| c.combo_name.starts_with("full_pit_icir"))
-                    .collect();
-                if pit_combos.is_empty() {
-                    warn!("[scheduler] PIT combo 保鲜：无 active full_pit_icir* combo，跳过");
-                }
-                for cfg in &pit_combos {
-                    // 显式 combo_horizon 列优先（2026-09-05：indneutral_val_v1 名字无
-                    // _h{N} 后缀曾被推断为 1，而实际物化口径是 20——三段拼接根源）
-                    let horizon = cfg
-                        .combo_horizon
-                        .unwrap_or_else(|| combo_horizon_from_name(&cfg.combo_name));
-                    info!(
-                        "[scheduler] PIT combo 保鲜: combo={} horizon={} include_fund={} whitelist={} 区间 {}~{}",
-                        cfg.combo_name, horizon, cfg.include_fundamentals,
-                        cfg.factor_whitelist.as_ref().map(|w| w.len()).unwrap_or(0), refresh_start, refresh_end
-                    );
-                    // 含基本面因子的 combo(如 v24 fund_v2)用 ext + include_fundamentals + factor_whitelist,
-                    // 否则用默认黑名单物化会丢失 fin_/mf_/north_ 因子。
-                    match crate::routes::factors::materialize_pit_combo_ext(
-                        db,
-                        &crate::routes::factors::PitComboMaterializeParams {
-                            combo_name: &cfg.combo_name,
-                            factor_version: ver,
-                            horizon,
-                            start_date: refresh_start,
-                            end_date: refresh_end,
-                            include_fundamentals: cfg.include_fundamentals,
-                            // min_abs_ic_ir: 保鲜不加阈值(白名单已筛)
-                            min_abs_ic_ir: None,
-                            factor_whitelist: cfg.factor_whitelist.as_deref(),
-                            // ind_neutral: scheduler 保鲜不做行业中性化(仅手动物化新 combo 时启用)
-                            ind_neutral: false,
-                        },
-                    )
-                    .await
-                    {
-                        Ok(rows) => info!(
-                            "[scheduler] PIT combo {} 保鲜完成: {} 行",
-                            cfg.combo_name, rows
-                        ),
-                        Err(e) => warn!("[scheduler] PIT combo {} 保鲜失败: {}", cfg.combo_name, e),
-                    }
-                }
-            }
-            "rolling_pit_eval" => {
-                // rolling PIT IC 评估调度化（2026-09-21，rolling IC 专项发现 A 修复）：
-                // factor_evaluation 此前无任何定时调用者，rolling 权重曾冻结 2.5 个月
-                // （2026-06-30 后停更，与 sync_fund_adj 缺调度同构——能力存在但无人调用）。
-                // IC 评估是 PIT combo 物化前置（ICIR 权重按 as-of 前最新评估），停更 =
-                // combo 权重对新市场结构停止适应。建议 cron 排非交易日（周六晨）。
-                // 走 background 路由异步执行不阻塞调度循环；horizon 20/60 各提交一遍
-                // （factor_evaluation 现存这两个 horizon 的评估序列）。
-                let api_base = self_api_base();
-                let client = reqwest::Client::new();
-                let end = chrono::Utc::now().date_naive();
-                let lookback = params
-                    .get("lookback_days")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(370);
-                let start = end - chrono::Duration::days(lookback);
-                for horizon in [20i16, 60i16] {
-                    let payload = serde_json::json!({
-                        "start_date": start.format("%Y%m%d").to_string(),
-                        "end_date": end.format("%Y%m%d").to_string(),
-                        "horizon": horizon,
-                    });
-                    match client
-                        .post(format!(
-                            "{}/api/v1/quant/factors/evaluate-rolling-pit/background",
-                            api_base
-                        ))
-                        .json(&payload)
-                        .timeout(std::time::Duration::from_secs(60))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => {
-                            info!(
-                            "[scheduler] rolling PIT IC 评估任务已提交(horizon={} 区间 {}~{}): {}",
-                            horizon, start, end, resp.status()
-                        )
-                        }
-                        Err(e) => warn!(
-                            "[scheduler] rolling PIT IC 评估任务提交失败(horizon={}): {}",
-                            horizon, e
-                        ),
-                    }
-                }
-            }
+            "data_quality_check" => dispatch_data_quality_check(db).await,
+            "equity_curve_update" => dispatch_equity_curve_update(db).await,
+            "mvo_equity_curve_update" => dispatch_mvo_equity_curve_update(db, params).await,
+            "factor_backfill" => dispatch_factor_backfill(db).await,
+            "nightly_signal_prep" => dispatch_nightly_signal_prep(db, tushare).await,
+            "ptrade_signal_export" => dispatch_ptrade_signal_export(db, tushare, params).await,
+            "ptrade_report_fetch" => dispatch_ptrade_report_fetch(db).await,
+            "native_pv_increment" => dispatch_native_pv_increment(db).await,
+            "pit_combo_refresh" => dispatch_pit_combo_refresh(db, params).await,
+            "rolling_pit_eval" => dispatch_rolling_pit_eval(params).await,
             "market_level_source_freshness" => {
-                let today = chrono::Utc::now().date_naive();
-                let api_base = self_api_base();
-                let client = reqwest::Client::new();
-                for source in market_level_freshness_sources(params) {
-                    let latest = latest_market_level_trade_date(db, &source).await;
-                    let Some(payload) = market_level_freshness_sync_payload(&source, latest, today)
-                    else {
-                        warn!("[scheduler] P3.15 市场级源不支持自动同步: {}", source);
-                        continue;
-                    };
-                    info!(
-                        "[scheduler] P3.15 市场级源保鲜: source={} latest={:?}",
-                        source, latest
-                    );
-                    match client
-                        .post(format!("{}/api/v1/quant/data/sync-tasks", api_base))
-                        .json(&payload)
-                        .timeout(std::time::Duration::from_secs(600))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => match resp.json::<serde_json::Value>().await {
-                            Ok(result) => info!(
-                                "[scheduler] P3.15 市场级源同步任务返回: source={} result={}",
-                                source, result
-                            ),
-                            Err(error) => warn!(
-                                "[scheduler] P3.15 市场级源同步响应解析失败: source={} error={}",
-                                source, error
-                            ),
-                        },
-                        Err(error) => warn!(
-                            "[scheduler] P3.15 市场级源同步任务提交失败: source={} error={}",
-                            source, error
-                        ),
-                    }
-                }
+                dispatch_market_level_source_freshness(db, params).await
             }
             _ => {
                 // 无匹配分派分支：多为「DB 注册了新 task_type，但运行中的二进制还没
@@ -3319,6 +3354,12 @@ mod forecast_daily_tests {
 mod sixth_batch {
     use super::*;
 
+    /// wait 三连测互斥锁：wait_for_factor_backfill 的候选查询扫全库 running/pending
+    /// backfill 行，并行时 zero_timeout 造的未终态行会被邻居测试捞到，导致"全终态
+    /// 立即返回"断言失败（实测 30.005s=一轮 sleep）——三测试必须串行
+    /// （CLEANUP_TEST_LOCK 同款模式，任务79 修）。
+    static WAIT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn test_db() -> PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
@@ -3419,6 +3460,7 @@ mod sixth_batch {
     /// 非 backfill 类型的 pending 行也不计入 → 应零等待立即返回。
     #[tokio::test]
     async fn wait_for_factor_backfill_returns_at_once_when_all_terminal() {
+        let _wait_guard = WAIT_TEST_LOCK.lock().await;
         let db = test_db().await;
         cleanup_dst_rows(&db).await;
         let since = chrono::Utc::now() + chrono::Duration::minutes(60);
@@ -3449,6 +3491,7 @@ mod sixth_batch {
     /// deadline 分支立即放行(不 sleep 30s)——超时后继续后续步骤由物化门禁兜底。
     #[tokio::test]
     async fn wait_for_factor_backfill_zero_timeout_bails_out_with_pending_rows() {
+        let _wait_guard = WAIT_TEST_LOCK.lock().await;
         let db = test_db().await;
         cleanup_dst_rows(&db).await;
         let since = chrono::Utc::now() + chrono::Duration::minutes(60);
@@ -3474,6 +3517,7 @@ mod sixth_batch {
     /// created_at 早于 since 的未终态回填行不计入(只等 since 之后创建的任务)。
     #[tokio::test]
     async fn wait_for_factor_backfill_ignores_rows_created_before_since() {
+        let _wait_guard = WAIT_TEST_LOCK.lock().await;
         let db = test_db().await;
         cleanup_dst_rows(&db).await;
         let since = chrono::Utc::now() + chrono::Duration::minutes(60);
