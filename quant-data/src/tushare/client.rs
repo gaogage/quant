@@ -52,8 +52,16 @@ impl Default for TushareConfig {
                 .ok()
                 .filter(|u| !u.is_empty()),
             timeout_secs: 30,
-            max_retries: 3,
-            retry_delay_ms: 1000,
+            // 任务80: C类特许 → env 化（默认=原写死值）
+            max_retries: std::env::var("TUSHARE_MAX_RETRIES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
+            // 任务80: C类特许 → env 化（默认=原写死值）
+            retry_delay_ms: std::env::var("TUSHARE_RETRY_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000),
             rate_limit_per_minute,
         }
     }

@@ -1177,20 +1177,22 @@ pub(crate) async fn ensemble_model_params_for_window(
     };
 
     // Load north_flow zscore at test_start
+    // 任务80: C类特许 → env 化（默认=原写死值）
     let nf_row = sqlx::query_as::<_, (Option<f64>,)>(
         "SELECT normalized_value::double precision
          FROM factor_value
          WHERE factor_code = 'north_flow_std_20d'
-           AND factor_version = '1.0.0'
+           AND factor_version = $2
            AND symbol = (SELECT symbol FROM market_stock_daily_bar WHERE trade_date >= $1 LIMIT 1)
            AND trade_date = (
                SELECT MAX(trade_date) FROM factor_value
                WHERE factor_code = 'north_flow_std_20d'
-                 AND factor_version = '1.0.0'
+                 AND factor_version = $2
                  AND trade_date < $1
            )",
     )
     .bind(window.test_start)
+    .bind(crate::routes::shared::factor_version())
     .fetch_optional(db)
     .await
     .map_err(|e| format!("north_flow query failed: {}", e))?

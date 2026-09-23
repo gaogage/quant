@@ -517,7 +517,10 @@ fn apply_cost_model(base: FeeConfig, req: Option<&CostModelReq>) -> Result<FeeCo
     })
 }
 
-fn build_backtest_config(req: &RunBacktestReq) -> Result<BacktestConfig, String> {
+fn build_backtest_config(
+    req: &RunBacktestReq,
+    fee_base: FeeConfig,
+) -> Result<BacktestConfig, String> {
     if req.symbols.is_empty() {
         return Err("symbols must not be empty".into());
     }
@@ -574,7 +577,8 @@ fn build_backtest_config(req: &RunBacktestReq) -> Result<BacktestConfig, String>
         benchmark: req.benchmark.clone().unwrap_or_else(|| "000300.SH".into()),
         start_date: start,
         end_date: end,
-        fee_config: apply_cost_model(FeeConfig::default(), req.cost_model.as_ref())?,
+        // C4(app_config): fee_base 由调用方注入
+        fee_config: apply_cost_model(fee_base, req.cost_model.as_ref())?,
         mode: parse_mode(req.mode.as_deref()),
         max_position_pct: Decimal::new(10, 2),
         strategy_version_id: req.strategy_version_id.clone(),
@@ -625,7 +629,8 @@ pub async fn run_backtest(
     let task_id = format!("bt-{}", Uuid::new_v4());
     info!(task_id, symbols = req.symbols.len(), "启动回测");
 
-    let config = match build_backtest_config(&req) {
+    let fee_base = crate::routes::shared::backtest_fee_base(&state.db).await;
+    let config = match build_backtest_config(&req, fee_base) {
         Ok(config) => config,
         Err(message) => return Json(json!({"code": 1, "message": message})),
     };
@@ -2632,7 +2637,11 @@ pub(crate) async fn execute_factor_backtest_with_caches(
     let (effective_start, effective_coverage) =
         resolve_effective_factor_coverage(db, &req, start, end).await?;
     let capital = decimal_from_f64(req.initial_capital, "initial_capital")?;
-    let fee_config = match apply_cost_model(FeeConfig::default(), req.cost_model.as_ref()) {
+    // C4(app_config)
+    let fee_config = match apply_cost_model(
+        crate::routes::shared::backtest_fee_base(db).await,
+        req.cost_model.as_ref(),
+    ) {
         Ok(config) => config,
         Err(message) => return Err(message),
     };
@@ -3130,7 +3139,7 @@ mod tests {
             execution_rules: None,
         };
 
-        let err = build_backtest_config(&req).unwrap_err();
+        let err = build_backtest_config(&req, FeeConfig::default()).unwrap_err();
         assert!(err.contains("weights"));
     }
 
@@ -3172,7 +3181,7 @@ mod tests {
             }),
         };
 
-        let config = build_backtest_config(&req).unwrap();
+        let config = build_backtest_config(&req, FeeConfig::default()).unwrap();
 
         assert_eq!(
             config.persistence_mode,

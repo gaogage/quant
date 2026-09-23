@@ -14,6 +14,8 @@
 //! - MvoWeightCache / StrategyConfig（类型）
 
 mod alerts;
+mod app_config;
+mod config_env;
 mod etf_premium;
 mod etf_prices;
 mod mvo_weights;
@@ -26,6 +28,8 @@ mod trade_block;
 
 // pub(crate) 项用 pub(crate) use re-export（不能 pub use，否则 E0364）
 pub(crate) use alerts::{send_dingtalk_alert, send_dingtalk_alert_titled, send_quality_alert};
+pub use app_config::{app_config_f64, backtest_fee_base};
+pub(crate) use config_env::factor_version;
 pub use etf_premium::{apply_premium_exit_overlay, load_etf_premium_map, EtfPremium};
 pub(crate) use etf_prices::fetch_intraday_etf_prices;
 pub use mvo_weights::MvoWeightCache;

@@ -1891,7 +1891,8 @@ pub(crate) fn phase7_train_window_ml_factor_refs_for_profile(
         .iter()
         .map(|factor_code| LinearFactorRef {
             factor_code: (*factor_code).to_string(),
-            factor_version: "1.0.0".to_string(),
+            // 任务80: C类特许 → env 化（默认=原写死值）
+            factor_version: crate::routes::shared::factor_version(),
         })
         .collect()
 }

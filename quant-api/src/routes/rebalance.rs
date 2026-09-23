@@ -148,17 +148,28 @@ async fn check_maintenance_gate(
     date: NaiveDate,
     sc: &StrategyConfig,
 ) -> bool {
+    // 任务80 C5: 维保缺省线从 app_config 读(账户列优先,COALESCE 兜底改为参数注入;
+    // app_config 键缺失/脏值回落代码默认 1.3/1.5——行为与改造前一致)
+    let dflt_liq =
+        crate::routes::shared::app_config_f64(db, "margin.default_liquidation_threshold")
+            .await
+            .unwrap_or(1.3);
+    let dflt_warn = crate::routes::shared::app_config_f64(db, "margin.default_warning_threshold")
+        .await
+        .unwrap_or(1.5);
     // P2-D:维保 ratio + 阈值合并为 1 条 SQL(原 maintenance_ratio + SELECT thr 两次 DB)
     let maint_info: Option<(f64, f64, f64)> = sqlx::query_as(
         "SELECT
             CASE WHEN COALESCE(margin_amount,0) < 0.000001 THEN 'Infinity'::float
                  ELSE (COALESCE((SELECT SUM(market_value) FROM paper_position WHERE paper_account_id=$1),0)
                        + COALESCE(cash,0)) / COALESCE(margin_amount,1)::float END,
-            COALESCE(liquidation_threshold, 1.3),
-            COALESCE(warning_threshold, 1.5)
+            COALESCE(liquidation_threshold, $2),
+            COALESCE(warning_threshold, $3)
          FROM paper_account WHERE paper_account_id = $1",
     )
     .bind(account_id)
+        .bind(dflt_liq)
+        .bind(dflt_warn)
     .fetch_optional(db)
     .await
     .ok()
@@ -358,7 +369,7 @@ pub async fn rebalance_account(
                     "buy",
                     quant_common::trading_rules::round_down_to_lot(
                         delta,
-                        quant_common::trading_rules::LOT_SIZE,
+                        quant_common::trading_rules::lot_size(),
                     ),
                 )
             } else {
@@ -371,7 +382,7 @@ pub async fn rebalance_account(
                         "sell",
                         quant_common::trading_rules::round_down_to_lot(
                             sell_qty,
-                            quant_common::trading_rules::LOT_SIZE,
+                            quant_common::trading_rules::lot_size(),
                         ),
                     )
                 } else {
@@ -431,7 +442,7 @@ pub async fn rebalance_account(
                 if buy_budget < target_value {
                     let allowed_qty = quant_common::trading_rules::round_down_to_lot(
                         buy_budget / price,
-                        quant_common::trading_rules::LOT_SIZE,
+                        quant_common::trading_rules::lot_size(),
                     );
                     if allowed_qty <= Decimal::ZERO {
                         warn!(
@@ -703,7 +714,7 @@ pub async fn rebalance_account(
                     "buy",
                     quant_common::trading_rules::round_down_to_lot(
                         delta,
-                        quant_common::trading_rules::LOT_SIZE,
+                        quant_common::trading_rules::lot_size(),
                     ),
                 )
             } else {
@@ -714,7 +725,7 @@ pub async fn rebalance_account(
                         "sell",
                         quant_common::trading_rules::round_down_to_lot(
                             sell_qty,
-                            quant_common::trading_rules::LOT_SIZE,
+                            quant_common::trading_rules::lot_size(),
                         ),
                     )
                 } else {
@@ -735,7 +746,7 @@ pub async fn rebalance_account(
                 if buy_budget < target_value {
                     let allowed_qty = quant_common::trading_rules::round_down_to_lot(
                         buy_budget / price,
-                        quant_common::trading_rules::LOT_SIZE,
+                        quant_common::trading_rules::lot_size(),
                     );
                     if allowed_qty <= Decimal::ZERO {
                         warn!(
@@ -929,7 +940,7 @@ async fn force_liquidation(
         } else {
             sell_qty = quant_common::trading_rules::round_down_to_lot(
                 sell_qty,
-                quant_common::trading_rules::LOT_SIZE,
+                quant_common::trading_rules::lot_size(),
             );
         }
         if sell_qty <= rust_decimal::Decimal::new(1, 2) {
@@ -1000,16 +1011,26 @@ pub async fn check_maintenance_after_mark(
     slippage: f64,
 ) -> Result<(usize, bool), String> {
     // 读维保阈值 + 杠杆配置(合并为 1 条 SELECT,原 2 条查同一行 paper_account)
+    // 任务80 C5: 缺省线 app_config 注入(账户列 > app_config > 代码兜底)
+    let dflt_liq =
+        crate::routes::shared::app_config_f64(db, "margin.default_liquidation_threshold")
+            .await
+            .unwrap_or(1.3);
+    let dflt_warn = crate::routes::shared::app_config_f64(db, "margin.default_warning_threshold")
+        .await
+        .unwrap_or(1.5);
     let (liq_thr, warn_thr, leverage_enabled, _): (f64, f64, bool, Option<f64>) = sqlx::query_as(
-        "SELECT COALESCE(liquidation_threshold, 1.3), COALESCE(warning_threshold, 1.5),
+        "SELECT COALESCE(liquidation_threshold, $2), COALESCE(warning_threshold, $3),
                     leverage_enabled, leverage_multiplier
              FROM paper_account WHERE paper_account_id = $1",
     )
     .bind(account_id)
+    .bind(dflt_liq)
+    .bind(dflt_warn)
     .fetch_optional(db)
     .await
     .map_err(|e| format!("thr/lev: {}", e))?
-    .unwrap_or((1.3, 1.5, false, None));
+    .unwrap_or((dflt_liq, dflt_warn, false, None));
     if !leverage_enabled {
         return Ok((0, false)); // 无杠杆不检查维保
     }
@@ -1307,7 +1328,7 @@ async fn apply_fill_cash(
             // 缩减到 cash 可承担量,再按100股向下取整(A股/ETF 1手=100,合规)。
             let scaled = quant_common::trading_rules::round_down_to_lot(
                 max_qty_by_cash,
-                quant_common::trading_rules::LOT_SIZE,
+                quant_common::trading_rules::lot_size(),
             );
             if scaled <= Decimal::ZERO {
                 return false;
@@ -1396,8 +1417,10 @@ async fn apply_fill_common_sell(
     date: NaiveDate,
 ) -> bool {
     // 防御性兜底:A股/ETF 卖出量取整到100整数倍(全仓清仓已在 caller 处理)
-    let qty =
-        quant_common::trading_rules::round_down_to_lot(qty, quant_common::trading_rules::LOT_SIZE);
+    let qty = quant_common::trading_rules::round_down_to_lot(
+        qty,
+        quant_common::trading_rules::lot_size(),
+    );
     if qty <= Decimal::ZERO {
         return false; // 取整后为 0，不执行卖出
     }

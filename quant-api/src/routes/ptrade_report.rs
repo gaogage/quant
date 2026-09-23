@@ -61,7 +61,18 @@ struct ChannelConfig {
 }
 
 async fn load_channels(db: &PgPool) -> Result<Vec<ChannelConfig>, String> {
-    let rows = sqlx::query_as::<_, (String, String, bool, String, i32, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            bool,
+            String,
+            i32,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         "SELECT paper_account_id, channel_name, is_production,
                 imap_host, imap_port, imap_user, imap_pwd
          FROM ptrade_channel_config WHERE enabled = true ORDER BY is_production",
@@ -71,8 +82,8 @@ async fn load_channels(db: &PgPool) -> Result<Vec<ChannelConfig>, String> {
     .map_err(|e| format!("channel config: {}", e))?;
     Ok(rows
         .into_iter()
-        .map(|(account_id, channel_name, is_production, imap_host, imap_port, imap_user, imap_pwd)| {
-            ChannelConfig {
+        .map(
+            |(
                 account_id,
                 channel_name,
                 is_production,
@@ -80,8 +91,18 @@ async fn load_channels(db: &PgPool) -> Result<Vec<ChannelConfig>, String> {
                 imap_port,
                 imap_user,
                 imap_pwd,
-            }
-        })
+            )| {
+                ChannelConfig {
+                    account_id,
+                    channel_name,
+                    is_production,
+                    imap_host,
+                    imap_port,
+                    imap_user,
+                    imap_pwd,
+                }
+            },
+        )
         .collect())
 }
 
@@ -127,7 +148,6 @@ fn fetch_mail_reports_blocking(
     user: String,
     pwd: String,
 ) -> Result<FetchSummary, String> {
-
     use mail_parser::MimeHeaders;
 
     // rustls 0.23 在 ring/aws-lc-rs 双 feature 共存的依赖树里无法自动选定
@@ -186,7 +206,9 @@ fn fetch_mail_reports_blocking(
             let msg = match mail_parser::MessageParser::default().parse(raw) {
                 Some(m) => m,
                 None => {
-                    summary.error.get_or_insert_with(|| "部分邮件解析失败".into());
+                    summary
+                        .error
+                        .get_or_insert_with(|| "部分邮件解析失败".into());
                     continue;
                 }
             };
@@ -219,8 +241,7 @@ fn fetch_mail_reports_blocking(
                     });
                 }
                 None => {
-                    summary.error =
-                        Some(format!("exec 邮件无 .json 附件: {}", subject));
+                    summary.error = Some(format!("exec 邮件无 .json 附件: {}", subject));
                 }
             }
         }
@@ -276,7 +297,11 @@ async fn ingest_reports(db: &PgPool, summary: &FetchSummary, ch: &ChannelConfig)
             Err(e) => lines.push(format!("⚠️ {} 入库失败: {}", m.filename, e)),
         }
     }
-    format!("📊 [PTrade实盘日报·{}]\n{}", ch.channel_name, lines.join("\n"))
+    format!(
+        "📊 [PTrade实盘日报·{}]\n{}",
+        ch.channel_name,
+        lines.join("\n")
+    )
 }
 
 /// 从邮件主题提取通道tag: ptrade_exec_{sim|live}_{date} → "sim"/"live"。
@@ -622,7 +647,9 @@ mod tests {
     #[test]
     fn imap_search_date_english_month_names() {
         let fmt = |y, m, d| {
-            chrono::NaiveDate::from_ymd_opt(y, m, d).map(imap_search_date).unwrap()
+            chrono::NaiveDate::from_ymd_opt(y, m, d)
+                .map(imap_search_date)
+                .unwrap()
         };
         assert_eq!(fmt(2026, 9, 21), "21-Sep-2026");
         assert_eq!(fmt(2026, 1, 1), "01-Jan-2026");

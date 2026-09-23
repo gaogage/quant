@@ -328,6 +328,8 @@ pub(crate) fn phase7_defensive_low_vol_quality_backfill_sql(
         .map(|s| format!("'{}'", s))
         .collect::<Vec<_>>()
         .join(",");
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    let factor_version = crate::routes::shared::factor_version();
     format!(
         "WITH ret AS (
             SELECT
@@ -371,7 +373,7 @@ pub(crate) fn phase7_defensive_low_vol_quality_backfill_sql(
             JOIN LATERAL (
                 SELECT normalized_value FROM factor_value
                 WHERE factor_code = 'fin_roe_daily_std'
-                  AND factor_version = '1.0.0'
+                  AND factor_version = '{factor_version}'
                   AND symbol = v.symbol
                   AND trade_date = v.trade_date
                   AND normalized_value IS NOT NULL

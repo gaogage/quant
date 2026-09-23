@@ -89,13 +89,15 @@ impl BacktestMetrics {
         if n < 2 {
             return Self::empty();
         }
+        // 任务80: C类特许 → env 化（默认=原写死值）
+        let ann_days = quant_common::config_env::annualization_days();
 
         // 总收益
         let total_return = nav[n - 1] - initial_capital;
         let total_return_pct = total_return / initial_capital;
 
         // 年化
-        let years = n as f64 / 252.0;
+        let years = n as f64 / ann_days;
         let final_ratio = if initial_capital.is_zero() {
             0.0
         } else {
@@ -123,7 +125,7 @@ impl BacktestMetrics {
                 / Decimal::from(daily.len() - 1);
             let daily_vol =
                 Decimal::from_f64(variance.to_f64().unwrap_or(0.0).sqrt()).unwrap_or_default();
-            daily_vol * Decimal::from_f64(252.0_f64.sqrt()).unwrap()
+            daily_vol * Decimal::from_f64(ann_days.sqrt()).unwrap()
         };
 
         // Sortino uses downside deviation only. A strictly non-decreasing NAV has
@@ -142,7 +144,7 @@ impl BacktestMetrics {
                 let variance = downside_sum / Decimal::from(daily.len() - 1);
                 let daily_downside =
                     Decimal::from_f64(variance.to_f64().unwrap_or(0.0).sqrt()).unwrap_or_default();
-                daily_downside * Decimal::from_f64(252.0_f64.sqrt()).unwrap()
+                daily_downside * Decimal::from_f64(ann_days.sqrt()).unwrap()
             }
         };
 

@@ -21,8 +21,9 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::routes::shared::{
-    compute_lw_mvo_weights, resolved_to_legacy_sc, send_dingtalk_alert, send_dingtalk_alert_titled,
-    send_quality_alert, MvoWeightCache, PaperAccountRepository, PgPaperAccountRepo, StrategyConfig,
+    compute_lw_mvo_weights, factor_version, resolved_to_legacy_sc, send_dingtalk_alert,
+    send_dingtalk_alert_titled, send_quality_alert, MvoWeightCache, PaperAccountRepository,
+    PgPaperAccountRepo, StrategyConfig,
 };
 use crate::routes::strategy::{AssetClass, ResolvedStrategy};
 
@@ -884,7 +885,8 @@ pub(crate) async fn dispatch_nightly_signal_prep(db: &PgPool, tushare: &TushareC
                 &db2,
                 &crate::routes::factors::PitComboMaterializeParams {
                     combo_name: &ind_cfg.combo_name,
-                    factor_version: "1.0.0",
+                    // 任务80: C类特许 → env 化（默认=原写死值）
+                    factor_version: &factor_version(),
                     horizon,
                     start_date: date - chrono::Duration::days(120),
                     end_date: date,
@@ -928,7 +930,8 @@ pub(crate) async fn dispatch_nightly_signal_prep(db: &PgPool, tushare: &TushareC
                 &db2,
                 &crate::routes::factors::PitComboMaterializeParams {
                     combo_name: &cfg.combo_name,
-                    factor_version: "1.0.0",
+                    // 任务80: C类特许 → env 化（默认=原写死值）
+                    factor_version: &factor_version(),
                     horizon,
                     start_date: date - chrono::Duration::days(120),
                     end_date: date,
@@ -1069,10 +1072,12 @@ pub(crate) async fn dispatch_pit_combo_refresh(db: &PgPool, params: &serde_json:
     // 遍历所有 active 策略声明的 PIT combo（含 h1/h20），每个用 combo_name 推断的 horizon。
     // 模拟实盘盘中调仓依赖：所有激活账号策略用到的 combo 都需每日刷新到最新交易日。
     // phase7_price_volume_expanded_v1 等 non-ICIR combo 不走此路径（由 phase7 backfill 路由处理）。
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    let default_ver = factor_version();
     let ver = params
         .get("version")
         .and_then(|v| v.as_str())
-        .unwrap_or("1.0.0");
+        .unwrap_or(default_ver.as_str());
     // 增量区间：默认最近一年（覆盖当前+上季度，幂等刷新）
     let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
     let refresh_end = chrono::Utc::now().date_naive();
@@ -1860,7 +1865,8 @@ async fn run_tick(
                         db,
                         &crate::routes::factors::PitComboMaterializeParams {
                             combo_name: &combo,
-                            factor_version: "1.0.0",
+                            // 任务80: C类特许 → env 化（默认=原写死值）
+                            factor_version: &factor_version(),
                             horizon: match required_combo_horizon(db, &combo, horizon_col).await {
                                 Some(h) => h,
                                 None => continue,
@@ -2221,7 +2227,14 @@ pub async fn validate_pre_trade_data(
     }
 
     // 2. A股日线 — 抽查沪深主板
-    for probe in &["000001.SZ", "600000.SH"] {
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    let probe_symbols: Vec<String> = std::env::var("DATA_PROBE_SYMBOLS")
+        .unwrap_or_else(|_| "000001.SZ,600000.SH".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for probe in &probe_symbols {
         let stale = check_data_freshness(db, probe, today, 1).await;
         if let Some(gap_td) = stale {
             info!(
@@ -2235,7 +2248,7 @@ pub async fn validate_pre_trade_data(
             match quant_data::sync::sync_daily_bars(
                 db,
                 tushare,
-                &[probe.to_string()],
+                std::slice::from_ref(probe),
                 &recent_start,
                 &today_str,
                 &dv_id,
@@ -2304,7 +2317,8 @@ pub async fn validate_pre_trade_data(
                 match crate::routes::factors::materialize_pit_combo(
                     db,
                     &factor_combo,
-                    "1.0.0",
+                    // 任务80: C类特许 → env 化（默认=原写死值）
+                    &factor_version(),
                     bh,
                     materialize_start,
                     today,
@@ -2626,10 +2640,11 @@ pub(crate) async fn ensure_prediction_coverage(
         "label_horizon_days": 20, "min_training_samples": 200,
         "max_windows": 20, "bucket_count": 10, "min_samples_per_bucket": 100,
         "factors": [
-            {"factor_code": "rev_5d_std", "factor_version": "1.0.0"},
-            {"factor_code": "rev_20d_std", "factor_version": "1.0.0"},
-            {"factor_code": "downvol_20d_std", "factor_version": "1.0.0"},
-            {"factor_code": "amihud_20d_std", "factor_version": "1.0.0"}
+            // 任务80: C类特许 → env 化（默认=原写死值）
+            {"factor_code": "rev_5d_std", "factor_version": factor_version()},
+            {"factor_code": "rev_20d_std", "factor_version": factor_version()},
+            {"factor_code": "downvol_20d_std", "factor_version": factor_version()},
+            {"factor_code": "amihud_20d_std", "factor_version": factor_version()}
         ]
     });
     let db_clone = db.clone();

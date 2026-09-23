@@ -541,7 +541,8 @@ impl EvaluateRollingPitRequest {
 }
 
 fn default_pit_combo_version() -> String {
-    "1.0.0".to_string()
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    crate::routes::shared::factor_version()
 }
 
 fn default_pit_horizon() -> i16 {

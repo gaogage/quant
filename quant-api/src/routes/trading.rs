@@ -45,8 +45,29 @@ impl Default for ExecutionFeeSchedule {
 }
 
 impl ExecutionFeeSchedule {
-    pub fn from_env() -> Self {
+    /// 任务80 C6: DB 配置层——优先级 env PAPER_FEE_* > app_config(executor.*) > 代码默认。
+    /// app_config 键缺失/脏值静默回落（费率有代码默认兜底，非"宁可报错"场景）。
+    pub async fn from_config(db: &PgPool) -> Self {
         let mut s = Self::default();
+        if let Some(v) = crate::routes::shared::app_config_f64(db, "executor.commission_rate").await
+        {
+            if let Some(d) = Decimal::from_f64_retain(v) {
+                s.commission_rate = d;
+            }
+        }
+        if let Some(v) = crate::routes::shared::app_config_f64(db, "executor.min_commission").await
+        {
+            if let Some(d) = Decimal::from_f64_retain(v) {
+                s.commission_min = d;
+            }
+        }
+        if let Some(v) = crate::routes::shared::app_config_f64(db, "executor.stamp_tax_rate").await
+        {
+            if let Some(d) = Decimal::from_f64_retain(v) {
+                s.stamp_tax_rate = d;
+            }
+        }
+        // env 覆盖层（部署级，最高）
         if let Ok(v) = std::env::var("PAPER_FEE_COMMISSION_RATE") {
             if let Some(d) = v.parse().ok().and_then(Decimal::from_f64_retain) {
                 s.commission_rate = d;
@@ -249,7 +270,7 @@ pub async fn execute_simulated_trade(
     // 佣金/印花税(2026-09-19 绩效自含全成本): 费率为执行器配置
     // (ExecutionFeeSchedule, env 可覆盖)。fill 行记录计算全额(审计口径),
     // 下方现金扣减按同额独立成笔。
-    let fee = ExecutionFeeSchedule::from_env();
+    let fee = ExecutionFeeSchedule::from_config(db).await;
     let commission = fee.commission(fill_amount);
     let tax = fee.stamp_tax(&trade.side, fill_amount);
     let fill = ActualTrade {

@@ -1343,7 +1343,7 @@ impl BacktestEngine {
             } else {
                 Some(round_down_to_lot(
                     target_amount / price,
-                    quant_common::trading_rules::LOT_SIZE,
+                    quant_common::trading_rules::lot_size(),
                 ))
             };
             self.targets.push(PortfolioTarget {
@@ -1462,8 +1462,10 @@ impl BacktestEngine {
             }
             // A股/ETF 买入必须按100股/份向下取整(1手=100)。
             // 卖出允许零头清仓不取整(见下方 sell 段),仅买入取整。
-            let qty =
-                round_down_to_lot(capped_amount / price, quant_common::trading_rules::LOT_SIZE);
+            let qty = round_down_to_lot(
+                capped_amount / price,
+                quant_common::trading_rules::lot_size(),
+            );
             if !qty.is_zero() {
                 // Pre-check for constraint violations
                 let participation_rate = self.participation_rate_for(market, sym, qty * *price);

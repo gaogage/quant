@@ -33,7 +33,18 @@ pub const NATIVE_PV_FACTORS: &[&str] = &[
 ];
 
 /// 分批股票数(内存受控: 单批 bar 预载约 500 股 × 40 天, 与 pv_std_backfill_2605 同参)。
-const BATCH_SYMBOLS: usize = 500;
+/// OnceLock 缓存——chunks 实际分批与 div_ceil 进度分母必须同值。
+fn batch_symbols() -> usize {
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("NATIVE_PV_BATCH_SYMBOLS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(500)
+    })
+}
 
 /// 定时任务入口(scheduler.rs "native_pv_increment" 分支调用), 也可经
 /// POST /api/v1/quant/factors/native-pv-increment/background 手动触发。
@@ -137,7 +148,7 @@ async fn native_pv_increment_inner(db: &PgPool) -> Result<usize, String> {
     );
 
     let mut total_saved = 0usize;
-    for (bi, chunk_syms) in symbols.chunks(BATCH_SYMBOLS).enumerate() {
+    for (bi, chunk_syms) in symbols.chunks(batch_symbols()).enumerate() {
         let chunk_syms: Vec<String> = chunk_syms.to_vec();
 
         // 2. 本批预载(复权价视图, 与历史补数同源) + 全量返回 loader
@@ -206,7 +217,7 @@ async fn native_pv_increment_inner(db: &PgPool) -> Result<usize, String> {
         info!(
             "[native_pv] 批 {}/{}: 落库 {} 行 (累计 {})",
             bi + 1,
-            symbols.len().div_ceil(BATCH_SYMBOLS),
+            symbols.len().div_ceil(batch_symbols()),
             batch_saved,
             total_saved
         );

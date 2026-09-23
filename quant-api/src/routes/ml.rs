@@ -5479,7 +5479,7 @@ async fn insert_prediction_rows(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     rows: &[PredictionRow],
 ) -> Result<(), String> {
-    for chunk in rows.chunks(PREDICTION_INSERT_BATCH_SIZE) {
+    for chunk in rows.chunks(prediction_insert_batch_size()) {
         let mut builder = QueryBuilder::<Postgres>::new(
             "INSERT INTO model_prediction
                (prediction_set_id, trade_date, symbol, score, probability, rank, available_at) ",
@@ -5503,17 +5503,28 @@ async fn insert_prediction_rows(
     Ok(())
 }
 
-const PREDICTION_INSERT_BATCH_SIZE: usize = 5_000;
+/// model_prediction 批量插入分批行数。OnceLock 缓存——插入分批与遥测口径必须同值。
+fn prediction_insert_batch_size() -> usize {
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("ML_PREDICTION_INSERT_BATCH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(5_000)
+    })
+}
 
 fn prediction_insert_telemetry(rows: &[PredictionRow]) -> Value {
     let chunk_row_counts = rows
-        .chunks(PREDICTION_INSERT_BATCH_SIZE)
+        .chunks(prediction_insert_batch_size())
         .map(|chunk| chunk.len())
         .collect::<Vec<_>>();
     json!({
         "mode": "bulk_insert",
         "row_count": rows.len(),
-        "batch_size": PREDICTION_INSERT_BATCH_SIZE,
+        "batch_size": prediction_insert_batch_size(),
         "batch_count": chunk_row_counts.len(),
         "chunk_row_counts": chunk_row_counts,
     })

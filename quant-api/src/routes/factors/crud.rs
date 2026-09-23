@@ -1679,16 +1679,20 @@ pub async fn neutralize_factors(
 ) -> impl IntoResponse {
     use quant_factor::neutralize::{neutralize, NeutralizeConfig};
 
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    let fv_version = crate::routes::shared::factor_version();
+
     // 1. Load factor values
     let rows = sqlx::query_as::<_, (String, NaiveDate, Option<rust_decimal::Decimal>)>(
         "SELECT symbol, trade_date, raw_value FROM factor_value
-         WHERE factor_code = $1 AND factor_version = '1.0.0'
+         WHERE factor_code = $1 AND factor_version = $4
            AND trade_date >= $2::date AND trade_date <= $3::date
          ORDER BY trade_date, symbol",
     )
     .bind(&req.factor)
     .bind(&req.start_date)
     .bind(&req.end_date)
+    .bind(&fv_version)
     .fetch_all(&state.db)
     .await;
 
@@ -1791,13 +1795,14 @@ pub async fn neutralize_factors(
             }
             let res = sqlx::query(
                 "UPDATE factor_value SET neutralized_value = $4
-                 WHERE factor_code = $1 AND factor_version = '1.0.0'
+                 WHERE factor_code = $1 AND factor_version = $5
                    AND symbol = $2 AND trade_date = $3",
             )
             .bind(&req.factor) // original factor name
             .bind(&fv.symbol)
             .bind(fv.date)
             .bind(fv.value)
+            .bind(&fv_version)
             .execute(&mut *tx)
             .await;
             if let Ok(r) = res {

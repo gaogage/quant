@@ -254,6 +254,46 @@ pub async fn sync_stock_basic(
 
 // ─── sync_daily_bars ─────────────────────────────────────────────
 
+/// 日线同步: 单批股票数上限(API 单请求 ts_codes 数量约束)。
+/// OnceLock 缓存——div_ceil 进度分母与 chunks 实际分批必须同值。
+fn tushare_sync_chunk() -> usize {
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("TUSHARE_SYNC_CHUNK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(500)
+    })
+}
+
+/// 日线同步: 单页行数上限(Tushare daily API page size)。
+fn tushare_page_limit() -> usize {
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("TUSHARE_PAGE_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(4000)
+    })
+}
+
+/// 财务/资金流类接口: 按季度分批的窗口天数(避开 Tushare 单次分页限制)。
+fn finance_quarter_batch_days() -> i64 {
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    static CACHED: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("FINANCE_QUARTER_BATCH_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(92)
+    })
+}
+
 pub async fn sync_daily_bars(
     pool: &PgPool,
     client: &TushareClient,
@@ -296,7 +336,11 @@ pub async fn sync_daily_bars(
     // Iterate by month — Tushare batch returns one day when ts_codes are specified.
     // Monthly chunks avoid the single-day limitation while staying within API limits.
     let months = months_in_range(s, e);
-    let chunk_count = if total == 0 { 0 } else { total.div_ceil(500) };
+    let chunk_count = if total == 0 {
+        0
+    } else {
+        total.div_ceil(tushare_sync_chunk())
+    };
     let total_work = months.len().saturating_mul(chunk_count).max(1);
     let mut processed_work = 0usize;
     info!("Syncing {} symbols across {} months", total, months.len());
@@ -305,10 +349,10 @@ pub async fn sync_daily_bars(
         let sd = m_start.format("%Y%m%d").to_string();
         let ed = m_end.format("%Y%m%d").to_string();
 
-        for chunk in symbols.chunks(500) {
+        for chunk in symbols.chunks(tushare_sync_chunk()) {
             let chunk_vec: Vec<String> = chunk.to_vec();
             let mut offset = 0usize;
-            let page_limit = 4000usize; // Tushare daily API page size
+            let page_limit = tushare_page_limit(); // Tushare daily API page size
 
             // Paginated fetch: loop with offset until last page
             'page: loop {
@@ -2108,7 +2152,8 @@ pub async fn sync_moneyflow_hsgt(
     // 按季度分批查询，避免 Tushare 单次分页限制（~300 行/页）
     let mut batch_start = s;
     while batch_start <= e {
-        let batch_end = (batch_start + chrono::Duration::days(92)).min(e);
+        // 任务80: C类特许 → env 化（默认=原写死值）
+        let batch_end = (batch_start + chrono::Duration::days(finance_quarter_batch_days())).min(e);
         let start_str = batch_start.format("%Y%m%d").to_string();
         let end_str = batch_end.format("%Y%m%d").to_string();
 
@@ -2178,7 +2223,8 @@ pub async fn sync_margin(
     // 按季度分批查询
     let mut batch_start = s;
     while batch_start <= e {
-        let batch_end = (batch_start + chrono::Duration::days(92)).min(e);
+        // 任务80: C类特许 → env 化（默认=原写死值）
+        let batch_end = (batch_start + chrono::Duration::days(finance_quarter_batch_days())).min(e);
         let start_str = batch_start.format("%Y%m%d").to_string();
         let end_str = batch_end.format("%Y%m%d").to_string();
 

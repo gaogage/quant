@@ -62,8 +62,10 @@ pub fn compute_metrics(rets: &[f64], risk_free_rate: f64) -> Metrics {
         max_dd = max_dd.max((peak - nav) / peak);
     }
     let cumulative = nav - 1.0;
-    let ann_ret = (1.0 + cumulative).powf(252.0 / n) - 1.0;
-    let ann_vol = std * (252.0_f64).sqrt();
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    let ann_days = quant_common::config_env::annualization_days();
+    let ann_ret = (1.0 + cumulative).powf(ann_days / n) - 1.0;
+    let ann_vol = std * ann_days.sqrt();
     let sharpe = if ann_vol > 0.0 {
         (ann_ret - risk_free_rate) / ann_vol
     } else {
@@ -76,7 +78,7 @@ pub fn compute_metrics(rets: &[f64], risk_free_rate: f64) -> Metrics {
         let dm = downside.iter().sum::<f64>() / downside.len() as f64;
         let dv =
             downside.iter().map(|r| (r - dm).powi(2)).sum::<f64>() / (downside.len() - 1) as f64;
-        let ds = dv.sqrt() * (252.0_f64).sqrt();
+        let ds = dv.sqrt() * ann_days.sqrt();
         if ds > 0.0 {
             (ann_ret - risk_free_rate) / ds
         } else {

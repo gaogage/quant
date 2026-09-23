@@ -20,6 +20,32 @@ use crate::model::entities::{
 
 // ─── market_stock ────────────────────────────────────────────────
 
+/// PG 批量落库分批行数：daily_basic 宽行大批（原 2000/批）。
+fn pg_copy_batch_rows() -> usize {
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("PG_COPY_BATCH_ROWS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(2_000)
+    })
+}
+
+/// PG 批量 upsert 分批行数：常规表默认批（原 1000/批）。
+fn pg_upsert_batch_rows() -> usize {
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("PG_UPSERT_BATCH_ROWS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(1_000)
+    })
+}
+
 pub async fn upsert_stock(pool: &PgPool, stock: &MarketStock) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO market_stock (symbol, name, exchange, market, industry, list_status, list_date, delist_date, is_st)
@@ -245,7 +271,7 @@ pub async fn upsert_daily_basic_batch(
     }
 
     let mut saved = 0usize;
-    for chunk in rows.chunks(2_000) {
+    for chunk in rows.chunks(pg_copy_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_daily_basic \
              (symbol, trade_date, pe_ttm, pb, ps_ttm, dv_ttm, total_share, float_share, free_share, \
@@ -371,7 +397,7 @@ pub async fn upsert_moneyflow_batch(
     }
 
     let mut saved = 0usize;
-    for chunk in rows.chunks(1_000) {
+    for chunk in rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_moneyflow \
              (symbol, trade_date, \
@@ -453,7 +479,7 @@ pub async fn upsert_margin_detail_batch(
     }
 
     let mut saved = 0usize;
-    for chunk in rows.chunks(1_000) {
+    for chunk in rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_margin_detail \
              (symbol, trade_date, name, rzye, rqye, rzmre, rqyl, rzche, rqchl, rqmcl, rzrqye, \
@@ -579,7 +605,7 @@ pub async fn upsert_forecast_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_forecast \
              (symbol, ann_date, end_date, forecast_type, p_change_min, p_change_max, \
@@ -702,7 +728,7 @@ pub async fn upsert_express_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_express \
              (symbol, ann_date, end_date, revenue, n_income, yoy_sales, yoy_dedu_np, \
@@ -810,7 +836,7 @@ pub async fn upsert_disclosure_date_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_disclosure_date \
              (symbol, end_date, ann_date, pre_date, actual_date, modify_date, \
@@ -877,7 +903,7 @@ pub async fn upsert_cashflow_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_cashflow \
              (symbol, ann_date, f_ann_date, end_date, available_at, net_profit, \
@@ -945,7 +971,7 @@ pub async fn upsert_dividend_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_dividend \
              (symbol, end_date, ann_date, div_proc, available_at, cash_div, cash_div_tax, \
@@ -1025,7 +1051,7 @@ pub async fn upsert_repurchase_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_repurchase \
              (symbol, ann_date, end_date, proc, available_at, exp_date, vol, amount, \
@@ -1097,7 +1123,7 @@ pub async fn upsert_share_float_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_share_float \
              (symbol, ann_date, float_date, available_at, float_share, float_ratio, \
@@ -1163,7 +1189,7 @@ pub async fn upsert_main_business_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_main_business \
              (symbol, end_date, available_at, business_type, bz_item, bz_code, bz_sales, bz_profit, \
@@ -1231,7 +1257,7 @@ pub async fn upsert_futures_daily_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_futures_daily \
              (ts_code, trade_date, pre_close, pre_settle, open, high, low, close, settle, change1, \
@@ -1320,7 +1346,7 @@ pub async fn upsert_futures_warehouse_receipt_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_futures_warehouse_receipt \
              (trade_date, symbol, exchange, fut_name, warehouse, wh_id, pre_vol, vol, vol_chg, \
@@ -1409,7 +1435,7 @@ pub async fn upsert_futures_holding_rank_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_futures_holding_rank \
              (trade_date, symbol, exchange, broker, vol, vol_chg, long_hld, long_chg, short_hld, \
@@ -1485,7 +1511,7 @@ pub async fn upsert_industry_membership_batch(
         .cloned()
         .collect();
     let mut saved = 0usize;
-    for chunk in unique_rows.chunks(1_000) {
+    for chunk in unique_rows.chunks(pg_upsert_batch_rows()) {
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO market_stock_industry_membership_pit \
              (classification_source, industry_level, index_code, index_name, industry_code, \

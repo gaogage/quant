@@ -12,7 +12,7 @@ use sqlx::PgPool;
 use tracing::{info, warn};
 
 use crate::routes::scheduler::{check_task_dependency_order, V24_FACTOR_CODES};
-use crate::routes::shared::send_quality_alert;
+use crate::routes::shared::{factor_version, send_quality_alert};
 
 /// 事件驱动因子 → 上游稀疏公告源表映射(P2-2b 健康指标用)。
 /// 此类因子的覆盖率随披露季节脉冲波动, 不适用覆盖率骤降检测, 改查源表新鲜度。
@@ -73,6 +73,11 @@ impl FactorFreshnessBaseline {
 /// - 定时任务依赖顺序
 pub async fn run_data_quality_check(db: &PgPool, factor_baseline: FactorFreshnessBaseline) {
     let today = chrono::Utc::now().date_naive();
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    let calendar_exchange = std::env::var("MARKET_CALENDAR_EXCHANGE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "SSE".to_string());
 
     // 计算 A 股日线的交易日 gap
     let mut gaps: Vec<String> = Vec::new();
@@ -85,8 +90,8 @@ pub async fn run_data_quality_check(db: &PgPool, factor_baseline: FactorFreshnes
     .flatten();
     if let Some((max_dt,)) = stock_max {
         let trading_days_behind: (i64,) = sqlx::query_as(
-            "SELECT COUNT(DISTINCT trade_date) FROM market_trade_calendar WHERE exchange = 'SSE' AND is_open = true AND trade_date > $1 AND trade_date < $2"
-        ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((0,));
+            "SELECT COUNT(DISTINCT trade_date) FROM market_trade_calendar WHERE exchange = $3 AND is_open = true AND trade_date > $1 AND trade_date < $2"
+        ).bind(max_dt).bind(today).bind(&calendar_exchange).fetch_one(db).await.unwrap_or((0,));
         if trading_days_behind.0 > 1 {
             gaps.push(format!(
                 "A股日线: 最新={}, 落后{}个交易日",
@@ -114,8 +119,8 @@ pub async fn run_data_quality_check(db: &PgPool, factor_baseline: FactorFreshnes
             .flatten();
             if let Some((max_dt,)) = max_row {
                 let trading_gap: (i64,) = sqlx::query_as(
-                    "SELECT COUNT(DISTINCT trade_date) FROM market_trade_calendar WHERE exchange = 'SSE' AND is_open = true AND trade_date > $1 AND trade_date < $2"
-                ).bind(max_dt).bind(today).fetch_one(db).await.unwrap_or((0,));
+                    "SELECT COUNT(DISTINCT trade_date) FROM market_trade_calendar WHERE exchange = $3 AND is_open = true AND trade_date > $1 AND trade_date < $2"
+                ).bind(max_dt).bind(today).bind(&calendar_exchange).fetch_one(db).await.unwrap_or((0,));
                 if trading_gap.0 > 1 {
                     // ETF T+1，允许落后1个交易日
                     gaps.push(format!(
@@ -174,9 +179,11 @@ pub async fn run_data_quality_check(db: &PgPool, factor_baseline: FactorFreshnes
             for code in V24_FACTOR_CODES {
                 let max_row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
                     "SELECT MAX(trade_date) FROM factor_value
-                     WHERE factor_code = $1 AND factor_version = '1.0.0'",
+                     WHERE factor_code = $1 AND factor_version = $2",
                 )
+                // 任务80: C类特许 → env 化（默认=原写死值）
                 .bind(code)
+                .bind(factor_version())
                 .fetch_optional(db)
                 .await
                 .ok()
@@ -227,7 +234,7 @@ pub async fn run_data_quality_check(db: &PgPool, factor_baseline: FactorFreshnes
                 "WITH per_day AS (
                     SELECT factor_code, trade_date, COUNT(DISTINCT symbol) AS day_cnt
                     FROM factor_value
-                    WHERE factor_version = '1.0.0'
+                    WHERE factor_version = $3
                       AND factor_code = ANY($1)
                       AND trade_date >= $2
                     GROUP BY factor_code, trade_date
@@ -240,8 +247,10 @@ pub async fn run_data_quality_check(db: &PgPool, factor_baseline: FactorFreshnes
                  FROM latest l JOIN per_day p USING (factor_code)
                  GROUP BY l.factor_code, l.trade_date, l.day_cnt",
             )
+            // 任务80: C类特许 → env 化（默认=原写死值）
             .bind(&coverage_codes)
             .bind(window_start)
+            .bind(factor_version())
             .fetch_all(db)
             .await
             .unwrap_or_default();

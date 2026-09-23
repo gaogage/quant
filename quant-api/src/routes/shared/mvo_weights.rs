@@ -67,7 +67,8 @@ pub(crate) async fn compute_vol_target_leverage(
     let mean = rets.iter().sum::<f64>() / n;
     let variance = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
     let daily_vol = variance.sqrt();
-    let annual_vol = daily_vol * (252.0_f64).sqrt();
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    let annual_vol = daily_vol * quant_common::config_env::annualization_days().sqrt();
 
     if annual_vol < 0.05 {
         return 1.0;

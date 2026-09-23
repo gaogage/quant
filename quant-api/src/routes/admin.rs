@@ -11,6 +11,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::middleware::{require_admin, UserContext};
+use crate::routes::shared::factor_version;
 use crate::AppState;
 // 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
 use quant_common::time_utils::fmt_datetime;
@@ -1130,7 +1131,8 @@ pub async fn repair_sync(
                 };
                 let payload = serde_json::json!({
                     "combo_name": c.combo_name,
-                    "version": "1.0.0",
+                    // 任务80: C类特许 → env 化（默认=原写死值）
+                    "version": factor_version(),
                     "horizon": horizon,
                     "start_date": recent_start,
                     "end_date": today,
@@ -1201,10 +1203,11 @@ pub async fn repair_sync(
                         "label_horizon_days": 20, "min_training_samples": 200,
                         "max_windows": 20, "bucket_count": 10, "min_samples_per_bucket": 100,
                         "factors": [
-                            {"factor_code": "rev_5d_std", "factor_version": "1.0.0"},
-                            {"factor_code": "rev_20d_std", "factor_version": "1.0.0"},
-                            {"factor_code": "downvol_20d_std", "factor_version": "1.0.0"},
-                            {"factor_code": "amihud_20d_std", "factor_version": "1.0.0"}
+                            // 任务80: C类特许 → env 化（默认=原写死值）
+                            {"factor_code": "rev_5d_std", "factor_version": factor_version()},
+                            {"factor_code": "rev_20d_std", "factor_version": factor_version()},
+                            {"factor_code": "downvol_20d_std", "factor_version": factor_version()},
+                            {"factor_code": "amihud_20d_std", "factor_version": factor_version()}
                         ]
                     });
                     let url = format!("http://localhost:{}/api/v1/quant/ml/prediction-sets/walk-forward-nonlinear-quantile-ranker", port);
@@ -1568,7 +1571,7 @@ pub async fn factor_health(
                 "WITH per_day AS (
                     SELECT trade_date, COUNT(DISTINCT symbol) AS cnt
                     FROM factor_value
-                    WHERE factor_code = $1 AND factor_version = '1.0.0'
+                    WHERE factor_code = $1 AND factor_version = $3
                       AND trade_date >= $2
                     GROUP BY trade_date
                  ),
@@ -1580,6 +1583,8 @@ pub async fn factor_health(
             )
             .bind(code)
             .bind(window_start)
+            // 任务80: C类特许 → env 化（默认=原写死值）
+            .bind(factor_version())
             .fetch_optional(&state.db)
             .await
             .ok()

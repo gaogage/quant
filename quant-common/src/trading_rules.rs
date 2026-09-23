@@ -11,7 +11,20 @@
 use rust_decimal::Decimal;
 
 /// A股/ETF 最小交易单位(1手=100股/份)。
-pub const LOT_SIZE: u32 = 100;
+///
+/// 任务80 C类特许: 写死值改 env `LOT_SIZE` 可配, 未配置回退 100(原写死值)。
+/// OnceLock 缓存——回测 engine/调仓 rebalance 内循环高频取用。
+pub fn lot_size() -> u32 {
+    // 任务80: C类特许 → env 化（默认=原写死值）
+    static CACHED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("LOT_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(100)
+    })
+}
 
 /// 按最小交易单位向下取整。
 ///

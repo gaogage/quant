@@ -26,9 +26,18 @@ pub(crate) async fn send_dingtalk_alert_titled(db: &PgPool, title: &str, msg: &s
             });
             // 15s 总超时(2026-09-22 事故: 无超时 Client 卡死信号导出任务线程 15m+,
             // scp 已成功但成功日志被 webhook 挂起吞掉)。告警是旁路,永不拖死调用方。
+            // 任务80: C类特许 → env 化（默认=原写死值）
+            let timeout_secs = std::env::var("DINGTALK_ALERT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15);
+            let connect_timeout_secs = std::env::var("DINGTALK_ALERT_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10);
             let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(timeout_secs))
+                .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
                 .build()
                 .unwrap_or_default();
             let _ = client.post(url).json(&payload).send().await;
