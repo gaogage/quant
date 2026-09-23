@@ -103,6 +103,11 @@ pub struct ComboMaterializeConfig {
     /// 显式 horizon(strategy_config.combo_horizon 列,任务80 起为唯一权威来源);
     /// None 时经 required_combo_horizon 二次查配置,仍无则跳过该 combo。
     pub combo_horizon: Option<i16>,
+    /// 行业中性化物化(任务80 批1: 原 full_pit_icir_indneutral_val_v1 代码特判迁列)。
+    pub ind_neutral: bool,
+    /// 物化模式: pit=常规 PIT 物化 / phase7_backfill=phase7 回填路由
+    /// (任务80 批1: 原 phase7_price_volume_expanded_v1 代码特判迁列)。
+    pub materialize_mode: String,
 }
 
 /// 从 strategy_config 读取:含基本面因子的 combo(如 v24 fund_v2)需 include_fundamentals=true
@@ -113,8 +118,11 @@ pub async fn load_active_combo_materialize_configs(db: &PgPool) -> Vec<ComboMate
         Option<bool>,
         Option<serde_json::Value>,
         Option<i16>,
+        bool,
+        String,
     )> = sqlx::query_as(
-        "SELECT combo_name, include_fundamentals, factor_whitelist, combo_horizon
+        "SELECT combo_name, include_fundamentals, factor_whitelist, combo_horizon,
+                ind_neutral, materialize_mode
          FROM strategy_config
          WHERE status='active' AND combo_name IS NOT NULL AND btrim(combo_name) <> ''",
     )
@@ -123,7 +131,7 @@ pub async fn load_active_combo_materialize_configs(db: &PgPool) -> Vec<ComboMate
     .unwrap_or_default();
     let mut map: std::collections::BTreeMap<String, ComboMaterializeConfig> =
         std::collections::BTreeMap::new();
-    for (combo, inc_fund, whitelist, horizon) in rows {
+    for (combo, inc_fund, whitelist, horizon, ind_neutral, materialize_mode) in rows {
         if let Some(c) = combo {
             let c = c.trim().to_string();
             if c.is_empty() {
@@ -150,9 +158,18 @@ pub async fn load_active_combo_materialize_configs(db: &PgPool) -> Vec<ComboMate
                     include_fundamentals: false,
                     factor_whitelist: None,
                     combo_horizon: None,
+                    ind_neutral: false,
+                    materialize_mode: "pit".to_string(),
                 });
             if inc {
                 entry.include_fundamentals = true;
+            }
+            // 任务80 批1: 行业中性化任一声明即生效; 物化模式取首个 phase7_backfill
+            if ind_neutral {
+                entry.ind_neutral = true;
+            }
+            if entry.materialize_mode == "pit" && materialize_mode == "phase7_backfill" {
+                entry.materialize_mode = materialize_mode;
             }
             if entry.factor_whitelist.is_none() && wl.is_some() {
                 entry.factor_whitelist = wl;

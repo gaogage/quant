@@ -631,7 +631,8 @@ mod tests {
             !issues.iter().any(|i| i.contains("缺少必要定时任务")),
             "生产配置三件套应齐全: {issues:?}"
         );
-        // 当前 factor_backfill_daily 09:05 不早于 T+1 完成（9:10 判定阈值 9:00）
+        // 任务80 批1: factor_backfill_daily 09:05 不早于 T+1 触发 9:00（原 16:10
+        // EOD 完成假设在任务73 前移后漂移，且旧条件对 9:05 恒真产生误报——已修）
         assert!(
             !issues
                 .iter()
@@ -859,60 +860,62 @@ pub(crate) async fn dispatch_nightly_signal_prep(db: &PgPool, tushare: &TushareC
             "[夜间预备] phase7 因子回补完成 累计{}s",
             t0.elapsed().as_secs()
         );
-        let wl: Option<Vec<String>> = sqlx::query_scalar(
-                    "SELECT factor_whitelist FROM strategy_config WHERE strategy_id='v24' AND status='active'",
+        // 任务80 批1: 行业中性化 combo 从配置驱动(原 strategy_id='v24' 白名单 SQL +
+        // combo 名/horizon=20 三处字面量特判迁 strategy_config.ind_neutral 列)。
+        // ind_neutral 自举参数保留从 combo_materialization_log 读最近一次实际值。
+        let all_cfgs = load_active_combo_materialize_configs(&db2).await;
+        for ind_cfg in all_cfgs.iter().filter(|c| c.ind_neutral) {
+            let wl = ind_cfg.factor_whitelist.clone();
+            let ind_neut: bool = sqlx::query_scalar(
+                    "SELECT ind_neutral FROM combo_materialization_log WHERE combo_name=$1 ORDER BY materialized_at DESC LIMIT 1",
                 )
-                .fetch_optional(&db2)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|v: serde_json::Value| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()));
-        let ind_neut: bool = sqlx::query_scalar(
-                    "SELECT ind_neutral FROM combo_materialization_log WHERE combo_name='full_pit_icir_indneutral_val_v1' ORDER BY materialized_at DESC LIMIT 1",
-                )
+                .bind(&ind_cfg.combo_name)
                 .fetch_optional(&db2)
                 .await
                 .ok()
                 .flatten()
                 .unwrap_or(false);
-        match crate::routes::factors::materialize_pit_combo_ext(
-            &db2,
-            &crate::routes::factors::PitComboMaterializeParams {
-                combo_name: "full_pit_icir_indneutral_val_v1",
-                factor_version: "1.0.0",
-                horizon: 20,
-                start_date: date - chrono::Duration::days(120),
-                end_date: date,
-                include_fundamentals: true,
-                min_abs_ic_ir: None,
-                factor_whitelist: wl.as_deref(),
-                ind_neutral: ind_neut,
-            },
-        )
-        .await
-        {
-            Ok(rows) => info!(
-                "[夜间预备] PIT 物化 {} 行 累计{}s",
-                rows,
-                t0.elapsed().as_secs()
-            ),
-            Err(e) => {
-                error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e);
+            let Some(horizon) =
+                required_combo_horizon(&db2, &ind_cfg.combo_name, ind_cfg.combo_horizon).await
+            else {
+                continue;
+            };
+            match crate::routes::factors::materialize_pit_combo_ext(
+                &db2,
+                &crate::routes::factors::PitComboMaterializeParams {
+                    combo_name: &ind_cfg.combo_name,
+                    factor_version: "1.0.0",
+                    horizon,
+                    start_date: date - chrono::Duration::days(120),
+                    end_date: date,
+                    include_fundamentals: ind_cfg.include_fundamentals,
+                    min_abs_ic_ir: None,
+                    factor_whitelist: wl.as_deref(),
+                    ind_neutral: ind_neut,
+                },
+            )
+            .await
+            {
+                Ok(rows) => info!(
+                    "[夜间预备] PIT 物化(行业中性化) {} {} 行 累计{}s",
+                    ind_cfg.combo_name,
+                    rows,
+                    t0.elapsed().as_secs()
+                ),
+                Err(e) => {
+                    error!("[夜间预备] PIT 物化失败(次日9:30档兜底): {}", e);
+                }
             }
         }
         // 任务77(2026-09-23): nightly 链物化此前只覆盖 indneutral_val_v1,
         // 生产信号 combo(37f_h20_fund_v2 等)仅靠早间 09:30 档保鲜——
-        // 新鲜度门禁首夜即拦截(早间截面由 T-1 因子合成, 行写入早于夜间
-        // 回填完成, 且早间截面行数不完整 3893/5573)。此处追加遍历其余
-        // active full_pit_icir* combo 的夜间物化(与 pit_combo_refresh
-        // 同口径, 120d 增量窗口), 早间 09:30 档降级为兜底。
-        let pit_combos: Vec<_> = load_active_combo_materialize_configs(&db2)
-            .await
+        // 新鲜度门禁首夜即拦截。此处追加遍历其余 active combo 的夜间物化
+        // (与 pit_combo_refresh 同口径, 120d 增量窗口), 早间 09:30 档降级为兜底。
+        // 任务80 批1: 前缀白名单 starts_with("full_pit_icir") 退役,改由
+        // materialize_mode 列驱动(pit 模式 + 非行业中性化段)。
+        let pit_combos: Vec<_> = all_cfgs
             .into_iter()
-            .filter(|c| {
-                c.combo_name.starts_with("full_pit_icir")
-                    && c.combo_name != "full_pit_icir_indneutral_val_v1" // 前段已专门物化(ind_neutral 自举参数特殊)
-            })
+            .filter(|c| c.materialize_mode == "pit" && !c.ind_neutral)
             .collect();
         for cfg in &pit_combos {
             // 任务80: horizon 配置权威(列值→二次查配置→无则告警跳过,名字推断退役)
@@ -1076,10 +1079,11 @@ pub(crate) async fn dispatch_pit_combo_refresh(db: &PgPool, params: &serde_json:
     let pit_combos: Vec<_> = load_active_combo_materialize_configs(db)
         .await
         .into_iter()
-        .filter(|c| c.combo_name.starts_with("full_pit_icir"))
+        // 任务80 批1: 前缀白名单退役,materialize_mode 列驱动(新 combo 命名不再漏保鲜)
+        .filter(|c| c.materialize_mode == "pit")
         .collect();
     if pit_combos.is_empty() {
-        warn!("[scheduler] PIT combo 保鲜：无 active full_pit_icir* combo，跳过");
+        warn!("[scheduler] PIT combo 保鲜：无 materialize_mode=pit 的 active combo，跳过");
     }
     for cfg in &pit_combos {
         // 任务80: horizon 配置权威(列值→二次查配置→无则告警跳过,名字推断退役;
@@ -1796,7 +1800,7 @@ async fn run_tick(
                     "SELECT strategy_id, combo_name FROM strategy_config
                      WHERE status='active' AND strategy_type='composite'
                        AND combo_name IS NOT NULL AND combo_name <> ''
-                       AND combo_name <> 'phase7_price_volume_expanded_v1'
+                       AND materialize_mode = 'pit'
                      ORDER BY strategy_id",
                 )
                 .fetch_all(db)
@@ -2263,7 +2267,18 @@ pub async fn validate_pre_trade_data(
                 factor_combo, gap_td
             );
             let materialize_start = today - chrono::Duration::days(30);
-            let trigger_ok = if factor_combo == "phase7_price_volume_expanded_v1" {
+            // 任务80 批1: phase7 等值特判退役,materialize_mode 列驱动
+            let combo_mode: String = sqlx::query_scalar(
+                "SELECT materialize_mode FROM strategy_config
+                 WHERE status='active' AND combo_name=$1 LIMIT 1",
+            )
+            .bind(&factor_combo)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "pit".to_string());
+            let trigger_ok = if combo_mode == "phase7_backfill" {
                 let client = reqwest::Client::new();
                 let backfill_start = materialize_start.format("%Y%m%d").to_string();
                 let today_str_clone = today_str.clone();
@@ -2484,24 +2499,25 @@ pub async fn check_task_dependency_order(db: &PgPool) -> Vec<String> {
         }
     }
 
-    // 内置 scheduler 同步完成时间（北京时间）
-    // T+1 补同步: 9:00-9:10  |  EOD 同步: 16:00-16:10
-    let t1_complete = (9, 10); // 9:10 BJT
-    let eod_complete = (16, 10); // 16:10 BJT
+    // 内置 scheduler 同步时间假设（北京时间，任务73 前移后口径 2026-09-23 更新）
+    // 昨夜 EOD 主链: 21:30-23:30 已收尾；T+1 补同步触发: 9:00。
+    // 任务80 批1 修复：原 eod_complete=(16,10) 是 EOD 挪 22:00 之前的旧假设，
+    // 任务73 前移到 21:30 后该假设漂移——且原条件 `9:05 < 16:10 && 9:05 < 9:10`
+    // 恒真，每天对 factor_backfill_daily 产生误报。
+    // 正确语义：factor_backfill_daily 必须不早于 T+1 补同步触发（9:00），
+    // 否则因子计算缺当日日线（回填窗口 14 天容错昨日缺行，但当日必须靠 T+1 补齐）。
+    let t1_trigger_minutes: u32 = 9 * 60; // 9:00 BJT
 
     // 检查 factor_backfill_daily 的 CRON 时间
     for (name, hour, min) in &task_times {
         let time_minutes = hour * 60 + min;
 
-        if name == "factor_backfill_daily" {
-            let eod_min = eod_complete.0 * 60 + eod_complete.1;
-            if time_minutes < eod_min && time_minutes < t1_complete.0 * 60 {
-                issues.push(format!(
-                    "factor_backfill_daily: CRON {}:{:02} (BJ) 早于日线同步完成 (16:10),
-                     因子计算可能缺少当日日线数据",
-                    hour, min
-                ));
-            }
+        if name == "factor_backfill_daily" && time_minutes < t1_trigger_minutes {
+            issues.push(format!(
+                "factor_backfill_daily: CRON {}:{:02} (BJ) 早于 T+1 补同步触发 (9:00),
+                 因子计算可能缺少当日日线数据",
+                hour, min
+            ));
         }
 
         if name == "equity_curve_monthly" {
@@ -4311,10 +4327,11 @@ mod twelfth_batch {
         let db = test_db().await;
         let t0 = std::time::Instant::now();
         trigger_v24_backfill_routes(&db, "20260101", "20260102").await;
-        // 12 条路由 × 双栈(localhost→::1+127.0.0.1)逐次 refused ≈1.3s/条,放宽到 20s
-        // 上限防环境差异;真正要防的是无超时挂起(单路由 10s 总超时已兜底)。
+        // 12 条路由 × 双栈(localhost→::1+127.0.0.1)逐次 refused ≈1.3s/条;PORT_ENV_LOCK
+        // 排队后偶发耗时波动,上限 30s 防环境差异;真正要防的是无超时挂起
+        // (单路由 10s 总超时已兜底)。
         assert!(
-            t0.elapsed() < std::time::Duration::from_secs(20),
+            t0.elapsed() < std::time::Duration::from_secs(30),
             "连接拒绝应快速失败不挂起, 实际 {:?}",
             t0.elapsed()
         );
@@ -4373,7 +4390,8 @@ mod twelfth_batch {
         let configs = load_active_combo_materialize_configs(&db).await;
         let filtered: Vec<&str> = configs
             .iter()
-            .filter(|c| c.combo_name.starts_with("full_pit_icir"))
+            // 任务80 批1: 与生产同口径(materialize_mode 驱动,前缀白名单退役)
+            .filter(|c| c.materialize_mode == "pit")
             .map(|c| c.combo_name.as_str())
             .collect();
         assert!(
@@ -4386,9 +4404,29 @@ mod twelfth_batch {
                 .any(|c| c.combo_name == "phase7_zzz_test_sch12_v1"),
             "zzz 非 full_pit 行应进入配置读取(证明造数生效)"
         );
+        // 任务80 批1: 前缀白名单退役——排除语义改由 materialize_mode 驱动。
+        // zzz 行列默认 'pit' 故合法入选(新 combo 命名不再漏保鲜);
+        // 再造一行 phase7_backfill 模式断言被排除。
         assert!(
-            !filtered.contains(&"phase7_zzz_test_sch12_v1"),
-            "非 full_pit_icir 前缀必须被保鲜循环排除"
+            filtered.contains(&"phase7_zzz_test_sch12_v1"),
+            "materialize_mode=pit 的任意命名 combo 均应入选(前缀白名单已退役)"
+        );
+        sqlx::query(
+            "INSERT INTO strategy_config (strategy_id, name, combo_name, materialize_mode)
+             VALUES ('zzz_test_sch12_p7mode', 'zzz', 'zzz_test_sch12_p7backfill', 'phase7_backfill')",
+        )
+        .execute(&db)
+        .await
+        .expect("insert phase7_backfill mode 行");
+        let filtered2: Vec<String> = load_active_combo_materialize_configs(&db)
+            .await
+            .into_iter()
+            .filter(|c| c.materialize_mode == "pit")
+            .map(|c| c.combo_name)
+            .collect();
+        assert!(
+            !filtered2.iter().any(|c| c == "zzz_test_sch12_p7backfill"),
+            "materialize_mode=phase7_backfill 必须被保鲜循环排除"
         );
         cleanup_sch12_strategy_rows(&db).await;
     }

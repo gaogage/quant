@@ -138,6 +138,16 @@ pub async fn run_daily_simulation(
     let (a_task_id, dates) = load_simulation_dates(db, rs, start, end).await?;
     // 2.1 CSI300 预加载（regime 检测内存缓存）
     let csi300_map = preload_csi300_map(db, &dates).await?;
+    // 2.2 维保强平滑点(策略配置,任务80 批1 配置权威——循环外读一次)
+    let maint_slippage_cfg: f64 = sqlx::query_scalar(
+        "SELECT slippage_pct FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
+    )
+    .bind(&rs.strategy_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0.002);
 
     // 3. 逐日
     let mut prev_nav = init_cap_f;
@@ -184,11 +194,13 @@ pub async fn run_daily_simulation(
         let nav_first = update_current_nav(db, account_id).await?;
         // 3c.1 每日维保检查(实盘口径):维保<平仓线触发强平,平仓后重算 NAV。
         // 非调仓日也可能因价格下跌触发强平(券商每日盯市)。
-        // EodCloseAdj 基准模式无成本(slippage=0)不强平;实盘/EodClose 用 0.002。
+        // EodCloseAdj 基准模式无成本(slippage=0)不强平;实盘/EodClose 用策略配置滑点
+        // (任务80 批1: 原写死 0.002 绕过 strategy_config.slippage_pct——现网列值
+        //  即 0.002 行为不变,此处收口为配置权威;asset 策略行无该值时 fallback 保持)。
         let maint_slippage = if matches!(price_source, PriceSource::EodCloseAdj) {
             0.0
         } else {
-            0.002
+            maint_slippage_cfg
         };
         let (liq_n, _warn_block) = crate::routes::rebalance::check_maintenance_after_mark(
             db,
