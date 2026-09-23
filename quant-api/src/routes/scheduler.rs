@@ -72,7 +72,12 @@ fn self_api_base() -> String {
 /// 新增因子类别只需 INSERT 一行到 factor_backfill_route，无需改代码。
 async fn trigger_v24_backfill_routes(db: &PgPool, start_date: &str, end_date: &str) {
     let api_base = self_api_base();
-    let client = reqwest::Client::new();
+    // 任务79: 连接超时 5s 防自身 API 端口不可达时串行拖慢整链（实测 12 条路由
+    // 对不可达端口每条 ~1.3s 双栈尝试，无连接超时时依赖单路由 10s 总超时兜底）。
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
 
     // P4-1: 优先从 DB 读取路由清单，表空时回退硬编码常量。
     let routes: Vec<(String, String)> = match sqlx::query_as::<_, (String, String)>(
@@ -3790,5 +3795,783 @@ mod sixth_batch {
             (weights.iter().sum::<f64>() - 1.0).abs() < 1e-9,
             "权重和应归一为 1: {weights:?}"
         );
+    }
+}
+
+// ══ 第十二批覆盖专项(2026-09-23, 调度分派臂) ══
+// 靶点: 任务79 从 run_scheduled_tasks 拆出的 11 个 dispatch_* 分派臂的可测分支。
+// 直调的臂(经本地 HTTP 捕获服务 + PORT 环境变量注入, 详见 spawn_capture_server):
+//   dispatch_rolling_pit_eval / dispatch_market_level_source_freshness
+//   / dispatch_factor_backfill(载荷层)
+// 参数组装链测输入侧(不直调, 理由见各测试): dispatch_pit_combo_refresh
+//   / dispatch_mvo_equity_curve_update。
+// 明确跳过直调的臂(与 60 个 ignored 工具型同类, 见批次报告):
+//   dispatch_data_quality_check(真实全量质量检查, 滞缓时会真发钉钉告警)
+//   / dispatch_equity_curve_update(spawn 真实同步全部活跃策略权益曲线, 写表)
+//   / dispatch_nightly_signal_prep(spawn 整条夜间链: 回填+物化+Tushare 同步)
+//   / dispatch_ptrade_signal_export(spawn 真实 Tushare fund_nav/div + 实盘信号导出)
+//   / dispatch_ptrade_report_fetch(spawn IMAP 拉邮件 + 钉钉日报)
+//   / dispatch_native_pv_increment(spawn 真实因子增量计算, 写 factor_value)
+//   ——这六个壳的函数体是纯 spawn 转发, 无自有分支, 由第 15 号哨兵测试
+//   scheduled_task_registered_types_all_have_dispatch_arms 从调度入口侧兜底。
+#[cfg(test)]
+mod twelfth_batch {
+    use super::*;
+
+    // ── 基建: PORT 环境变量互斥 ──
+    // self_api_base() 读进程级 PORT 环境变量, 注入期间必须串行; 退出前恢复原值。
+    // sixth_batch::self_api_base_always_points_to_localhost 只断言形态(localhost:数字),
+    // 不依赖具体端口, 注入窗口对其无影响; 其余测试不读 PORT。
+    static PORT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// PORT 注入守卫: Drop 时恢复原值(原值缺省则移除), 防止污染并行测试。
+    struct PortGuard(Option<String>);
+
+    impl PortGuard {
+        fn set(value: &str) -> Self {
+            let old = std::env::var("PORT").ok();
+            std::env::set_var("PORT", value);
+            PortGuard(old)
+        }
+    }
+
+    impl Drop for PortGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("PORT", v),
+                None => std::env::remove_var("PORT"),
+            }
+        }
+    }
+
+    // ── 基建: 本地 HTTP 捕获服务 ──
+    // 绑 127.0.0.1 随机端口, 记录收到的 POST(path + JSON body) 并立即回 200,
+    // 让 dispatch_* 的内部 HTTP 自调用落到测试沙箱而非生产 8080, 且可精确断言载荷。
+    // 支持同连接 keep-alive 多请求(hyper 连接池会复用)。
+    #[derive(Debug, Clone)]
+    struct CapturedPost {
+        path: String,
+        body: serde_json::Value,
+    }
+
+    struct CaptureServer {
+        port: u16,
+        posts: Arc<std::sync::Mutex<Vec<CapturedPost>>>,
+        _task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for CaptureServer {
+        fn drop(&mut self) {
+            self._task.abort();
+        }
+    }
+
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    async fn spawn_capture_server() -> CaptureServer {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 随机端口");
+        let port = listener.local_addr().expect("local addr").port();
+        let posts: Arc<std::sync::Mutex<Vec<CapturedPost>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let shared = posts.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    continue;
+                };
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        // 持续读直到缓冲内出现一个完整请求(头 + Content-Length 字节体)
+                        loop {
+                            if let Some(header_end) = find_subsequence(&buf, b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                                let content_length = head
+                                    .lines()
+                                    .find_map(|l| {
+                                        let (k, v) = l.split_once(':')?;
+                                        if k.eq_ignore_ascii_case("content-length") {
+                                            v.trim().parse::<usize>().ok()
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or(0);
+                                if buf.len() >= header_end + 4 + content_length {
+                                    let body = buf[header_end + 4..header_end + 4 + content_length]
+                                        .to_vec();
+                                    let path = head
+                                        .lines()
+                                        .next()
+                                        .and_then(|req_line| req_line.split_whitespace().nth(1))
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let body_json: serde_json::Value =
+                                        serde_json::from_slice(&body)
+                                            .unwrap_or(serde_json::Value::Null);
+                                    shared.lock().unwrap().push(CapturedPost {
+                                        path,
+                                        body: body_json,
+                                    });
+                                    let resp: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 9\r\n\r\n{\"ok\":true}";
+                                    let _ = sock.write_all(resp).await;
+                                    // 消费已处理请求, 继续处理同连接的下一个(keep-alive)
+                                    buf.drain(..header_end + 4 + content_length);
+                                    break;
+                                }
+                            }
+                            match sock.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        CaptureServer {
+            port,
+            posts,
+            _task: task,
+        }
+    }
+
+    async fn test_db() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    // ── zzz 造数: strategy_config 独占键(无 FK, strategy_id 即主键) ──
+    // 造数三测共用 zzz_test_sch12% 前缀清理, 并行互跑会互删对方的行——
+    // 与 sixth_batch::WAIT_TEST_LOCK 同款互斥, 三测试必须串行。
+    static SCH12_ZZZ_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn cleanup_sch12_strategy_rows(db: &PgPool) {
+        let _ = sqlx::query("DELETE FROM strategy_config WHERE strategy_id LIKE $1")
+            .bind("zzz_test_sch12%")
+            .execute(db)
+            .await;
+    }
+
+    async fn insert_sch12_strategy(
+        db: &PgPool,
+        strategy_id: &str,
+        combo_name: &str,
+        combo_horizon: Option<i16>,
+        include_fundamentals: bool,
+        whitelist: Option<&serde_json::Value>,
+    ) {
+        sqlx::query(
+            "INSERT INTO strategy_config (strategy_id, name, combo_name, combo_horizon,
+                 include_fundamentals, factor_whitelist)
+             VALUES ($1, $1, $2, $3, $4, $5)",
+        )
+        .bind(strategy_id)
+        .bind(combo_name)
+        .bind(combo_horizon)
+        .bind(include_fundamentals)
+        .bind(whitelist)
+        .execute(db)
+        .await
+        .expect("insert zzz_test_sch12 strategy_config");
+    }
+
+    // ── dispatch_rolling_pit_eval: lookback 默认/覆盖 + horizon 双提交载荷 ──
+
+    /// 默认 params: 向 evaluate-rolling-pit/background 提交 horizon 20/60 两条,
+    /// 区间 = [end-370, end](lookback_days 缺省 370)。
+    #[tokio::test]
+    async fn rolling_pit_eval_default_posts_dual_horizon_370d_window() {
+        let _lock = PORT_ENV_LOCK.lock().await;
+        let d0 = chrono::Utc::now().date_naive();
+        let server = spawn_capture_server().await;
+        let _port = PortGuard::set(&server.port.to_string());
+        dispatch_rolling_pit_eval(&serde_json::json!({})).await;
+        let d1 = chrono::Utc::now().date_naive();
+
+        let posts = server.posts.lock().unwrap();
+        assert_eq!(posts.len(), 2, "horizon 20/60 各提交一次: {posts:?}");
+        let mut horizons: Vec<i64> = posts
+            .iter()
+            .map(|p| p.body["horizon"].as_i64().unwrap_or(-1))
+            .collect();
+        horizons.sort_unstable();
+        assert_eq!(horizons, vec![20, 60], "双 horizon 载荷: {posts:?}");
+        for p in posts.iter() {
+            assert_eq!(
+                p.path, "/api/v1/quant/factors/evaluate-rolling-pit/background",
+                "端点路径: {p:?}"
+            );
+            let end = NaiveDate::parse_from_str(
+                p.body["end_date"].as_str().unwrap_or_default(),
+                "%Y%m%d",
+            )
+            .expect("end_date 应可解析");
+            let start = NaiveDate::parse_from_str(
+                p.body["start_date"].as_str().unwrap_or_default(),
+                "%Y%m%d",
+            )
+            .expect("start_date 应可解析");
+            // dispatch 内取 now 与测试取 now 可能跨午夜, 允许 {d0, d1} 两个值
+            assert!(
+                end == d0 || end == d1,
+                "end_date 应为执行日(跨午夜容差): end={end} d0={d0} d1={d1}"
+            );
+            assert_eq!(
+                start,
+                end - chrono::Duration::days(370),
+                "默认 lookback=370 天: {p:?}"
+            );
+        }
+    }
+
+    /// params.lookback_days=30: 窗口收窄为 [end-30, end], 覆盖默认值。
+    #[tokio::test]
+    async fn rolling_pit_eval_lookback_days_param_narrows_window() {
+        let _lock = PORT_ENV_LOCK.lock().await;
+        let server = spawn_capture_server().await;
+        let _port = PortGuard::set(&server.port.to_string());
+        dispatch_rolling_pit_eval(&serde_json::json!({ "lookback_days": 30 })).await;
+
+        let posts = server.posts.lock().unwrap();
+        assert_eq!(posts.len(), 2, "双 horizon 各一条: {posts:?}");
+        for p in posts.iter() {
+            let end = NaiveDate::parse_from_str(
+                p.body["end_date"].as_str().unwrap_or_default(),
+                "%Y%m%d",
+            )
+            .expect("end_date");
+            let start = NaiveDate::parse_from_str(
+                p.body["start_date"].as_str().unwrap_or_default(),
+                "%Y%m%d",
+            )
+            .expect("start_date");
+            assert_eq!(
+                start,
+                end - chrono::Duration::days(30),
+                "lookback_days=30 应覆盖默认 370: {p:?}"
+            );
+        }
+    }
+
+    // ── dispatch_market_level_source_freshness: 源过滤 + 增量载荷 ──
+
+    /// 不认识的 source: payload 构造返回 None → warn 后 continue, 不发任何 POST
+    /// (必须注入沙箱端口验证——若该分支回归, 请求会打到生产 8080)。
+    #[tokio::test]
+    async fn market_level_freshness_unknown_source_posts_nothing() {
+        let _lock = PORT_ENV_LOCK.lock().await;
+        let server = spawn_capture_server().await;
+        let _port = PortGuard::set(&server.port.to_string());
+        let db = test_db().await;
+        dispatch_market_level_source_freshness(
+            &db,
+            &serde_json::json!({ "sources": ["zzz_test_sch12_unknown_source"] }),
+        )
+        .await;
+        let posts = server.posts.lock().unwrap();
+        assert!(posts.is_empty(), "未知源应跳过不发同步任务: {posts:?}");
+    }
+
+    /// 默认两源(margin/hsgt): 各 POST 一条 sync-tasks 增量任务, start = min(表内
+    /// 最新交易日+1, today), data_version_id 按 dv-p315-{slug}-{yyyymmdd} 生成。
+    #[tokio::test]
+    async fn market_level_freshness_known_sources_post_increment_windows() {
+        let _lock = PORT_ENV_LOCK.lock().await;
+        let db = test_db().await;
+        let margin_max: Option<NaiveDate> =
+            sqlx::query_scalar("SELECT MAX(trade_date) FROM market_margin")
+                .fetch_one(&db)
+                .await
+                .ok()
+                .flatten();
+        let hsgt_max: Option<NaiveDate> =
+            sqlx::query_scalar("SELECT MAX(trade_date) FROM market_moneyflow_hsgt")
+                .fetch_one(&db)
+                .await
+                .ok()
+                .flatten();
+
+        let server = spawn_capture_server().await;
+        let _port = PortGuard::set(&server.port.to_string());
+        dispatch_market_level_source_freshness(&db, &serde_json::json!({})).await;
+
+        let posts = server.posts.lock().unwrap();
+        assert_eq!(posts.len(), 2, "默认两源各一条: {posts:?}");
+        for p in posts.iter() {
+            assert_eq!(p.path, "/api/v1/quant/data/sync-tasks", "端点路径: {p:?}");
+        }
+        for (p, dataset, slug, latest) in [
+            (&posts[0], "margin", "margin", margin_max),
+            // dataset 用完整 Tushare 接口名（moneyflow_hsgt），slug 仅用于 dv 标识
+            (&posts[1], "moneyflow_hsgt", "hsgt", hsgt_max),
+        ] {
+            assert_eq!(p.body["dataset"], dataset, "数据集映射: {p:?}");
+            assert_eq!(p.body["source"], "tushare", "同步源: {p:?}");
+            assert_eq!(p.body["background"], true, "后台执行标志: {p:?}");
+            assert_eq!(
+                p.body["reason"], "scheduled_p315_market_level_regime_source_freshness",
+                "触发原因标记: {p:?}"
+            );
+            let end_str = p.body["end_date"].as_str().unwrap_or_default().to_string();
+            let end = NaiveDate::parse_from_str(&end_str, "%Y%m%d").expect("end_date");
+            assert_eq!(
+                p.body["data_version_id"],
+                serde_json::json!(format!("dv-p315-{slug}-{end_str}")),
+                "数据版本 id 格式: {p:?}"
+            );
+            let expected_start = latest
+                .map(|m| (m + chrono::Duration::days(1)).min(end))
+                .unwrap_or(end);
+            assert_eq!(
+                p.body["start_date"],
+                serde_json::json!(expected_start.format("%Y%m%d").to_string()),
+                "start = min(源表最新+1, today): latest={latest:?} {p:?}"
+            );
+        }
+    }
+
+    /// payload 纯函数 Some(latest) 分支: start = min(latest+1, today) —— 昨天→今天
+    /// (clamp 截断), 40 天前→39 天前(+1 步进), 当天→今天(不越过 today)。
+    #[test]
+    fn market_level_freshness_payload_clamps_and_increments_start() {
+        let today = NaiveDate::from_ymd_opt(2026, 6, 20).unwrap();
+        let d = |n: i64| today - chrono::Duration::days(n);
+
+        let p = market_level_freshness_sync_payload("market_margin_regime", Some(d(1)), today)
+            .expect("payload");
+        assert_eq!(p["start_date"], "20260620", "昨天的数据→从今天起拉");
+
+        let p =
+            market_level_freshness_sync_payload("market_moneyflow_hsgt_regime", Some(d(40)), today)
+                .expect("payload");
+        assert_eq!(
+            p["start_date"], "20260512",
+            "40 天前→+1 天步进(2026-05-11+1)"
+        );
+
+        let p = market_level_freshness_sync_payload("market_margin_regime", Some(today), today)
+            .expect("payload");
+        assert_eq!(
+            p["start_date"], "20260620",
+            "latest==today 时 min 截断, 不越界到明天"
+        );
+    }
+
+    /// payload 纯函数顶层守卫: 未知 source → None(dispatch 的 continue 分支判定)。
+    #[test]
+    fn market_level_freshness_payload_rejects_unknown_source() {
+        let today = NaiveDate::from_ymd_opt(2026, 6, 20).unwrap();
+        assert!(market_level_freshness_sync_payload(
+            "zzz_test_sch12_unknown_source",
+            Some(today),
+            today
+        )
+        .is_none());
+        assert!(
+            market_level_freshness_sync_payload("zzz_test_sch12_unknown_source", None, today)
+                .is_none()
+        );
+    }
+
+    // ── dispatch_factor_backfill: 14 天窗口 + DB 驱动路由 ──
+
+    /// 正常分支(日历有数据): 向 factor_backfill_route 表的全部启用路由 POST,
+    /// 窗口 = [最新开市日-14 天, 最新开市日](BACKFILL_WINDOW_DAYS 锚定为 14)。
+    /// 经捕获服务拦截, 不触达生产 8080 的真实回填。
+    #[tokio::test]
+    async fn factor_backfill_posts_14d_window_to_enabled_db_routes() {
+        assert_eq!(
+            BACKFILL_WINDOW_DAYS.num_days(),
+            14,
+            "BACKFILL_WINDOW_DAYS 值锚定(改动需同步断言)"
+        );
+        let _lock = PORT_ENV_LOCK.lock().await;
+        let db = test_db().await;
+        let enabled_routes: Vec<String> = sqlx::query_scalar(
+            "SELECT route_name FROM factor_backfill_route
+             WHERE enabled = true ORDER BY priority ASC, route_name ASC",
+        )
+        .fetch_all(&db)
+        .await
+        .expect("读取启用回填路由");
+        assert!(
+            !enabled_routes.is_empty(),
+            "生产 factor_backfill_route 应有启用路由(P4-1)"
+        );
+
+        let server = spawn_capture_server().await;
+        let _port = PortGuard::set(&server.port.to_string());
+        dispatch_factor_backfill(&db).await;
+
+        // 锁内提取 owned 数据后立即释放（clippy await_holding_lock：std MutexGuard
+        // 不得跨 await——日历对照查询挪到锁作用域外）
+        let posts: Vec<_> = server.posts.lock().unwrap().clone();
+        assert_eq!(
+            posts.len(),
+            enabled_routes.len(),
+            "每条启用路由各一次 POST: {posts:?}"
+        );
+        let mut got_paths: Vec<&str> = posts.iter().map(|p| p.path.as_str()).collect();
+        got_paths.sort_unstable();
+        let mut want_paths: Vec<String> = enabled_routes
+            .iter()
+            .map(|r| format!("/api/v1/quant/factors/{r}/background"))
+            .collect();
+        want_paths.sort_unstable();
+        assert_eq!(
+            got_paths, want_paths,
+            "路由清单应由 factor_backfill_route 表驱动(P4-1)"
+        );
+
+        let mut end_dates: Vec<&str> = posts
+            .iter()
+            .map(|p| p.body["end_date"].as_str().unwrap_or_default())
+            .collect();
+        end_dates.dedup();
+        assert_eq!(end_dates.len(), 1, "全部路由共用同一窗口终点");
+        let end = NaiveDate::parse_from_str(end_dates[0], "%Y%m%d").expect("end_date 应可解析");
+        // 自洽断言(免跨午夜 flaky): end 即『<=end 的最新开市日』
+        let sync_date: Option<(NaiveDate,)> = sqlx::query_as(
+            "SELECT trade_date FROM market_trade_calendar
+             WHERE is_open = true AND trade_date <= $1
+             ORDER BY trade_date DESC LIMIT 1",
+        )
+        .bind(end)
+        .fetch_optional(&db)
+        .await
+        .expect("日历查询");
+        assert_eq!(sync_date.map(|(d,)| d), Some(end), "end 应为最新开市日");
+        for p in posts.iter() {
+            let start = NaiveDate::parse_from_str(
+                p.body["start_date"].as_str().unwrap_or_default(),
+                "%Y%m%d",
+            )
+            .expect("start_date");
+            assert_eq!(
+                start,
+                end - chrono::Duration::days(14),
+                "backfill_start = 最新开市日 - 14 天: {p:?}"
+            );
+        }
+    }
+
+    /// 缺失分支的判定输入: dispatch 同款日历查询在『早于首行(1990-10-12)』的窗口
+    /// 返回 None(→ warn 跳过); 正常窗口返回 Some 作对照。
+    /// 不直调 dispatch 的理由: 生产日历不可清空, 而正常路径会真触发回填。
+    #[tokio::test]
+    async fn factor_backfill_empty_calendar_window_yields_no_sync_date() {
+        let db = test_db().await;
+        let empty: Option<(NaiveDate,)> = sqlx::query_as(
+            "SELECT trade_date FROM market_trade_calendar
+             WHERE is_open = true AND trade_date <= $1
+             ORDER BY trade_date DESC LIMIT 1",
+        )
+        .bind(NaiveDate::from_ymd_opt(1990, 1, 1).unwrap())
+        .fetch_optional(&db)
+        .await
+        .expect("日历查询");
+        assert!(empty.is_none(), "空窗口应查无开市日(缺失分支判定)");
+        let normal: Option<(NaiveDate,)> = sqlx::query_as(
+            "SELECT trade_date FROM market_trade_calendar
+             WHERE is_open = true AND trade_date <= $1
+             ORDER BY trade_date DESC LIMIT 1",
+        )
+        .bind(chrono::Utc::now().date_naive())
+        .fetch_optional(&db)
+        .await
+        .expect("日历查询");
+        assert!(normal.is_some(), "当前窗口应查得到开市日(对照)");
+    }
+
+    /// trigger_v24_backfill_routes 容错链: API 端口不可达时逐路由 warn,
+    /// 全部 12 条 refused 也不挂起(单路由失败不中断后续)。
+    #[tokio::test]
+    async fn backfill_routes_survive_unreachable_api_port() {
+        let _lock = PORT_ENV_LOCK.lock().await;
+        let _port = PortGuard::set("1");
+        let db = test_db().await;
+        let t0 = std::time::Instant::now();
+        trigger_v24_backfill_routes(&db, "20260101", "20260102").await;
+        // 12 条路由 × 双栈(localhost→::1+127.0.0.1)逐次 refused ≈1.3s/条,放宽到 20s
+        // 上限防环境差异;真正要防的是无超时挂起(单路由 10s 总超时已兜底)。
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(20),
+            "连接拒绝应快速失败不挂起, 实际 {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// fallback 常量锚定: DB 路由表异常时的最后防线, 至少 12 类因子、
+    /// 路由段唯一且符合 URL 命名约定(无空格, -backfill 结尾)。
+    #[test]
+    fn backfill_routes_fallback_constant_shape() {
+        assert!(
+            V24_BACKFILL_ROUTES_FALLBACK.len() >= 12,
+            "fallback 至少覆盖 12 类因子"
+        );
+        let routes: Vec<&str> = V24_BACKFILL_ROUTES_FALLBACK
+            .iter()
+            .map(|(r, _)| *r)
+            .collect();
+        let unique: std::collections::BTreeSet<&str> = routes.iter().copied().collect();
+        assert_eq!(routes.len(), unique.len(), "路由段不得重复");
+        for (route, label) in V24_BACKFILL_ROUTES_FALLBACK {
+            assert!(!route.contains(' '), "路由段不得含空格: {route}");
+            assert!(
+                route.ends_with("-backfill"),
+                "命名约定 -backfill 结尾: {route}"
+            );
+            assert!(!label.is_empty(), "label 不得为空: {route}");
+        }
+        assert!(
+            routes.contains(&"phase7-price-volume-backfill"),
+            "量价路由(最基础)不得被误删"
+        );
+    }
+
+    // ── dispatch_pit_combo_refresh: 参数组装链(不直调, 见各测试说明) ──
+
+    /// full_pit_icir 前缀过滤的非空性锚点(空集告警分支的反向回归): 生产 active
+    /// combo 中恒有 full_pit_icir* → 保鲜循环不会空转; 非 full_pit 前缀(含 zzz
+    /// 造的 phase7_* 行)必须被排除。2026-09-20 曾因 or_insert_with 漏赋
+    /// combo_name 导致该过滤恒空集、保鲜静默空转近两个月——此测试防复发。
+    /// 不直调 dispatch 的理由: 正常分支会真实物化生产 combo(写 multi_factor_value)。
+    #[tokio::test]
+    async fn pit_combo_refresh_filter_keeps_full_pit_prefix_combos_only() {
+        let _zzz_guard = SCH12_ZZZ_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_sch12_strategy_rows(&db).await;
+        insert_sch12_strategy(
+            &db,
+            "zzz_test_sch12_other",
+            "phase7_zzz_test_sch12_v1",
+            None,
+            false,
+            None,
+        )
+        .await;
+
+        let configs = load_active_combo_materialize_configs(&db).await;
+        let filtered: Vec<&str> = configs
+            .iter()
+            .filter(|c| c.combo_name.starts_with("full_pit_icir"))
+            .map(|c| c.combo_name.as_str())
+            .collect();
+        assert!(
+            filtered.len() >= 2,
+            "生产应恒有 active full_pit_icir* combo(空集告警分支不触发): {filtered:?}"
+        );
+        assert!(
+            configs
+                .iter()
+                .any(|c| c.combo_name == "phase7_zzz_test_sch12_v1"),
+            "zzz 非 full_pit 行应进入配置读取(证明造数生效)"
+        );
+        assert!(
+            !filtered.contains(&"phase7_zzz_test_sch12_v1"),
+            "非 full_pit_icir 前缀必须被保鲜循环排除"
+        );
+        cleanup_sch12_strategy_rows(&db).await;
+    }
+
+    /// horizon 组装仲裁: 显式 combo_horizon 列优先, 列缺失才用名字推断兜底。
+    /// zzz 行: 列=7 / 名字推断(_h3)=3 → 组装取 7;
+    /// 生产 37f_h20_fund_v2: 列 NULL → 名字推断 —— 注意 rfind("_h") 后缀是
+    /// "20_fund_v2", parse 失败兜底 1(而非直觉的 20), 如实锚定当前行为。
+    #[tokio::test]
+    async fn pit_combo_refresh_horizon_column_wins_over_name_inference() {
+        let _zzz_guard = SCH12_ZZZ_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_sch12_strategy_rows(&db).await;
+        insert_sch12_strategy(
+            &db,
+            "zzz_test_sch12_col",
+            "full_pit_icir_zzz_test_sch12_h3",
+            Some(7),
+            false,
+            None,
+        )
+        .await;
+
+        let configs = load_active_combo_materialize_configs(&db).await;
+        let zzz = configs
+            .iter()
+            .find(|c| c.combo_name == "full_pit_icir_zzz_test_sch12_h3")
+            .expect("zzz combo 配置应被读取");
+        assert_eq!(zzz.combo_horizon, Some(7), "显式列值: {zzz:?}");
+        assert_eq!(
+            combo_horizon_from_name("full_pit_icir_zzz_test_sch12_h3"),
+            3,
+            "名字推断 _h3 → 3"
+        );
+        let assembled = zzz
+            .combo_horizon
+            .unwrap_or_else(|| combo_horizon_from_name(&zzz.combo_name));
+        assert_eq!(assembled, 7, "列值必须压过名字推断(dispatch 同款仲裁)");
+
+        // 生产 combo 的组装结果(现网真实生效口径)
+        let ind = configs
+            .iter()
+            .find(|c| c.combo_name == "full_pit_icir_indneutral_val_v1")
+            .expect("生产 indneutral combo");
+        assert_eq!(
+            ind.combo_horizon,
+            Some(20),
+            "indneutral 显式列=20(2026-09-05 修复的口径)"
+        );
+        let f37 = configs
+            .iter()
+            .find(|c| c.combo_name == "full_pit_icir_37f_h20_fund_v2")
+            .expect("生产 37f combo");
+        assert!(f37.combo_horizon.is_none(), "37f 未配显式列(现网): {f37:?}");
+        assert_eq!(
+            combo_horizon_from_name("full_pit_icir_37f_h20_fund_v2"),
+            1,
+            "名字后缀 20_fund_v2 不可解析 → 兜底 1(当前真实行为, 疑与 _h20 命名意图不符, 见批次报告)"
+        );
+        cleanup_sch12_strategy_rows(&db).await;
+    }
+
+    /// 同名 combo 多策略声明合并(dispatch 组装 include_fundamentals/whitelist 的
+    /// 输入): include_fundamentals 任一 true 则 true, whitelist 取首个非空,
+    /// horizon 取首个非 None —— 顺序无关。生产 indneutral combo 含基本面因子。
+    #[tokio::test]
+    async fn pit_combo_refresh_config_merges_fund_flag_and_whitelist() {
+        let _zzz_guard = SCH12_ZZZ_LOCK.lock().await;
+        let db = test_db().await;
+        cleanup_sch12_strategy_rows(&db).await;
+        let combo = "full_pit_icir_zzz_test_sch12_merge";
+        let wl = serde_json::json!(["zzz_f1", "zzz_f2"]);
+        insert_sch12_strategy(&db, "zzz_test_sch12_m_a", combo, None, false, None).await;
+        insert_sch12_strategy(&db, "zzz_test_sch12_m_b", combo, Some(9), true, Some(&wl)).await;
+
+        let configs = load_active_combo_materialize_configs(&db).await;
+        let merged = configs
+            .iter()
+            .find(|c| c.combo_name == combo)
+            .expect("合并后同名 combo 应只有一条");
+        assert!(
+            merged.include_fundamentals,
+            "任一策略声明 true 则合并为 true(OR 语义): {merged:?}"
+        );
+        let got_wl = merged
+            .factor_whitelist
+            .as_ref()
+            .expect("首个非空 whitelist 应被保留");
+        assert_eq!(got_wl.len(), 2, "白名单两项: {got_wl:?}");
+        assert_eq!(got_wl[0], "zzz_f1");
+        assert_eq!(
+            merged.combo_horizon,
+            Some(9),
+            "首个非 None horizon 应被保留(与插入顺序无关): {merged:?}"
+        );
+
+        let ind = configs
+            .iter()
+            .find(|c| c.combo_name == "full_pit_icir_indneutral_val_v1")
+            .expect("生产 indneutral combo");
+        assert!(
+            ind.include_fundamentals,
+            "生产 v24 主 combo 含基本面因子(fin_/mf_ 等): {ind:?}"
+        );
+        cleanup_sch12_strategy_rows(&db).await;
+    }
+
+    // ── dispatch_mvo_equity_curve_update: 输入契约(不直调) ──
+
+    /// 生产注册的 mvo_equity_curve_update 任务 params 形状契约: strategy_id/
+    /// benchmark_account_id/start_date 均为字符串且 start_date 可解析 %Y%m%d,
+    /// 可选 leverage_multiplier 为正有限数, 策略 id 必须是 active 策略。
+    /// 不直调 dispatch 的理由: params 解析内联进函数体且输出仅进 spawn 闭包,
+    /// 唯一可观察通道是真实 MVO 基准重跑(写 backtest_mvo_equity_curve, 分钟级)。
+    #[tokio::test]
+    async fn mvo_equity_curve_update_registered_params_are_well_formed() {
+        let db = test_db().await;
+        let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT task_name, params FROM scheduled_task_config
+             WHERE task_type = 'mvo_equity_curve_update' AND enabled = true",
+        )
+        .fetch_all(&db)
+        .await
+        .expect("读取 mvo 任务注册");
+        assert!(!rows.is_empty(), "生产应注册 mvo 基准任务");
+
+        let active_ids: Vec<String> =
+            sqlx::query_scalar("SELECT strategy_id FROM strategy_config WHERE status = 'active'")
+                .fetch_all(&db)
+                .await
+                .expect("读取 active 策略");
+        for (name, params) in &rows {
+            let sid = params["strategy_id"].as_str().unwrap_or_default();
+            assert!(!sid.is_empty(), "{name}: strategy_id 应为非空字符串");
+            assert!(
+                active_ids.iter().any(|s| s == sid),
+                "{name}: strategy_id={sid} 应是 active 策略, 否则 spawn 内 load 失败仅 warn"
+            );
+            let bench = params["benchmark_account_id"].as_str().unwrap_or_default();
+            assert!(
+                !bench.is_empty(),
+                "{name}: benchmark_account_id 应为非空字符串"
+            );
+            let sd = params["start_date"].as_str().unwrap_or_default();
+            assert_eq!(sd.len(), 8, "{name}: start_date 应为 yyyymmdd: {sd}");
+            assert!(
+                NaiveDate::parse_from_str(sd, "%Y%m%d").is_ok(),
+                "{name}: start_date 应可解析: {sd}"
+            );
+            if let Some(lm) = params["leverage_multiplier"].as_f64() {
+                assert!(
+                    lm > 0.0 && lm.is_finite(),
+                    "{name}: leverage_multiplier 应为正有限数"
+                );
+            }
+        }
+    }
+
+    // ── 调度入口哨兵: 防『注册了无分派臂的任务类型而绿着空转』 ──
+
+    /// run_scheduled_tasks 的 11 个分派臂(task79 拆分后全集)。新 task_type 注册
+    /// 进 scheduled_task_config 而代码未部署对应分支时, 会被记 unhandled 而非
+    /// 静默 success(2026-09-21 rolling_pit_eval 教训); 本哨兵在注册侧提前拦截。
+    const KNOWN_DISPATCH_ARMS: &[&str] = &[
+        "data_quality_check",
+        "equity_curve_update",
+        "mvo_equity_curve_update",
+        "factor_backfill",
+        "nightly_signal_prep",
+        "ptrade_signal_export",
+        "ptrade_report_fetch",
+        "native_pv_increment",
+        "pit_combo_refresh",
+        "rolling_pit_eval",
+        "market_level_source_freshness",
+    ];
+
+    #[tokio::test]
+    async fn scheduled_task_registered_types_all_have_dispatch_arms() {
+        let db = test_db().await;
+        let registered: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT task_type FROM scheduled_task_config WHERE enabled = true",
+        )
+        .fetch_all(&db)
+        .await
+        .expect("读取启用的任务类型");
+        assert!(!registered.is_empty());
+        for task_type in &registered {
+            assert!(
+                KNOWN_DISPATCH_ARMS.contains(&task_type.as_str()),
+                "任务类型 '{task_type}' 在 11 个分派臂中无对应分支——先部署分派代码再注册, \
+                 否则该任务每轮被记 unhandled 空转"
+            );
+        }
     }
 }
