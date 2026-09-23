@@ -4432,11 +4432,14 @@ mod twelfth_batch {
             .iter()
             .find(|c| c.combo_name == "full_pit_icir_37f_h20_fund_v2")
             .expect("生产 37f combo");
-        assert!(f37.combo_horizon.is_none(), "37f 未配显式列(现网): {f37:?}");
+        assert!(
+            f37.combo_horizon.is_some() && f37.combo_horizon == Some(20),
+            "37f 显式列=20(任务79c 双修后现网配置): {f37:?}"
+        );
         assert_eq!(
             combo_horizon_from_name("full_pit_icir_37f_h20_fund_v2"),
-            1,
-            "名字后缀 20_fund_v2 不可解析 → 兜底 1(当前真实行为, 疑与 _h20 命名意图不符, 见批次报告)"
+            20,
+            "任务79c: 前导数字解析修复后, 名字推断与列值/命名意图三口径一致"
         );
         cleanup_sch12_strategy_rows(&db).await;
     }

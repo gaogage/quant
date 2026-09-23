@@ -36,9 +36,19 @@ pub async fn load_active_etf_symbols_union(db: &PgPool) -> Vec<String> {
 
 /// 从 combo_name 推断 PIT horizon：`full_pit_icir_37f_h20` → 20，无 `_hN` 后缀 → 1。
 /// 用于 pit_combo_refresh 遍历所有 active combo 时为每个 combo 取正确 horizon。
+///
+/// 任务79c（2026-09-23 用户裁决双修）：取 `_h` 后的**前导数字段**
+/// （`37f_h20_fund_v2` → "20_fund_v2" → 20）。原实现取整个后缀 parse，
+/// 带 `_hN` 中段的名解析失败**静默走兜底 1**——37f combo 的
+/// combo_horizon 列全 NULL 时名字推断是唯一来源，保鲜物化实际用
+/// horizon=1 与命名意图 _h20 错配（ICIR 权重评估窗口失真，晨日志实锤）。
 pub(crate) fn combo_horizon_from_name(combo: &str) -> i16 {
     if let Some(idx) = combo.rfind("_h") {
-        if let Ok(h) = combo[idx + 2..].parse::<i16>() {
+        let digits: String = combo[idx + 2..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(h) = digits.parse::<i16>() {
             if h > 0 {
                 return h;
             }
@@ -254,6 +264,14 @@ mod second_batch {
         assert_eq!(combo_horizon_from_name("combo_h"), 1);
         // rfind 取最后一个 _h：多段时取尾部
         assert_eq!(combo_horizon_from_name("a_h5_h20"), 20);
+        // 任务79c：_hN 中段带后缀（生产实名形态）取前导数字——原实现取整个
+        // 后缀 "20_fund_v2" parse 失败静默兜底 1，与命名意图 _h20 错配
+        assert_eq!(combo_horizon_from_name("full_pit_icir_37f_h20_fund_v2"), 20);
+        // 前导数字后跟非数字段：取数字，不因后缀 parse 失败丢整个 horizon
+        assert_eq!(combo_horizon_from_name("combo_h3_tail"), 3);
+        // _h 后紧跟非数字（如 _hold/_hedge）：数字段为空 → 兜底 1（不误取）
+        assert_eq!(combo_horizon_from_name("combo_hold"), 1);
+        assert_eq!(combo_horizon_from_name("combo_hedge_v2"), 1);
     }
 
     // ── 只读查询（真实库）──
