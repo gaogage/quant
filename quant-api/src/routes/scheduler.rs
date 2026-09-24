@@ -438,6 +438,26 @@ mod tests {
     }
 
     #[test]
+    fn eod_catchup_window_boundaries() {
+        // 2026-09-24 补跑语义边界：窗口错过后 21:40~次日 06:59 可补，07:00 后不补
+        // （避开晨链/调仓；07:00 后由 09:00 T+1 兜底）
+        let past = |h: u32, m: u32| h > 21 || (h == 21 && m >= 40);
+        // 窗口刚过（21:40）→ 可补
+        assert!(past(21, 40) || (21 < 7));
+        // 深夜/凌晨 → 可补
+        for (h, m) in [(22, 0), (23, 59), (0, 0), (3, 30), (6, 59)] {
+            assert!(past(h, m) || (h < 7), "{h}:{m} 应在补跑时段");
+        }
+        // 晨链时段（07:00-21:29）→ 不补
+        for (h, m) in [(7, 0), (9, 0), (12, 0), (21, 29), (21, 39)] {
+            assert!(
+                !(past(h, m) || (h < 7)),
+                "{h}:{m} 不应补跑（等 T+1 兜底或窗口本体）"
+            );
+        }
+    }
+
+    #[test]
     fn eod_sync_window_does_not_replay_after_startup_late_in_day() {
         // EOD 于 21:30（任务73 前移，原 22:00）：fund_daily 晚到由 akshare 兜底 + 9:00 T+1 补
         assert!(is_eod_sync_window(21, 30));
@@ -1589,7 +1609,16 @@ async fn run_tick(
     }
 
     // ── 21:30 (盘后数据就绪, 任务73 前移): 交易日EOD + 非交易日也执行数据同步 ──
-    if is_eod_sync_window(hour, minute) {
+    // 2026-09-24 补跑语义（休眠/重启错过窗口根治）：EOD 是窗口型触发，与 cron 类
+    // 任务的 catch-up 语义不一致——实测 9/24 电脑 21:30-21:40 窗口休眠，唤醒后
+    // 21:58 的 cron 任务全部补跑成功，唯 EOD 整链缺失（adj/盯市/日报零执行，
+    // 23:00 信号导出依赖靠手动补数救回）。修复：窗口已过且当日未同步时，在
+    // 21:40 ~ 次日 07:00 安全时段内补跑（避开晨链/调仓窗口——EOD 全链约 90 分钟，
+    // 串行 tick 下 07:00 后补跑会卡住 09:00 T+1 与 09:35 调仓；07:00 后不再补，
+    // 由 09:00 T+1 补同步兜底）。eod_synced_today 幂等标志防重。
+    let past_eod_window = hour > 21 || (hour == 21 && minute >= 40);
+    let eod_catchup_due = past_eod_window || hour < 7;
+    if is_eod_sync_window(hour, minute) || eod_catchup_due {
         let should_sync = {
             let st = state.lock().await;
             !st.eod_synced_today
@@ -1600,9 +1629,40 @@ async fn run_tick(
                 let mut st = state.lock().await;
                 st.eod_synced_today = true;
             }
-            info!("[scheduler] 21:30 日终数据同步...");
-            if let Err(e) = crate::routes::sync::sync_eod_data(db, tushare, today, is_trade).await {
-                warn!("[scheduler] 日终数据同步失败: {}", e);
+            if is_eod_sync_window(hour, minute) {
+                info!("[scheduler] 21:30 日终数据同步...");
+                if let Err(e) =
+                    crate::routes::sync::sync_eod_data(db, tushare, today, is_trade).await
+                {
+                    warn!("[scheduler] 日终数据同步失败: {}", e);
+                }
+            } else {
+                // 补跑日期 = <=今天 的最近交易日（凌晨唤醒时 today 已跨日，直接用
+                // today 会错跑新日期；非交易日唤醒则补最近交易日的 EOD，幂等重算）
+                let missed: Option<(NaiveDate,)> = sqlx::query_as(
+                    "SELECT trade_date FROM market_trade_calendar
+                     WHERE exchange = 'SSE' AND is_open = true AND trade_date <= $1
+                     ORDER BY trade_date DESC LIMIT 1",
+                )
+                .bind(today)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+                let Some((missed_date,)) = missed else {
+                    info!("[scheduler] EOD 补跑跳过：无交易日历数据");
+                    return Ok(());
+                };
+                info!(
+                    "[scheduler] EOD 补跑（休眠/重启错过 21:30 窗口，{}，补跑交易日 {}）...",
+                    now.format("%H:%M"),
+                    missed_date
+                );
+                if let Err(e) =
+                    crate::routes::sync::sync_eod_data(db, tushare, missed_date, true).await
+                {
+                    warn!("[scheduler] EOD 补跑失败: {}", e);
+                }
             }
 
             // 日报推送已在 sync_eod_data 内部提前完成（composite 合成后立即推，
