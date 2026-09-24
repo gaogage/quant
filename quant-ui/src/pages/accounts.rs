@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::api;
 use crate::components::charts::{CumulativeLineChart, ReturnVsBenchmarkChart};
-use dioxus::events::{Key, KeyboardEvent};
 use dioxus::events::FormEvent;
+use dioxus::events::{Key, KeyboardEvent};
 
 // ── 过滤器子组件：使用 Dioxus 信号管理状态，通过 use_callback 稳定回调避免重渲染 ──
 
@@ -20,11 +20,26 @@ fn FilterBar(on_search: Callback<String>) -> Element {
 
     let build_filter = move || {
         let mut p = Vec::new();
-        let n = f_name.read(); if !n.is_empty() { p.push(format!("name={}", &*n)); }
-        let l = f_leverage.read(); if *l != "all" { p.push(format!("leverage={}", &*l)); }
-        let lmin = f_lev_min.read(); if !lmin.is_empty() { p.push(format!("lev_mult_min={}", &*lmin)); }
-        let lmax = f_lev_max.read(); if !lmax.is_empty() { p.push(format!("lev_mult_max={}", &*lmax)); }
-        let st = f_status.read(); if *st != "all" { p.push(format!("status={}", &*st)); }
+        let n = f_name.read();
+        if !n.is_empty() {
+            p.push(format!("name={}", &*n));
+        }
+        let l = f_leverage.read();
+        if *l != "all" {
+            p.push(format!("leverage={}", &*l));
+        }
+        let lmin = f_lev_min.read();
+        if !lmin.is_empty() {
+            p.push(format!("lev_mult_min={}", &*lmin));
+        }
+        let lmax = f_lev_max.read();
+        if !lmax.is_empty() {
+            p.push(format!("lev_mult_max={}", &*lmax));
+        }
+        let st = f_status.read();
+        if *st != "all" {
+            p.push(format!("status={}", &*st));
+        }
         p.join("&")
     };
     let do_search = move || on_search(build_filter());
@@ -126,7 +141,11 @@ pub fn AccountsContent() -> Element {
         loading.set(true);
         spawn(async move {
             match api::list_accounts(&filter).await {
-                Ok(v) => { if let Some(arr) = v["data"].as_array() { accounts.set(arr.clone()); } }
+                Ok(v) => {
+                    if let Some(arr) = v["data"].as_array() {
+                        accounts.set(arr.clone());
+                    }
+                }
                 Err(e) => error.set(e),
             }
             loading.set(false);
@@ -134,7 +153,10 @@ pub fn AccountsContent() -> Element {
     };
 
     use_effect(move || {
-        if !*inited.read() { inited.set(true); load(String::new()); }
+        if !*inited.read() {
+            inited.set(true);
+            load(String::new());
+        }
     });
 
     // 用 use_memo 创建稳定回调引用，避免 FilterBar 因父组件重渲染而丢失输入值
@@ -144,9 +166,17 @@ pub fn AccountsContent() -> Element {
     let show_reset = reset_modal.read().is_some();
     if show_reset {
         let reset_acc = reset_modal.read().clone().unwrap();
-        let acc_name = reset_acc.get("name").and_then(|v| v.as_str()).unwrap_or("-").to_string();
-        let acc_id = reset_acc.get("paper_account_id").or(reset_acc.get("account_id"))
-            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let acc_name = reset_acc
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+            .to_string();
+        let acc_id = reset_acc
+            .get("paper_account_id")
+            .or(reset_acc.get("account_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let cap_val = reset_capital.read().clone();
         let date_val = reset_date.read().clone();
         let is_loading = *reset_loading.read();
@@ -212,9 +242,17 @@ pub fn AccountsContent() -> Element {
     let show_edit = edit_modal.read().is_some();
     if show_edit {
         let edit_acc = edit_modal.read().clone().unwrap();
-        let acc_id = edit_acc.get("paper_account_id").or(edit_acc.get("account_id"))
-            .and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let acc_name = edit_acc.get("name").and_then(|v| v.as_str()).unwrap_or("-").to_string();
+        let acc_id = edit_acc
+            .get("paper_account_id")
+            .or(edit_acc.get("account_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let acc_name = edit_acc
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+            .to_string();
         let name_val = edit_name.read().clone();
         let strategy_val = edit_strategy.read().clone();
         let leverage_val = *edit_leverage.read();
@@ -368,14 +406,25 @@ pub fn AccountsContent() -> Element {
     let show_replay = replay_modal.read().is_some();
     if show_replay {
         let replay_acc = replay_modal.read().clone().unwrap();
-        let acc_name = replay_acc.get("name").and_then(|v| v.as_str()).unwrap_or("-").to_string();
-        let acc_id = replay_acc.get("paper_account_id").or(replay_acc.get("account_id"))
-            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let acc_name = replay_acc
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+            .to_string();
+        let acc_id = replay_acc
+            .get("paper_account_id")
+            .or(replay_acc.get("account_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let start_val = replay_start.read().clone();
         let end_val = replay_end.read().clone();
         let is_loading = *replay_loading.read();
         let result = replay_result.read().clone();
-        let cap = replay_acc.get("initial_capital").and_then(|v| v.as_f64()).unwrap_or(1000000.0) as i64;
+        let cap = replay_acc
+            .get("initial_capital")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1000000.0) as i64;
 
         return rsx! {
             div { class: "fixed inset-0 bg-black/60 z-50 flex items-center justify-center",
@@ -1083,6 +1132,85 @@ pub fn AccountsContent() -> Element {
     }
 }
 
+/// 图表时间范围控件条（2026-09-24 从 AccountReturnChart 提取）：
+/// 快捷按钮(近1年/近3年/全部) + 精确起止日期输入。独立组件以便
+/// 错误分支（无 NAV 数据）同样渲染——用户随时可重新选择时间窗口。
+#[component]
+fn ChartRangeBar(
+    mut start_date: Signal<String>,
+    mut end_date: Signal<String>,
+    mut load_trigger: Signal<u32>,
+) -> Element {
+    let now = js_sys::Date::new_0();
+    let cur_year = now.get_full_year() as i32;
+    let cur_month = now.get_month() as i32;
+    let cur_day = now.get_date() as i32;
+    let start_input = start_date.read().clone();
+    let end_input = end_date.read().clone();
+    let mut bump = move || {
+        let t = *load_trigger.read();
+        load_trigger.set(t.wrapping_add(1));
+    };
+    rsx! {
+        div { class: "flex flex-wrap items-center gap-2 text-xs",
+            button {
+                class: "px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-700",
+                onclick: move |_| {
+                    let n = js_sys::Date::new_0();
+                    let s = js_date_str(n.get_full_year() as i32 - 1, n.get_month() as i32, n.get_date() as i32);
+                    let e = js_date_str(n.get_full_year() as i32, n.get_month() as i32, n.get_date() as i32);
+                    start_date.set(s);
+                    end_date.set(e);
+                    bump();
+                },
+                "近1年"
+            }
+            button {
+                class: "px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-700",
+                onclick: move |_| {
+                    let n = js_sys::Date::new_0();
+                    let s = js_date_str(n.get_full_year() as i32 - 3, n.get_month() as i32, n.get_date() as i32);
+                    let e = js_date_str(n.get_full_year() as i32, n.get_month() as i32, n.get_date() as i32);
+                    start_date.set(s);
+                    end_date.set(e);
+                    bump();
+                },
+                "近3年"
+            }
+            button {
+                class: "px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-700",
+                onclick: move |_| {
+                    start_date.set("2020-01-01".to_string());
+                    end_date.set(js_date_str(cur_year, cur_month, cur_day));
+                    bump();
+                },
+                "全部"
+            }
+            span { class: "text-gray-300 dark:text-gray-600", "|" }
+            // 精确日期输入（oninput 实时同步 value，onchange 失焦触发加载，避免输入年份被截断）
+            input {
+                r#type: "date",
+                class: "px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs",
+                value: "{start_input}",
+                oninput: move |e: FormEvent| {
+                    start_date.set(e.value().to_string());
+                },
+                onchange: move |_| { bump(); },
+            }
+            span { class: "text-gray-400", "—" }
+            input {
+                r#type: "date",
+                class: "px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs",
+                value: "{end_input}",
+                oninput: move |e: FormEvent| {
+                    end_date.set(e.value().to_string());
+                },
+                onchange: move |_| { bump(); },
+            }
+        }
+    }
+}
+
 /// 收益率曲线子面板 — 在账号详情"资产大类占比"右侧展示。
 /// 默认最近 1 年，可通过日期选择器自定义起止时间。
 fn js_date_str(y: i32, m0: i32, d: i32) -> String {
@@ -1094,7 +1222,7 @@ fn AccountReturnChart(account_id: String) -> Element {
     // 默认最近 1 年（用 js_sys::Date 获取 WASM 环境下的今天）
     let now = js_sys::Date::new_0();
     let cur_year = now.get_full_year() as i32;
-    let cur_month = now.get_month() as i32;       // 0-based
+    let cur_month = now.get_month() as i32; // 0-based
     let cur_day = now.get_date() as i32;
     let default_end = js_date_str(cur_year, cur_month, cur_day);
     // 一年前：粗略减 1 年（月日相同，闰日 2/29 退化为 2/28 由 JS Date 自动归正，这里用字符串拼接足够）
@@ -1135,8 +1263,17 @@ fn AccountReturnChart(account_id: String) -> Element {
     let bench_curve: Vec<Value> = benchmark["curve"].as_array().cloned().unwrap_or_default();
 
     if nav_points.len() < 2 {
+        // 2026-09-24 修复：错误分支必须保留时间选择器（原实现整组件替换为错误文案，
+        // 选到无数据窗口即被锁死只能刷新——用户实锤：重放清表期间选 9 月窗口触发）。
         return rsx! {
-            div { class: "text-xs text-gray-400 py-8 text-center", "选定日期范围内无 NAV 数据" }
+            div { class: "space-y-2",
+                ChartRangeBar {
+                    start_date: start_date,
+                    end_date: end_date,
+                    load_trigger: load_trigger,
+                }
+                div { class: "text-xs text-gray-400 py-8 text-center", "选定日期范围内无 NAV 数据（可调整上方时间范围重试）" }
+            }
         };
     }
 
@@ -1145,82 +1282,39 @@ fn AccountReturnChart(account_id: String) -> Element {
     let start_input = start_date.read().clone();
     let end_input = end_date.read().clone();
 
-    let dates: Vec<String> = nav_points.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
+    let dates: Vec<String> = nav_points
+        .iter()
+        .map(|p| p["date"].as_str().unwrap_or("").to_string())
+        .collect();
     // relative_return：相对选中时间段首日归零（首日=0%），与基准曲线起点对齐
-    let acct_ret: Vec<f64> = nav_points.iter().map(|p| p["relative_return"].as_f64().unwrap_or(0.0)).collect();
+    let acct_ret: Vec<f64> = nav_points
+        .iter()
+        .map(|p| p["relative_return"].as_f64().unwrap_or(0.0))
+        .collect();
     // hover tooltip 数据：当日净值与当日收益
-    let acct_nav: Vec<f64> = nav_points.iter().map(|p| p["nav"].as_f64().unwrap_or(0.0)).collect();
-    let acct_daily: Vec<f64> = nav_points.iter().map(|p| p["daily_return"].as_f64().unwrap_or(0.0)).collect();
-    let bench_dates: Vec<String> = bench_curve.iter().map(|p| p["date"].as_str().unwrap_or("").to_string()).collect();
-    let bench_ret: Vec<f64> = bench_curve.iter().map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0)).collect();
+    let acct_nav: Vec<f64> = nav_points
+        .iter()
+        .map(|p| p["nav"].as_f64().unwrap_or(0.0))
+        .collect();
+    let acct_daily: Vec<f64> = nav_points
+        .iter()
+        .map(|p| p["daily_return"].as_f64().unwrap_or(0.0))
+        .collect();
+    let bench_dates: Vec<String> = bench_curve
+        .iter()
+        .map(|p| p["date"].as_str().unwrap_or("").to_string())
+        .collect();
+    let bench_ret: Vec<f64> = bench_curve
+        .iter()
+        .map(|p| p["cumulative_return"].as_f64().unwrap_or(0.0))
+        .collect();
 
     rsx! {
         div { class: "space-y-2",
-            div { class: "flex flex-wrap items-center gap-2 text-xs",
-                // 快捷范围选择（年维度）
-                button {
-                    class: "px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-700",
-                    onclick: move |_| {
-                        let now = js_sys::Date::new_0();
-                        let s = js_date_str(now.get_full_year() as i32 - 1, now.get_month() as i32, now.get_date() as i32);
-                        let e = js_date_str(now.get_full_year() as i32, now.get_month() as i32, now.get_date() as i32);
-                        start_date.set(s);
-                        end_date.set(e);
-                        let t = *load_trigger.read();
-                        load_trigger.set(t.wrapping_add(1));
-                    },
-                    "近1年"
-                }
-                button {
-                    class: "px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-700",
-                    onclick: move |_| {
-                        let now = js_sys::Date::new_0();
-                        let s = js_date_str(now.get_full_year() as i32 - 3, now.get_month() as i32, now.get_date() as i32);
-                        let e = js_date_str(now.get_full_year() as i32, now.get_month() as i32, now.get_date() as i32);
-                        start_date.set(s);
-                        end_date.set(e);
-                        let t = *load_trigger.read();
-                        load_trigger.set(t.wrapping_add(1));
-                    },
-                    "近3年"
-                }
-                button {
-                    class: "px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-blue-50 dark:hover:bg-gray-700",
-                    onclick: move |_| {
-                        start_date.set("2020-01-01".to_string());
-                        end_date.set(js_date_str(cur_year, cur_month, cur_day));
-                        let t = *load_trigger.read();
-                        load_trigger.set(t.wrapping_add(1));
-                    },
-                    "全部"
-                }
-                span { class: "text-gray-300 dark:text-gray-600", "|" }
-                // 精确日期输入（oninput 实时同步 value，onchange 失焦触发加载，避免输入年份被截断）
-                input {
-                    r#type: "date",
-                    class: "px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs",
-                    value: "{start_input}",
-                    oninput: move |e: FormEvent| {
-                        start_date.set(e.value().to_string());
-                    },
-                    onchange: move |_| {
-                        let t = *load_trigger.read();
-                        load_trigger.set(t.wrapping_add(1));
-                    },
-                }
-                span { class: "text-gray-400", "—" }
-                input {
-                    r#type: "date",
-                    class: "px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs",
-                    value: "{end_input}",
-                    oninput: move |e: FormEvent| {
-                        end_date.set(e.value().to_string());
-                    },
-                    onchange: move |_| {
-                        let t = *load_trigger.read();
-                        load_trigger.set(t.wrapping_add(1));
-                    },
-                }
+            ChartRangeBar {
+                start_date: start_date,
+                end_date: end_date,
+                load_trigger: load_trigger,
             }
 
             ReturnVsBenchmarkChart {
@@ -1405,12 +1499,17 @@ fn DailyReturnPanel(account_id: String) -> Element {
         spawn(async move {
             if let Ok(v) = api::get_nav_history(&id).await {
                 if let Some(arr) = v["data"]["nav_history"].as_array() {
-                    let mut rows: Vec<(String, f64, f64, f64)> = arr.iter().map(|item| (
-                        item["date"].as_str().unwrap_or("-").to_string(),
-                        item["nav"].as_f64().unwrap_or(0.0),
-                        0.0,
-                        item["daily_return"].as_f64().unwrap_or(0.0),
-                    )).collect();
+                    let mut rows: Vec<(String, f64, f64, f64)> = arr
+                        .iter()
+                        .map(|item| {
+                            (
+                                item["date"].as_str().unwrap_or("-").to_string(),
+                                item["nav"].as_f64().unwrap_or(0.0),
+                                0.0,
+                                item["daily_return"].as_f64().unwrap_or(0.0),
+                            )
+                        })
+                        .collect();
                     rows.reverse(); // 最近在前
                     let n = rows.len();
                     for i in 0..n {
