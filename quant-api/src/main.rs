@@ -817,6 +817,10 @@ async fn main() {
             post(routes::paper::simulate_multi_window),
         )
         .route(
+            "/api/v1/quant/dashboard/pipeline-health",
+            get(routes::dashboard::pipeline_health),
+        )
+        .route(
             "/api/v1/quant/paper/historical-replay",
             post(routes::historical_replay::historical_replay),
         )

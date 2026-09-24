@@ -16,6 +16,7 @@ pub fn DashboardContent() -> Element {
     let mut accounts = use_signal(|| Vec::<Value>::new());
     let mut strategies = use_signal(|| Vec::<Value>::new());
     let mut blueprint = use_signal(|| Value::Null);
+    let mut health = use_signal(|| Value::Null);
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| String::new());
 
@@ -25,10 +26,12 @@ pub fn DashboardContent() -> Element {
             let acc_res = api::list_accounts("").await;
             let strat_res = api::list_strategies().await;
             let blueprint_res = api::blueprint_progress().await;
+            let health_res = api::pipeline_health().await;
 
             let mut accs = Vec::new();
             let mut strats = Vec::new();
             let mut blueprint_data = Value::Null;
+            let mut health_data = Value::Null;
             let mut err = String::new();
 
             match acc_res {
@@ -59,6 +62,7 @@ pub fn DashboardContent() -> Element {
             accounts.set(accs);
             strategies.set(strats);
             blueprint.set(blueprint_data);
+            health.set(health_data);
             error.set(err);
             loading.set(false);
         });
@@ -98,6 +102,11 @@ pub fn DashboardContent() -> Element {
                 div { class: "mb-4 p-3 bg-red-50 dark:bg-red-900/50 border border-red-300 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm",
                     "{error}"
                 }
+            }
+
+            // 生产链路健康（2026-09-24 立项：驾驶舱第一卡——调度/调仓/信号一瞥）
+            if !health.read().is_null() {
+                PipelineHealthPanel { data: health.read().clone() }
             }
 
             // 统计卡片（2026-09-24：账号数=活跃口径——54 全量含 50 历史研究账号，
@@ -276,6 +285,115 @@ fn AccountCard(data: Value) -> Element {
             div { class: "text-right",
                 div { class: "text-sm text-gray-700 dark:text-gray-300", "¥{cap}" }
                 span { class: "text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400", "{status}" }
+            }
+        }
+    }
+}
+
+/// 生产链路健康面板：总体状态灯 + 三列（今日调仓/信号导出/数据新鲜度）+ 任务 chips。
+/// 语义：healthy=全绿 / warning=有迟到 / degraded=有失败或 unhandled。
+#[component]
+fn PipelineHealthPanel(data: Value) -> Element {
+    let overall = data["overall"].as_str().unwrap_or("unknown");
+    let (overall_label, overall_cls) = match overall {
+        "healthy" => ("生产链路正常", "text-green-600 dark:text-green-400"),
+        "warning" => ("有任务迟到", "text-yellow-600 dark:text-yellow-400"),
+        "degraded" => ("存在失败任务", "text-red-600 dark:text-red-400"),
+        _ => ("未知", "text-gray-500"),
+    };
+    let rebalance = &data["today_rebalance"];
+    let reb_date = rebalance["date"].as_str().unwrap_or("-");
+    let reb_accounts: Vec<Value> = rebalance["accounts"].as_array().cloned().unwrap_or_default();
+    let reb_total: i64 = reb_accounts.iter().filter_map(|a| a["orders"].as_i64()).sum();
+    let signal = &data["signal_export"];
+    let fresh = &data["freshness"];
+
+    rsx! {
+        section { class: "mb-8 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-5",
+            div { class: "flex items-center justify-between mb-4",
+                h2 { class: "text-lg font-semibold text-gray-900 dark:text-white", "生产链路健康" }
+                span { class: "text-sm font-medium {overall_cls}", "{overall_label}" }
+            }
+
+            div { class: "grid grid-cols-3 gap-4 mb-4",
+                // 今日调仓
+                div { class: "border border-gray-100 dark:border-gray-800 rounded-md p-3",
+                    div { class: "text-xs text-gray-400 dark:text-gray-500 mb-1", "今日调仓（{reb_date}）" }
+                    if reb_total == 0 {
+                        div { class: "text-sm text-gray-400", "今日暂无成交" }
+                    } else {
+                        div { class: "text-lg font-semibold text-gray-900 dark:text-white", "{reb_total} 笔成交" }
+                        for a in reb_accounts.iter() {
+                            {
+                                let aid = a["account_id"].as_str().unwrap_or("-");
+                                let n = a["orders"].as_i64().unwrap_or(0);
+                                let last = a["last_at"].as_str().and_then(|t| t.get(11..16)).unwrap_or("");
+                                rsx! {
+                                    div { class: "text-xs text-gray-500 dark:text-gray-400 mt-1 truncate",
+                                        "{aid}：{n} 笔 · 末笔 {last}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // 信号导出
+                div { class: "border border-gray-100 dark:border-gray-800 rounded-md p-3",
+                    div { class: "text-xs text-gray-400 dark:text-gray-500 mb-1", "信号导出（PTrade）" }
+                    if signal.is_null() {
+                        div { class: "text-sm text-gray-400", "尚无信号文件" }
+                    } else {
+                        {
+                            let target = signal["target_trade_date"].as_str().unwrap_or("-");
+                            let exported = signal["exported_at"].as_str().and_then(|t| t.get(11..19)).unwrap_or("-");
+                            rsx! {
+                                div { class: "text-sm text-gray-900 dark:text-white", "目标交易日 {target}" }
+                                div { class: "text-xs text-gray-500 dark:text-gray-400 mt-1", "导出于 {exported}（每日 23:00 自动）" }
+                            }
+                        }
+                    }
+                }
+                // 数据新鲜度
+                div { class: "border border-gray-100 dark:border-gray-800 rounded-md p-3",
+                    div { class: "text-xs text-gray-400 dark:text-gray-500 mb-1", "数据新鲜度（最新交易日）" }
+                    {
+                        let bar = fresh["bar_latest"].as_str().unwrap_or("-");
+                        let factor = fresh["factor_latest"].as_str().unwrap_or("-");
+                        let nav = fresh["nav_latest"].as_str().unwrap_or("-");
+                        rsx! {
+                            div { class: "text-xs text-gray-600 dark:text-gray-400", "日线：{bar}" }
+                            div { class: "text-xs text-gray-600 dark:text-gray-400 mt-0.5", "因子截面：{factor}" }
+                            div { class: "text-xs text-gray-600 dark:text-gray-400 mt-0.5", "NAV 快照：{nav}" }
+                        }
+                    }
+                }
+            }
+
+            // 任务 chips（状态点 + 迟到红标）
+            div { class: "flex flex-wrap gap-2",
+                for t in data["tasks"].as_array().cloned().unwrap_or_default().iter() {
+                    {
+                        let name = t["task_name"].as_str().unwrap_or("-");
+                        let status = t["last_status"].as_str().unwrap_or("-");
+                        let overdue = t["overdue"].as_bool().unwrap_or(false);
+                        let next = t["next_run_at"].as_str().and_then(|s| s.get(11..16)).unwrap_or("--:--");
+                        let dot_cls = if overdue { "bg-red-500" }
+                            else if status == "success" { "bg-green-500" }
+                            else if status == "failed" || status == "unhandled" { "bg-red-500" }
+                            else { "bg-gray-400" };
+                        let chip_cls = if overdue {
+                            "text-xs px-2 py-1 rounded-full border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-300"
+                        } else {
+                            "text-xs px-2 py-1 rounded-full border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-400"
+                        };
+                        rsx! {
+                            span { class: "{chip_cls} inline-flex items-center gap-1.5",
+                                span { class: "inline-block w-1.5 h-1.5 rounded-full {dot_cls}" }
+                                "{name} · 下次 {next}"
+                            }
+                        }
+                    }
+                }
             }
         }
     }

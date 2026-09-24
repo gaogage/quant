@@ -6,6 +6,7 @@ pub mod attribution;
 pub mod backtest;
 pub mod blueprint;
 pub mod cleanup;
+pub mod dashboard;
 pub mod data_quality;
 pub mod data_validation;
 pub mod dingtalk;

@@ -60,11 +60,17 @@ async fn try_refresh() -> bool {
     let builder = http::Request::post(&url).header("Content-Type", "application/json");
     let req = match builder.body(body_str) {
         Ok(r) => r,
-        Err(_) => { AuthState::logout(); return false; }
+        Err(_) => {
+            AuthState::logout();
+            return false;
+        }
     };
     let resp = match req.send().await {
         Ok(r) => r,
-        Err(_) => { AuthState::logout(); return false; }
+        Err(_) => {
+            AuthState::logout();
+            return false;
+        }
     };
 
     if let Ok(body) = resp.json::<Value>().await {
@@ -85,11 +91,17 @@ async fn get(path: &str) -> Result<Value, String> {
     let url = format!("{}{}", base_url(), path);
     // first try
     let builder1 = http::Request::get(&url).header("Content-Type", "application/json");
-    let resp = add_auth(builder1).send().await.map_err(|e| format!("网络错误: {}", e))?;
+    let resp = add_auth(builder1)
+        .send()
+        .await
+        .map_err(|e| format!("网络错误: {}", e))?;
     if resp.status() == 401 && try_refresh().await {
         // retry
         let builder2 = http::Request::get(&url).header("Content-Type", "application/json");
-        let resp2 = add_auth(builder2).send().await.map_err(|e| format!("网络错误: {}", e))?;
+        let resp2 = add_auth(builder2)
+            .send()
+            .await
+            .map_err(|e| format!("网络错误: {}", e))?;
         return resp2.json().await.map_err(|e| format!("解析失败: {}", e));
     }
     resp.json().await.map_err(|e| format!("解析失败: {}", e))
@@ -100,12 +112,16 @@ async fn post(path: &str, payload: &Value) -> Result<Value, String> {
     let body_str = serde_json::to_string(payload).map_err(|e| format!("序列化失败: {}", e))?;
     // first try
     let b1 = http::Request::post(&url).header("Content-Type", "application/json");
-    let req1 = add_auth(b1).body(body_str.clone()).map_err(|e| format!("构建请求失败: {}", e))?;
+    let req1 = add_auth(b1)
+        .body(body_str.clone())
+        .map_err(|e| format!("构建请求失败: {}", e))?;
     let resp = req1.send().await.map_err(|e| format!("网络错误: {}", e))?;
     if resp.status() == 401 && try_refresh().await {
         // retry
         let b2 = http::Request::post(&url).header("Content-Type", "application/json");
-        let req2 = add_auth(b2).body(body_str).map_err(|e| format!("构建请求失败: {}", e))?;
+        let req2 = add_auth(b2)
+            .body(body_str)
+            .map_err(|e| format!("构建请求失败: {}", e))?;
         let resp2 = req2.send().await.map_err(|e| format!("网络错误: {}", e))?;
         return resp2.json().await.map_err(|e| format!("解析失败: {}", e));
     }
@@ -117,12 +133,16 @@ async fn put(path: &str, payload: &Value) -> Result<Value, String> {
     let body_str = serde_json::to_string(payload).map_err(|e| format!("序列化失败: {}", e))?;
     // first try
     let b1 = http::Request::put(&url).header("Content-Type", "application/json");
-    let req1 = add_auth(b1).body(body_str.clone()).map_err(|e| format!("构建请求失败: {}", e))?;
+    let req1 = add_auth(b1)
+        .body(body_str.clone())
+        .map_err(|e| format!("构建请求失败: {}", e))?;
     let resp = req1.send().await.map_err(|e| format!("网络错误: {}", e))?;
     if resp.status() == 401 && try_refresh().await {
         // retry
         let b2 = http::Request::put(&url).header("Content-Type", "application/json");
-        let req2 = add_auth(b2).body(body_str).map_err(|e| format!("构建请求失败: {}", e))?;
+        let req2 = add_auth(b2)
+            .body(body_str)
+            .map_err(|e| format!("构建请求失败: {}", e))?;
         let resp2 = req2.send().await.map_err(|e| format!("网络错误: {}", e))?;
         return resp2.json().await.map_err(|e| format!("解析失败: {}", e));
     }
@@ -133,10 +153,16 @@ async fn put(path: &str, payload: &Value) -> Result<Value, String> {
 async fn delete(path: &str) -> Result<Value, String> {
     let url = format!("{}{}", base_url(), path);
     let b1 = http::Request::delete(&url).header("Content-Type", "application/json");
-    let resp = add_auth(b1).send().await.map_err(|e| format!("网络错误: {}", e))?;
+    let resp = add_auth(b1)
+        .send()
+        .await
+        .map_err(|e| format!("网络错误: {}", e))?;
     if resp.status() == 401 && try_refresh().await {
         let b2 = http::Request::delete(&url).header("Content-Type", "application/json");
-        let resp2 = add_auth(b2).send().await.map_err(|e| format!("网络错误: {}", e))?;
+        let resp2 = add_auth(b2)
+            .send()
+            .await
+            .map_err(|e| format!("网络错误: {}", e))?;
         return resp2.json().await.map_err(|e| format!("解析失败: {}", e));
     }
     resp.json().await.map_err(|e| format!("解析失败: {}", e))
@@ -180,8 +206,7 @@ pub async fn login(username: &str, password: &str) -> Result<LoginData, String> 
     if code != 0 {
         return Err(raw["message"].as_str().unwrap_or("登录失败").to_string());
     }
-    serde_json::from_value::<LoginData>(raw["data"].clone())
-        .map_err(|e| format!("解析失败: {}", e))
+    serde_json::from_value::<LoginData>(raw["data"].clone()).map_err(|e| format!("解析失败: {}", e))
 }
 
 // ── Users ─────────────────────────────────────────────
@@ -194,7 +219,8 @@ pub async fn change_password(old_password: &str, new_password: &str) -> Result<V
     put(
         "/api/v1/users/me/password",
         &serde_json::json!({"old_password": old_password, "new_password": new_password}),
-    ).await
+    )
+    .await
 }
 
 // ── Strategies ────────────────────────────────────────
@@ -208,12 +234,19 @@ pub async fn get_strategy(id: &str) -> Result<Value, String> {
 }
 
 pub async fn create_strategy(
-    base_strategy_id: &str, name: &str, description: &str, params: &Value,
+    base_strategy_id: &str,
+    name: &str,
+    description: &str,
+    params: &Value,
 ) -> Result<Value, String> {
-    post("/api/v1/strategies", &serde_json::json!({
-        "base_strategy_id": base_strategy_id, "name": name,
-        "description": description, "params": params,
-    })).await
+    post(
+        "/api/v1/strategies",
+        &serde_json::json!({
+            "base_strategy_id": base_strategy_id, "name": name,
+            "description": description, "params": params,
+        }),
+    )
+    .await
 }
 
 pub async fn update_strategy(id: &str, payload: &Value) -> Result<Value, String> {
@@ -225,7 +258,11 @@ pub async fn delete_strategy(id: &str) -> Result<Value, String> {
 }
 
 pub async fn equity_curve_readiness_audit(strategy_id: &str) -> Result<Value, String> {
-    get(&format!("/api/v1/strategies/{}/equity-curve/readiness-audit", strategy_id)).await
+    get(&format!(
+        "/api/v1/strategies/{}/equity-curve/readiness-audit",
+        strategy_id
+    ))
+    .await
 }
 
 pub async fn equity_curve_sync(
@@ -234,9 +271,13 @@ pub async fn equity_curve_sync(
     end_date: Option<String>,
     background: Option<bool>,
 ) -> Result<Value, String> {
-    post(&format!("/api/v1/strategies/{}/equity-curve/sync", strategy_id), &serde_json::json!({
-        "start_date": start_date, "end_date": end_date, "background": background,
-    })).await
+    post(
+        &format!("/api/v1/strategies/{}/equity-curve/sync", strategy_id),
+        &serde_json::json!({
+            "start_date": start_date, "end_date": end_date, "background": background,
+        }),
+    )
+    .await
 }
 
 // ── Accounts ──────────────────────────────────────────
@@ -266,12 +307,24 @@ pub async fn delete_account(id: &str) -> Result<Value, String> {
     delete(&format!("/api/v1/accounts/{}", id)).await
 }
 
-pub async fn account_reset(id: &str, initial_capital: f64, start_date: &str) -> Result<Value, String> {
-    post(&format!("/api/v1/accounts/{}/reset", id), &serde_json::json!({"initial_capital": initial_capital, "start_date": start_date})).await
+pub async fn account_reset(
+    id: &str,
+    initial_capital: f64,
+    start_date: &str,
+) -> Result<Value, String> {
+    post(
+        &format!("/api/v1/accounts/{}/reset", id),
+        &serde_json::json!({"initial_capital": initial_capital, "start_date": start_date}),
+    )
+    .await
 }
 
 pub async fn account_push_dingtalk(id: &str) -> Result<Value, String> {
-    post(&format!("/api/v1/accounts/{}/push-dingtalk", id), &serde_json::json!({})).await
+    post(
+        &format!("/api/v1/accounts/{}/push-dingtalk", id),
+        &serde_json::json!({}),
+    )
+    .await
 }
 
 // ── Admin ─────────────────────────────────────────────
@@ -296,17 +349,26 @@ pub async fn admin_reset_password(id: &str, new_password: &str) -> Result<Value,
     put(
         &format!("/api/v1/admin/users/{}/password", id),
         &serde_json::json!({"new_password": new_password}),
-    ).await
+    )
+    .await
 }
 
 pub async fn admin_list_tasks() -> Result<Value, String> {
     get("/api/v1/admin/tasks").await
 }
 
-pub async fn admin_update_task(name: &str, enabled: Option<bool>, cron: Option<&str>) -> Result<Value, String> {
+pub async fn admin_update_task(
+    name: &str,
+    enabled: Option<bool>,
+    cron: Option<&str>,
+) -> Result<Value, String> {
     let mut payload = serde_json::json!({});
-    if let Some(en) = enabled { payload["enabled"] = serde_json::json!(en); }
-    if let Some(cr) = cron { payload["schedule_cron"] = serde_json::json!(cr); }
+    if let Some(en) = enabled {
+        payload["enabled"] = serde_json::json!(en);
+    }
+    if let Some(cr) = cron {
+        payload["schedule_cron"] = serde_json::json!(cr);
+    }
     put(&format!("/api/v1/admin/tasks/{}", name), &payload).await
 }
 
@@ -322,9 +384,18 @@ pub async fn blueprint_progress() -> Result<Value, String> {
     get("/api/v1/quant/blueprint/progress").await
 }
 
+/// 生产链路健康（仪表盘驾驶舱）：调度任务态势/今日调仓/信号导出/数据新鲜度
+pub async fn pipeline_health() -> Result<Value, String> {
+    get("/api/v1/quant/dashboard/pipeline-health").await
+}
+
 /// 根据数据源名称触发对应的修复同步（调用后端统一修复端点）
 pub async fn admin_repair_data(name: &str) -> Result<Value, String> {
-    post("/api/v1/admin/sync/repair", &serde_json::json!({"name": name})).await
+    post(
+        "/api/v1/admin/sync/repair",
+        &serde_json::json!({"name": name}),
+    )
+    .await
 }
 
 /// 组件4: 账号依赖加工数据健康检查。无 start/end=轻量新鲜度；带=逐年深度扫描。
@@ -364,11 +435,15 @@ pub async fn run_historical_replay(
     start_date: &str,
     end_date: &str,
 ) -> Result<Value, String> {
-    post("/api/v1/quant/paper/historical-replay", &serde_json::json!({
-        "paper_account_id": paper_account_id,
-        "start_date": start_date,
-        "end_date": end_date,
-    })).await
+    post(
+        "/api/v1/quant/paper/historical-replay",
+        &serde_json::json!({
+            "paper_account_id": paper_account_id,
+            "start_date": start_date,
+            "end_date": end_date,
+        }),
+    )
+    .await
 }
 
 /// P3-1: NAV 历史序列(逐日 NAV/日收益/累计收益/回撤)+ 三基准对比，供 dashboard NAV 曲线用
@@ -377,8 +452,16 @@ pub async fn get_nav_history(account_id: &str) -> Result<Value, String> {
 }
 
 /// 带日期范围的 NAV 历史（账号详情页收益率曲线用），start/end 格式 YYYY-MM-DD
-pub async fn get_nav_history_range(account_id: &str, start: &str, end: &str) -> Result<Value, String> {
-    get(&format!("/api/v1/accounts/{}/nav-history?start_date={}&end_date={}", account_id, start, end)).await
+pub async fn get_nav_history_range(
+    account_id: &str,
+    start: &str,
+    end: &str,
+) -> Result<Value, String> {
+    get(&format!(
+        "/api/v1/accounts/{}/nav-history?start_date={}&end_date={}",
+        account_id, start, end
+    ))
+    .await
 }
 
 /// P3-2: v24 14 因子每日覆盖率 + 滞缓状态
@@ -388,5 +471,9 @@ pub async fn admin_factor_health() -> Result<Value, String> {
 
 /// P3-3: 调仓历史(按交易日分组摘要)
 pub async fn get_rebalance_history(account_id: &str) -> Result<Value, String> {
-    get(&format!("/api/v1/accounts/{}/rebalance-history", account_id)).await
+    get(&format!(
+        "/api/v1/accounts/{}/rebalance-history",
+        account_id
+    ))
+    .await
 }
