@@ -100,11 +100,18 @@ pub fn DashboardContent() -> Element {
                 }
             }
 
-            // 统计卡片
+            // 统计卡片（2026-09-24：账号数=活跃口径——54 全量含 50 历史研究账号，
+            // 驾驶舱要当前生产规模而非台账规模）
             div { class: "grid grid-cols-3 gap-4 mb-8",
-                div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5",
-                    div { class: "text-3xl font-bold text-blue-600 dark:text-blue-400", "{accounts.read().len()}" }
-                    div { class: "text-sm text-gray-500 dark:text-gray-400 mt-1", "投资账号" }
+                {
+                    let active_cnt = accounts.read().iter().filter(|a| a["status"].as_str() == Some("active")).count();
+                    let total_cnt = accounts.read().len();
+                    rsx! {
+                        div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5",
+                            div { class: "text-3xl font-bold text-blue-600 dark:text-blue-400", "{active_cnt}" }
+                            div { class: "text-sm text-gray-500 dark:text-gray-400 mt-1", "活跃投资账号（共 {total_cnt}）" }
+                        }
+                    }
                 }
                 div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5",
                     div { class: "text-3xl font-bold text-green-600 dark:text-green-400", "{strategies.read().len()}" }
@@ -137,15 +144,7 @@ pub fn DashboardContent() -> Element {
                         "管理账号"
                     }
                 }
-                if accounts.read().is_empty() {
-                    div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 text-center text-gray-400 dark:text-gray-500",
-                        "暂无投资账号，点击上方按钮创建"
-                    }
-                } else {
-                    for acc in accounts.read().iter() {
-                        AccountCard { data: acc.clone() }
-                    }
-                }
+                ActiveAccountList { accounts: accounts.read().clone() }
             }
 
             // 策略列表
@@ -158,24 +157,94 @@ pub fn DashboardContent() -> Element {
                         "查看策略"
                     }
                 }
-                if strategies.read().is_empty() {
-                    div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 text-center text-gray-400 dark:text-gray-500",
-                        "暂无可用策略"
+                StrategyListGroups { strategies: strategies.read().clone() }
+            }
+        }
+    }
+}
+
+// ── 子组件 ──────────────────────────────────────────────
+
+/// 活跃账号列表（2026-09-24 仪表盘优化）：驾驶舱只展示 active 账号（生产状态），
+/// 停用的历史研究账号（50+）归账号台账页——信号不被噪声淹没。
+#[component]
+fn ActiveAccountList(accounts: Vec<Value>) -> Element {
+    let nav = use_navigator();
+    if accounts.is_empty() {
+        return rsx! {
+            div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 text-center text-gray-400 dark:text-gray-500",
+                "暂无投资账号，点击上方按钮创建"
+            }
+        };
+    }
+    let active: Vec<&Value> = accounts.iter().filter(|a| a["status"].as_str() == Some("active")).collect();
+    let inactive_cnt = accounts.len() - active.len();
+    rsx! {
+        for acc in active {
+            AccountCard { data: acc.clone() }
+        }
+        if inactive_cnt > 0 {
+            button {
+                class: "w-full text-sm text-gray-400 dark:text-gray-500 hover:text-blue-500 dark:hover:text-blue-400 py-3 text-center border border-dashed border-gray-200 dark:border-gray-800 rounded-xl transition",
+                onclick: move |_| { let _ = nav.push(Route::AccountsPage {}); },
+                "另有 {inactive_cnt} 个停用账号（历史研究）——进入账号管理查看"
+            }
+        }
+    }
+}
+
+/// 策略分组列表（2026-09-24 仪表盘优化）：sleeve 载体（曲线引用的内部结构，
+/// 非独立交易策略）折叠为独立组——语义不混淆。
+#[component]
+fn StrategyListGroups(strategies: Vec<Value>) -> Element {
+    if strategies.is_empty() {
+        return rsx! {
+            div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-6 text-center text-gray-400 dark:text-gray-500",
+                "暂无可用策略"
+            }
+        };
+    }
+    let is_sleeve = |v: &Value| {
+        let n = v["name"].as_str().unwrap_or("");
+        n.contains("sleeve") || n.contains("载体")
+    };
+    let prod: Vec<&Value> = strategies.iter().filter(|v| !is_sleeve(v)).collect();
+    let sleeves: Vec<&Value> = strategies.iter().filter(|v| is_sleeve(v)).collect();
+    rsx! {
+        div { class: "space-y-4",
+            div { class: "grid grid-cols-2 gap-3",
+                for strat in prod {
+                    {
+                        let name = strat["name"].as_str().unwrap_or("-");
+                        let owner = strat["owner"].as_str().unwrap_or("-");
+                        let status = strat["status"].as_str().unwrap_or("-");
+                        rsx! {
+                            div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4",
+                                div { class: "font-medium text-gray-900 dark:text-white text-sm", "{name}" }
+                                div { class: "text-xs text-gray-500 dark:text-gray-400 mt-1", "{owner}" }
+                                span { class: "inline-block mt-2 text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400",
+                                    "{status}"
+                                }
+                            }
+                        }
                     }
-                } else {
-                    div { class: "grid grid-cols-2 gap-3",
-                        for strat in strategies.read().iter() {
+                }
+            }
+            if !sleeves.is_empty() {
+                details {
+                    class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4",
+                    summary { class: "text-sm text-gray-500 dark:text-gray-400 cursor-pointer select-none",
+                        "资产 Sleeve 载体（{sleeves.len()}）——曲线引用的内部结构，非独立交易策略"
+                    }
+                    div { class: "grid grid-cols-2 gap-3 mt-3",
+                        for strat in sleeves {
                             {
                                 let name = strat["name"].as_str().unwrap_or("-");
                                 let owner = strat["owner"].as_str().unwrap_or("-");
-                                let status = strat["status"].as_str().unwrap_or("-");
                                 rsx! {
-                                    div { class: "bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-4",
-                                        div { class: "font-medium text-gray-900 dark:text-white text-sm", "{name}" }
-                                        div { class: "text-xs text-gray-500 dark:text-gray-400 mt-1", "{owner}" }
-                                        span { class: "inline-block mt-2 text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400",
-                                            "{status}"
-                                        }
+                                    div { class: "border border-dashed border-gray-200 dark:border-gray-800 rounded-lg p-3",
+                                        div { class: "text-xs font-medium text-gray-600 dark:text-gray-400", "{name}" }
+                                        div { class: "text-xs text-gray-400 dark:text-gray-500 mt-1", "{owner}" }
                                     }
                                 }
                             }
@@ -186,8 +255,6 @@ pub fn DashboardContent() -> Element {
         }
     }
 }
-
-// ── 子组件 ──────────────────────────────────────────────
 
 #[component]
 fn AccountCard(data: Value) -> Element {
@@ -286,9 +353,16 @@ fn BlueprintProgressPanel(data: Value) -> Element {
                         div { class: "space-y-2",
                             for blocker in blockers {
                                 {
-                                    let scope = blocker["scope"].as_str().unwrap_or("-");
+                                    let scope_raw = blocker["scope"].as_str().unwrap_or("-");
+                                    let scope = match scope_raw { "professional" => "专业档", "elite" => "精英档", other => other };
                                     let name = blocker["name"].as_str().or_else(|| blocker["metric"].as_str()).unwrap_or("-");
-                                    let reason = blocker["reason"].as_str().unwrap_or("-");
+                                    let reason_raw = blocker["reason"].as_str().unwrap_or("-");
+                                    // 2026-09-24: 阻断原因中文化（原文标识符对非工程读者不可读）
+                                    let reason = match reason_raw {
+                                        "missing_metric" => "指标缺失",
+                                        "below_gate" => "低于门槛",
+                                        other => other,
+                                    };
                                     rsx! {
                                         div { class: "flex items-center justify-between gap-3 text-sm border border-gray-100 dark:border-gray-800 rounded-md px-3 py-2",
                                             span { class: "text-gray-700 dark:text-gray-300 truncate", "{scope} · {name}" }
@@ -306,7 +380,11 @@ fn BlueprintProgressPanel(data: Value) -> Element {
                         div { class: "text-sm font-medium text-gray-900 dark:text-white", "存储压力" }
                         div { class: "text-sm {storage_cls}", "{storage_level} · 可治理 {storage_size}" }
                     }
-                    div { class: "space-y-2",
+                    // 2026-09-24: 明细默认折叠（状态灯一眼可见，治理明细按需展开——
+                    // 明细属于数据治理页职责，驾驶舱只留态势）
+                    details {
+                        summary { class: "text-xs text-gray-400 dark:text-gray-500 cursor-pointer select-none py-1", "前 {top_tables.len()} 大可治理表" }
+                        div { class: "space-y-2",
                         for table in top_tables {
                             {
                                 let name = table["table"].as_str().unwrap_or("-");
@@ -319,6 +397,7 @@ fn BlueprintProgressPanel(data: Value) -> Element {
                                     }
                                 }
                             }
+                        }
                         }
                     }
                 }
