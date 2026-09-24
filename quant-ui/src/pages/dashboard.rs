@@ -59,6 +59,13 @@ pub fn DashboardContent() -> Element {
                 Err(e) => if err.is_empty() { err = e; }
             }
 
+            // 生产链路健康：失败不阻塞仪表盘（面板条件渲染）。
+            // 2026-09-24 修复：此前脚本替换静默未命中致 health_data 恒 Null、
+            // 面板永不渲染（wasm 含组件代码但条件永假）。
+            if let Ok(v) = health_res {
+                health_data = v["data"].clone();
+            }
+
             accounts.set(accs);
             strategies.set(strats);
             blueprint.set(blueprint_data);
