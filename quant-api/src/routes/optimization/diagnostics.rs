@@ -6658,6 +6658,14 @@ mod ninth_batch {
     /// 清理 zzz 造数（按 FK 依赖逆序；optimization_task 级联删 trial/gate）。
     /// 注意 related_entity_id 只匹配 er 前缀：persist_* 测试的行按返回 id 自行精确清理，
     /// 避免并行测试时误删。
+    /// zzz_test_diag% 前缀互斥锁（2026-09-24 根治并行互删）：四个测试共享同前缀
+    /// 造数与宽前缀清理（DELETE ... LIKE 'zzz_test_diag%'），无锁时 A 的开头清理
+    /// 会删掉并行 B 刚造的行——实测 sleeve_admission_zzz_chain 在全量并行下
+    /// 偶发 portfolio_constraint_summary.total_count=0（violation 行恰在
+    /// DELETE 顺序的 experiment_run→violation→optimization_task 间隙被删，
+    /// load 的 LATERAL 聚合空）。与 CLEANUP/WAIT_TEST_LOCK 同族，同款根治。
+    static DIAG_ZZZ_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn cleanup_zzz_diag_rows(db: &sqlx::PgPool) {
         for sql in [
             "DELETE FROM experiment_run WHERE experiment_run_id LIKE 'zzz_test_diag%'
@@ -6677,6 +6685,7 @@ mod ninth_batch {
 
     #[tokio::test]
     async fn sleeve_admission_rejects_unknown_and_metrics_less_runs() {
+        let _diag_zzz_guard = DIAG_ZZZ_LOCK.lock().await;
         let db = test_db().await;
         // 不存在的 run → not found
         let err = build_sleeve_admission_diagnostics(&db, "zzz_test_diag_missing_run")
@@ -6704,6 +6713,7 @@ mod ninth_batch {
 
     #[tokio::test]
     async fn sleeve_admission_zzz_chain_loads_trials_and_builds_matrix() {
+        let _diag_zzz_guard = DIAG_ZZZ_LOCK.lock().await;
         let db = test_db().await;
         cleanup_zzz_diag_rows(&db).await;
 
@@ -6905,6 +6915,7 @@ mod ninth_batch {
 
     #[tokio::test]
     async fn persist_diagnostics_reports_write_and_cleanup_zzz_runs() {
+        let _diag_zzz_guard = DIAG_ZZZ_LOCK.lock().await;
         let db = test_db().await;
         cleanup_zzz_diag_rows(&db).await;
 
@@ -6973,6 +6984,7 @@ mod ninth_batch {
 
     #[tokio::test]
     async fn alpha_source_load_summary_and_daily_rows_read_real_combo() {
+        let _diag_zzz_guard = DIAG_ZZZ_LOCK.lock().await;
         let db = test_db().await;
         // 真实 combo 只读：phase7_financial_quality_v1 在 2026-06 窗口有 PIT 可用行
         let start = d("2026-06-01");
