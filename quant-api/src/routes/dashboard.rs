@@ -128,19 +128,19 @@ pub async fn pipeline_health(State(state): State<Arc<AppState>>) -> impl IntoRes
         .unwrap_or(serde_json::Value::Null);
 
     // ── 4. 数据新鲜度锚点（三查：日线/因子截面/combo 保鲜）──
-    let bar_latest: Option<(chrono::NaiveDate,)> =
+    let bar_latest: Option<chrono::NaiveDate> =
         sqlx::query_scalar("SELECT MAX(trade_date) FROM market_stock_daily_bar")
             .fetch_one(&state.db)
             .await
             .ok()
             .flatten();
-    let mfv_latest: Option<(chrono::NaiveDate,)> =
+    let mfv_latest: Option<chrono::NaiveDate> =
         sqlx::query_scalar("SELECT MAX(trade_date) FROM multi_factor_value")
             .fetch_one(&state.db)
             .await
             .ok()
             .flatten();
-    let nav_latest: Option<(chrono::NaiveDate,)> =
+    let nav_latest: Option<chrono::NaiveDate> =
         sqlx::query_scalar("SELECT MAX(snapshot_date) FROM paper_nav_snapshot")
             .fetch_one(&state.db)
             .await
@@ -167,9 +167,9 @@ pub async fn pipeline_health(State(state): State<Arc<AppState>>) -> impl IntoRes
             },
             "signal_export": signal_json,
             "freshness": {
-                "bar_latest": bar_latest.map(|(d,)| d.format("%Y-%m-%d").to_string()),
-                "factor_latest": mfv_latest.map(|(d,)| d.format("%Y-%m-%d").to_string()),
-                "nav_latest": nav_latest.map(|(d,)| d.format("%Y-%m-%d").to_string()),
+                "bar_latest": bar_latest.map(|d| d.format("%Y-%m-%d").to_string()),
+                "factor_latest": mfv_latest.map(|d| d.format("%Y-%m-%d").to_string()),
+                "nav_latest": nav_latest.map(|d| d.format("%Y-%m-%d").to_string()),
             },
         }
     }))
