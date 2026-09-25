@@ -1050,13 +1050,19 @@ pub fn AccountsContent() -> Element {
                                                                             for p in positions.iter().take(30) {
                                                                                 {
                                                                                     let sym = p["symbol"].as_str().unwrap_or("-");
+                                                                                    let name = p["name"].as_str().unwrap_or("");
                                                                                     let qty = p["quantity"].as_str().unwrap_or("0");
                                                                                     let cost = p["avg_cost"].as_str().unwrap_or("0");
                                                                                     let price = p["market_price"].as_str().unwrap_or("0");
                                                                                     let mv = p["market_value"].as_str().unwrap_or("0");
                                                                                     rsx! {
                                                                                         tr { class: "border-b border-gray-100 dark:border-gray-800/50",
-                                                                                            td { class: "py-1.5 pr-2 text-gray-900 dark:text-white font-mono", "{sym}" }
+                                                                                            td { class: "py-1.5 pr-2",
+                                                                                                div { class: "text-gray-900 dark:text-white font-mono", "{sym}" }
+                                                                                                if !name.is_empty() {
+                                                                                                    div { class: "text-[10px] text-gray-400 dark:text-gray-500 truncate max-w-36", "{name}" }
+                                                                                                }
+                                                                                            }
                                                                                             td { class: "py-1.5 px-2 text-right text-gray-700 dark:text-gray-300", "{qty}" }
                                                                                             td { class: "py-1.5 px-2 text-right text-gray-500 dark:text-gray-400", "{cost}" }
                                                                                             td { class: "py-1.5 px-2 text-right text-gray-700 dark:text-gray-300", "{price}" }

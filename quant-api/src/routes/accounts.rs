@@ -407,20 +407,41 @@ pub async fn account_detail(
     // benchmarks 为另一套回放(paper.rs)的产物，v19/v21 回放本就未写入，保持 None
     let benchmarks_json: Option<serde_json::Value> = None;
 
-    // 当前持仓
-    let positions: Vec<serde_json::Value> = sqlx::query_as::<_, (String, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>, Option<rust_decimal::Decimal>)>(
-        "SELECT symbol, quantity, avg_cost, market_price, market_value FROM paper_position
-         WHERE paper_account_id = $1 AND quantity > 0 ORDER BY market_value DESC NULLS LAST LIMIT 100"
-    ).bind(&account_id).fetch_all(&state.db).await.unwrap_or_default()
-    .into_iter().map(|(sym, qty, cost, price, mv)| {
+    // 当前持仓（2026-09-25: LEFT JOIN market_stock 带出证券名称——用户要求持仓
+    // 表同时展示标的名称；无主档记录的 symbol 名称留空由前端回落 symbol 展示）
+    let positions: Vec<serde_json::Value> = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+            Option<rust_decimal::Decimal>,
+        ),
+    >(
+        "SELECT p.symbol, ms.name, p.quantity, p.avg_cost, p.market_price, p.market_value
+         FROM paper_position p
+         LEFT JOIN market_stock ms ON ms.symbol = p.symbol
+         WHERE p.paper_account_id = $1 AND p.quantity > 0
+         ORDER BY p.market_value DESC NULLS LAST LIMIT 100",
+    )
+    .bind(&account_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(sym, name, qty, cost, price, mv)| {
         serde_json::json!({
             "symbol": sym,
+            "name": name.unwrap_or_default(),
             "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
             "avg_cost": cost.map(|v| v.to_string()).unwrap_or_default(),
             "market_price": price.map(|v| v.to_string()).unwrap_or_default(),
             "market_value": mv.map(|v| v.to_string()).unwrap_or_default(),
         })
-    }).collect();
+    })
+    .collect();
 
     // 最近交易记录（实际交易 + 计划交易）
     let trades: Vec<serde_json::Value> = sqlx::query_as::<
