@@ -760,11 +760,16 @@ pub fn AccountsContent() -> Element {
                                             {
                                                 let cash_val = acc["cash"].as_f64().unwrap_or(cap);
                                                 let reserve_val = acc["reserve_amount"].as_f64().unwrap_or(0.0);
+                                                // 2026-09-25 修正（用户指出）：原第二格标签写"净值"但实际展示的是
+                                                // 期初本金（cap）——标签与数据错位。调整为四格语义：
+                                                // 总资产 = 净值 + 融资负债（margin_amount；无杠杆账户=净值）
+                                                let margin_val = acc["margin_amount"].as_f64().unwrap_or(0.0);
+                                                let total_assets = nav + margin_val;
                                                 rsx! {
-                                                    // 总资产/净值/现金(预留) — col-span-2 加宽
+                                                    // 总资产/净值/期初本金/现金(预留) — col-span-2 加宽
                                                     div { class: "col-span-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3",
-                                                        div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "总资产 / 净值 / 现金(预留)" }
-                                                        div { class: "text-gray-900 dark:text-white font-mono text-sm", "¥{nav as i64} / ¥{cap as i64} / ¥{cash_val as i64}(¥{reserve_val as i64})" }
+                                                        div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "总资产 / 净值 / 期初本金 / 现金(预留)" }
+                                                        div { class: "text-gray-900 dark:text-white font-mono text-sm", "¥{total_assets as i64} / ¥{nav as i64} / ¥{cap as i64} / ¥{cash_val as i64}(¥{reserve_val as i64})" }
                                                     }
                                                 }
                                             }
