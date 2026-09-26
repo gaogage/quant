@@ -2202,7 +2202,11 @@ pub(crate) fn phase7_block_trade_window_backfill_sql(
                 event.seller,
                 {value_expression} AS event_raw_value
             FROM market_stock_block_trade event
-            LEFT JOIN market_stock_daily_bar_adj bar
+            -- 2026-09-26 复权架构修复（用户裁决优先修 bug）：大宗 price 是 raw 真实成交价
+            -- （账户层空间），折价率 = price/raw_close 是账户层语义。原 JOIN adj 视图
+            -- （后复权 close）导致跨空间除法——adj_factor 中位数 2.39，折价率均值
+            -- 从 9.12% 失真到 55.68%（误差 46.57pp）。改为 raw 表同空间计算。
+            LEFT JOIN market_stock_daily_bar bar
               ON bar.symbol = event.ts_code
              AND bar.trade_date = event.trade_date
             WHERE event.ts_code IS NOT NULL

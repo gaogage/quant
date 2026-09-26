@@ -3289,7 +3289,9 @@ mod tests {
         let sql = phase7_factor_backfill_sql(&specs[2]);
         assert!(sql.contains("FROM market_stock_block_trade event"));
         assert!(sql.contains("event.ts_code AS symbol"));
-        assert!(sql.contains("LEFT JOIN market_stock_daily_bar_adj bar"));
+        // 2026-09-26 复权架构修复：bar JOIN 改 raw 表（大宗 price 是 raw 成交价，
+        // 跨空间除法 rank_corr=-0.198 + 12.5% 符号翻转实证为真 bug）
+        assert!(sql.contains("LEFT JOIN market_stock_daily_bar bar"));
         assert!(sql.contains("event.available_at > event.trade_date"));
         assert!(sql.contains("event.available_at <= $4"));
         assert!(sql.contains("td.trade_date >= events.available_at"));
