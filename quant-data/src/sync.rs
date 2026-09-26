@@ -7915,6 +7915,23 @@ pub async fn sync_limit_list_range(
         end = end_date,
         "涨跌停范围同步完成"
     );
+
+    // 2026-09-26 修复: 范围版补 derive 方向——历史事故根因。范围同步只写 symbol 不写
+    // limit_type(单日版 sync_limit_list 有 derive, 范围版缺失), 导致 2020-2025 整段
+    // limit_type 全 NULL(范围回补走的就是这条路径)。derive 幂等 UPSERT 只补/更新方向,
+    // 对齐单日版语义; 失败时降级 warn(symbol 已写入, 方向留待 EOD derive 兜底)。
+    match derive_limit_list_from_daily_bars(pool, start_date, end_date).await {
+        Ok(n) => info!(
+            derived = n,
+            start = start_date,
+            end = end_date,
+            "范围同步后 limit_type 方向补全完成"
+        ),
+        Err(e) => {
+            warn!(start = start_date, end = end_date, err = %e, "范围同步后 derive limit_type 失败(limit_type 仍 NULL, 待 EOD 兜底)")
+        }
+    }
+
     Ok(total)
 }
 
