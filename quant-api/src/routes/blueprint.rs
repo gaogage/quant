@@ -112,7 +112,7 @@ async fn build_blueprint_progress(db: &sqlx::PgPool) -> Result<Value, String> {
             "elite_metric_progress_pct": elite_progress_pct,
             "professional_hard_gate_passed": professional["hard_gate_passed"],
             "elite_hard_gate_passed": elite["hard_gate_passed"],
-            "current_phase": "P3.19 new broad-base PIT alpha source discovery",
+            "current_phase": "P3 已入库源第二轮探索收官，股东户数因子投产；P4 基线锚点建立",
             "interpretation": "progress is distance visualization only; promotion still requires every hard gate and robustness gate to pass"
         },
         "professional": professional,
@@ -122,9 +122,9 @@ async fn build_blueprint_progress(db: &sqlx::PgPool) -> Result<Value, String> {
         "task_state": task_state,
         "blockers": blockers,
         "next_actions": [
-            "pre-register P3.19 low-correlation broad-base PIT sources before building factors",
-            "run permission/schema/available_at audit before any full backfill",
-            "run P3.10A-D diagnostics before bounded WFA",
+            "股东户数因子回填评估落库后验证 37f 物化纳入与新因子权重占比",
+            "market_stock_limit 的 limit_type 2020-2025 断裂修复后重验涨跌停反转信号",
+            "P3 新源在 P4 基线锚点上做非劣 WFA 检验后方可晋级",
             "use cleanup preview for cache and stopped combo cleanup; do not delete protected objective history or active canonical combos",
         ]
     }))
@@ -580,16 +580,16 @@ fn roadmap_phase_progress() -> Vec<Value> {
         phase(
             "P3",
             "低相关 alpha source 建设",
-            50.0,
+            60.0,
             "in_progress",
-            "多源已证伪；P3.19 真实经营/产业链/订单链 PIT 源发现中，准入审计链完备",
+            "第二轮已入库源探索收官：股东户数变化率双版过线(ICIR 0.398/0.329,2017-2026 全历史 t>3.5)投产中；龙虎榜/增减持/涨跌停证伪或数据断裂；P3.21 半成品复活",
         ),
         phase(
             "P4",
             "bounded WFA 与鲁棒性准入",
-            35.0,
-            "blocked_waiting_alpha",
-            "门禁体系存在，但暂无训练窗成本容量扰动后合格的新源",
+            45.0,
+            "in_progress",
+            "生产 v24 基线 bounded WFA 全 PASS(四账号+12 配置敏感性网格,中位测试 Sharpe 0.55-1.07)；基线锚点建立，待 P3 新源做非劣检验后晋级",
         ),
         phase(
             "P5",
