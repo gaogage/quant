@@ -1246,6 +1246,55 @@ pub(crate) async fn dispatch_market_level_source_freshness(
 
 async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
     let now = chrono::Local::now();
+    // ── 交易日闸门（2026-09-26 用户定版：任务执行必须在工作时段=交易日）──
+    // cron 表达式只认 MON-FRI，不认识法定假日——2026-09-25（周五·中秋假日）
+    // 整条夜间链空跑实证，且 23:00 信号导出被新鲜度守卫假日误判拦截（截面无
+    // 新物化可比）。非交易日一律跳过全部业务任务并把 next_run_at 顺延到下一
+    // 交易日同刻：电脑非交易日可安心休眠（工作时段定义完全落实），catch-up
+    // 也不会在周末补跑（rolling_pit_eval 9/26 周六 10:55 补跑实证）。
+    // 日历查询失败时保持原行为（不因闸门故障瘫痪调度）。
+    let today = now.date_naive();
+    match is_trading_day(db, today).await {
+        Ok(false) => {
+            let next_open: Option<(NaiveDate,)> = sqlx::query_as(
+                "SELECT trade_date FROM market_trade_calendar
+                 WHERE exchange = 'SSE' AND is_open = true AND trade_date > $1
+                 ORDER BY trade_date LIMIT 1",
+            )
+            .bind(today)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+            if let Some((next_trade,)) = next_open {
+                let days_ahead = (next_trade - today).num_days().max(1);
+                let _ = sqlx::query(
+                    "UPDATE scheduled_task_config SET next_run_at = next_run_at + ($1 || ' days')::interval
+                     WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= $2)",
+                )
+                .bind(days_ahead.to_string())
+                .bind(now)
+                .execute(db)
+                .await;
+                info!(
+                    "[scheduler] 非交易日（{}），{} 个到期任务顺延至下一交易日 {}（+{} 天）",
+                    today.format("%Y-%m-%d"),
+                    "enabled",
+                    next_trade.format("%Y-%m-%d"),
+                    days_ahead
+                );
+            }
+            return;
+        }
+        Err(e) => {
+            warn!(
+                "[scheduler] 交易日闸门日历查询失败（保持原调度行为）: {}",
+                e
+            );
+        }
+        Ok(true) => {}
+    }
+
     let tasks: Vec<(String, String, String, serde_json::Value)> = sqlx::query_as(
         "SELECT task_name, task_type, schedule_cron, params FROM scheduled_task_config
          WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= $1)

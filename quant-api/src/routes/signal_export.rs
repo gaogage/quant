@@ -165,32 +165,83 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
         .await
         .map_err(|e| format!("combo 截面查询: {}", e))?;
     let today_local = chrono::Local::now().date_naive();
-    let day_start_utc = today_local
-        .and_hms_opt(0, 0, 0)
-        .and_then(|nd| {
-            use chrono::TimeZone;
-            chrono::Local
-                .from_local_datetime(&nd)
-                .single()
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-        })
-        .ok_or_else(|| "时区转换失败(物化门禁)".to_string())?;
-    let backfill_done: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT MAX(completed_at) FROM data_sync_task
-         WHERE task_type LIKE '%backfill%' AND created_at >= $1
-           AND completed_at IS NOT NULL",
+    // 非交易日分支（2026-09-26）：假日/周末无新截面产生——截面的"最新物化"就是
+    // 最近交易日夜链的产物（天然早于今天的任何回填重跑），按旧口径必被误判
+    // "旧因子物化"（2026-09-25 中秋假日 23:00 导出失败实证：9/24 截面行写入
+    // 9/24 22:30 < 假日重跑回填 9/25 22:10 → 拒绝）。非交易日改验"截面存在 +
+    // 写入时刻属于最近交易日的夜间链时段"（>= 该日 21:00 本地），通过即放行。
+    let is_trade_today: bool = sqlx::query_scalar(
+        "SELECT is_open FROM market_trade_calendar
+         WHERE exchange = 'SSE' AND trade_date = $1",
     )
-    .bind(day_start_utc)
+    .bind(today_local)
     .fetch_optional(db)
     .await
-    .map_err(|e| format!("回填任务查询: {}", e))?
-    .flatten();
-    verify_combo_materialization_freshness(
-        (combo_cnt, combo_min_created),
-        backfill_done,
-        &sc.combo_name,
-        date,
-    )?;
+    .map_err(|e| format!("交易日历查询(物化门禁): {}", e))?
+    .flatten()
+    .unwrap_or(true); // 日历缺失保持原口径
+    let mut skip_freshness_gate = false;
+    if !is_trade_today {
+        let last_trade: Option<(chrono::NaiveDate,)> = sqlx::query_as(
+            "SELECT trade_date FROM market_trade_calendar
+             WHERE exchange = 'SSE' AND is_open = true AND trade_date < $1
+             ORDER BY trade_date DESC LIMIT 1",
+        )
+        .bind(today_local)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| format!("最近交易日查询(物化门禁): {}", e))?;
+        if let Some((last_trade_date,)) = last_trade {
+            use chrono::TimeZone;
+            let night_chain_start_utc = last_trade_date
+                .and_hms_opt(21, 0, 0)
+                .and_then(|nd| chrono::Local.from_local_datetime(&nd).single())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            if let Some(night_start) = night_chain_start_utc {
+                if let Some(min_created) = combo_min_created {
+                    if min_created >= night_start {
+                        tracing::info!(
+                            "[PTrade信号] 非交易日({})放行: 截面{}物化于{}(最近交易日{}夜链产物)",
+                            today_local.format("%Y-%m-%d"),
+                            date,
+                            min_created.format("%m-%d %H:%M"),
+                            last_trade_date.format("%m-%d")
+                        );
+                        skip_freshness_gate = true;
+                    }
+                }
+            }
+        }
+        // 夜链产物校验不通过则落入原口径（由其给出具体拒绝理由）
+    }
+    if !skip_freshness_gate {
+        let day_start_utc = today_local
+            .and_hms_opt(0, 0, 0)
+            .and_then(|nd| {
+                use chrono::TimeZone;
+                chrono::Local
+                    .from_local_datetime(&nd)
+                    .single()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            })
+            .ok_or_else(|| "时区转换失败(物化门禁)".to_string())?;
+        let backfill_done: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT MAX(completed_at) FROM data_sync_task
+         WHERE task_type LIKE '%backfill%' AND created_at >= $1
+           AND completed_at IS NOT NULL",
+        )
+        .bind(day_start_utc)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| format!("回填任务查询: {}", e))?
+        .flatten();
+        verify_combo_materialization_freshness(
+            (combo_cnt, combo_min_created),
+            backfill_done,
+            &sc.combo_name,
+            date,
+        )?;
+    } // !skip_freshness_gate
 
     // 3. run-factor 当日截面(夜间预备链 23:20 已就绪因子; 与模拟盘 T 日 09:35 同数据日)
     let body = build_run_factor_body(db, &sc, date).await;
