@@ -1268,21 +1268,25 @@ async fn run_scheduled_tasks(db: &PgPool, tushare: &TushareClient) {
             .flatten();
             if let Some((next_trade,)) = next_open {
                 let days_ahead = (next_trade - today).num_days().max(1);
-                let _ = sqlx::query(
+                let postponed = sqlx::query(
                     "UPDATE scheduled_task_config SET next_run_at = next_run_at + ($1 || ' days')::interval
                      WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= $2)",
                 )
                 .bind(days_ahead.to_string())
                 .bind(now)
                 .execute(db)
-                .await;
-                info!(
-                    "[scheduler] 非交易日（{}），{} 个到期任务顺延至下一交易日 {}（+{} 天）",
-                    today.format("%Y-%m-%d"),
-                    "enabled",
-                    next_trade.format("%Y-%m-%d"),
-                    days_ahead
-                );
+                .await
+                .map(|r| r.rows_affected())
+                .unwrap_or(0);
+                if postponed > 0 {
+                    info!(
+                        "[scheduler] 非交易日（{}），{} 个到期任务顺延至下一交易日 {}（+{} 天）",
+                        today.format("%Y-%m-%d"),
+                        postponed,
+                        next_trade.format("%Y-%m-%d"),
+                        days_ahead
+                    );
+                }
             }
             return;
         }
