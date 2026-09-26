@@ -24,7 +24,6 @@ const ELITE_ANNUAL_RETURN: f64 = 20.0;
 const ELITE_SHARPE: f64 = 1.5;
 const ELITE_SORTINO: f64 = 1.8;
 const ELITE_CALMAR: f64 = 2.0;
-const ELITE_PROFIT_FACTOR: f64 = 1.5;
 const ELITE_TRADES: f64 = 200.0;
 
 /// GET /api/v1/quant/blueprint/progress
@@ -94,7 +93,6 @@ async fn build_blueprint_progress(db: &sqlx::PgPool) -> Result<Value, String> {
         "targets": {
             "professional_observation": {
                 "annual_return_pct": PROFESSIONAL_ANNUAL_RETURN,
-                "excess_return_pct": "> 0; current paper_replay does not persist this metric",
                 "sharpe_ratio": PROFESSIONAL_SHARPE,
                 "sortino_ratio": PROFESSIONAL_SORTINO,
                 "max_drawdown_pct": PROFESSIONAL_MAX_DRAWDOWN
@@ -104,7 +102,6 @@ async fn build_blueprint_progress(db: &sqlx::PgPool) -> Result<Value, String> {
                 "sharpe_ratio": ELITE_SHARPE,
                 "sortino_ratio": ELITE_SORTINO,
                 "calmar_ratio": ELITE_CALMAR,
-                "profit_factor": ELITE_PROFIT_FACTOR,
                 "independent_trades": ELITE_TRADES
             }
         },
@@ -129,7 +126,6 @@ async fn build_blueprint_progress(db: &sqlx::PgPool) -> Result<Value, String> {
             "run permission/schema/available_at audit before any full backfill",
             "run P3.10A-D diagnostics before bounded WFA",
             "use cleanup preview for cache and stopped combo cleanup; do not delete protected objective history or active canonical combos",
-            "add excess_return/profit_factor persistence to paper_replay before formal promotion review"
         ]
     }))
 }
@@ -345,7 +341,6 @@ fn build_professional_gate(account: Option<&Value>) -> Value {
             "%",
             true,
         ),
-        metric_min("excess_return_pct", "超额收益", None, 0.0, "%", true),
         metric_min(
             "sharpe_ratio",
             "Sharpe",
@@ -405,14 +400,6 @@ fn build_elite_gate(account: Option<&Value>) -> Value {
             "Calmar",
             account.and_then(|a| a["calmar_ratio"].as_f64()),
             ELITE_CALMAR,
-            "",
-            false,
-        ),
-        metric_min(
-            "profit_factor",
-            "Profit Factor",
-            None,
-            ELITE_PROFIT_FACTOR,
             "",
             false,
         ),
@@ -586,16 +573,16 @@ fn roadmap_phase_progress() -> Vec<Value> {
         phase(
             "P2",
             "strict OOS/WFA 基线",
-            85.0,
+            90.0,
             "done_with_gap",
-            "pipeline 可用，但当前 stitched OOS 未达专业门禁",
+            "WFA 机制完整且评估已调度化(rolling_pit_eval 周更,2026-09-21)；stitched OOS 未达专业门禁",
         ),
         phase(
             "P3",
             "低相关 alpha source 建设",
-            45.0,
+            50.0,
             "in_progress",
-            "多源已证伪，P3.19 转向真实经营/产业链/订单价格链等 PIT 源",
+            "多源已证伪；P3.19 真实经营/产业链/订单链 PIT 源发现中，准入审计链完备",
         ),
         phase(
             "P4",
@@ -614,9 +601,9 @@ fn roadmap_phase_progress() -> Vec<Value> {
         phase(
             "P6",
             "存储治理与可持续运营",
-            70.0,
+            80.0,
             "in_progress",
-            "cleanup/stale-cleanup API 已有，仍需正式 retention 白名单和例行 dry-run",
+            "cleanup/stale-cleanup API 已有且存储压力持续 green；retention 白名单与例行 dry-run 待定",
         ),
     ]
 }
@@ -754,13 +741,16 @@ mod tests {
         let report = build_professional_gate(Some(&account));
 
         assert_eq!(report["hard_gate_passed"], json!(false));
-        assert_eq!(report["evidence_completeness_pct"], json!(80.0));
-        assert_eq!(report["blocking_metrics"].as_array().unwrap().len(), 4);
+        // 2026-09-26: excess_return 移除后 4 指标全有数据 → 完整度 100%
+        assert_eq!(report["evidence_completeness_pct"], json!(100.0));
+        assert_eq!(report["blocking_metrics"].as_array().unwrap().len(), 3);
         assert!(report["available_metric_progress_pct"].as_f64().unwrap() > 88.0);
     }
 
     #[test]
-    fn elite_gate_requires_profit_factor_and_trade_count() {
+    fn elite_gate_requires_trade_count() {
+        // 2026-09-26: excess_return/profit_factor 因 paper_replay 不持久化无法计算，
+        // 按用户裁决移除（避免 missing 指标阻塞门禁且进度虚高的矛盾呈现）
         let account = json!({
             "annual_return_pct": 14.68,
             "sharpe_ratio": 0.92,
@@ -773,7 +763,6 @@ mod tests {
         let blockers = report["blocking_metrics"].as_array().unwrap();
 
         assert_eq!(report["hard_gate_passed"], json!(false));
-        assert!(blockers.iter().any(|b| b["key"] == "profit_factor"));
         assert!(blockers.iter().any(|b| b["key"] == "independent_trades"));
     }
 
