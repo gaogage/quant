@@ -1979,7 +1979,7 @@ dependencies = [
 
 [[package]]
 name = "quant-api"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "bcrypt",
@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "quant-backtest"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "quant-common",
@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "quant-common"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "ndarray",
@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "quant-data"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "dotenv",
@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "quant-factor"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "ndarray",
