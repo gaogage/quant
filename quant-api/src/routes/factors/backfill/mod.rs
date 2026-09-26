@@ -1685,10 +1685,7 @@ impl Phase7LimitPressureBackfillRequest {
             bundle_name: "phase7_limit_pressure_v1",
             category: "limit_behavior_alpha",
             phase: "7-P3.23",
-            dependencies: &[
-                "market_stock_limit",
-                "market_trade_calendar",
-            ],
+            dependencies: &["market_stock_limit", "market_trade_calendar"],
             combo_method: "weighted_combo_blend",
             experiment_type: "phase7_factor_backfill_profile",
             source_combos: Vec::new(),
