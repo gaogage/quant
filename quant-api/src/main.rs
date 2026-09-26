@@ -641,6 +641,10 @@ async fn main() {
             post(routes::factors::backfill_phase7_block_trade_supply_demand_background),
         )
         .route(
+            "/api/v1/quant/factors/phase7-limit-pressure-backfill/background",
+            post(routes::factors::backfill_phase7_limit_pressure_background),
+        )
+        .route(
             "/api/v1/quant/factors/phase7-unlock-supply-pressure-backfill/background",
             post(routes::factors::backfill_phase7_unlock_supply_pressure_background),
         )

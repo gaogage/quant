@@ -2667,6 +2667,132 @@ pub async fn backfill_phase7_block_trade_supply_demand_background(
 /// POST /api/v1/quant/factors/phase7-unlock-supply-pressure-backfill/background
 ///
 /// Set-based PIT unlock pressure alpha backfill from share_float announcements.
+/// POST /api/v1/quant/factors/phase7-limit-pressure-backfill/background
+///
+/// Set-based PIT limit net pressure alpha backfill from market_stock_limit.
+/// P3 第二轮（2026-09-26）：涨跌停净压力 inverse 因子（ICIR -0.803 验证投产）。
+pub async fn backfill_phase7_limit_pressure_background(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7LimitPressureBackfillRequest>,
+) -> impl IntoResponse {
+    let plan = match req.into_plan() {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Json(json!({"code": 1, "message": error}));
+        }
+    };
+    let task_id = background_factor_task_id();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO data_sync_task
+           (task_id, task_type, source, start_date, end_date, status, total_count,
+            success_count, failed_count, progress, last_heartbeat_at,
+            heartbeat_timeout_seconds, started_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', 0, 0, 0, 0, now(), $6, now())",
+    )
+    .bind(&task_id)
+    .bind(plan.task_type)
+    .bind(plan.source)
+    .bind(plan.start_date)
+    .bind(plan.end_date)
+    .bind(plan.heartbeat_timeout_seconds)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = insert_result {
+        return Json(json!({
+            "code": 1,
+            "message": format!("Failed to create phase7 limit-pressure backfill task: {}", error)
+        }));
+    }
+
+    let state = state.clone();
+    let tid = task_id.clone();
+    let task_plan = plan.clone();
+
+    tokio::spawn(async move {
+        let result = run_phase7_limit_pressure_backfill(&state.db, &tid, &task_plan).await;
+        match result {
+            Ok(completion) => {
+                let report = completion.report();
+                let total_rows = usize_to_i32(report.total_rows());
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status=$2,
+                         total_count=$3,
+                         success_count=$3,
+                         failed_count=0,
+                         progress=CASE WHEN $2 = 'completed' THEN 100 ELSE progress END,
+                         error_message=CASE
+                             WHEN $2 = 'cancelled' THEN COALESCE(error_message, 'cancelled by user request')
+                             ELSE NULL
+                         END,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(completion.task_status())
+                .bind(total_rows)
+                .execute(&state.db)
+                .await;
+                let specs = phase7_limit_pressure_backfill_specs();
+                if let Err(error) = persist_factor_backfill_experiment_run(
+                    &state.db,
+                    &tid,
+                    &task_plan,
+                    &specs,
+                    &completion,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %error,
+                        "Failed to persist Phase 7 limit-pressure backfill profile"
+                    );
+                }
+                info!(
+                    task_id = %tid,
+                    status = completion.task_status(),
+                    factor_rows = report.factor_rows,
+                    combo_rows = report.combo_rows,
+                    "Phase 7 limit-pressure backfill completed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(task_id = %tid, error = %error, "Phase 7 limit-pressure backfill failed");
+                let _ = sqlx::query(
+                    "UPDATE data_sync_task
+                     SET status='failed',
+                         failed_count=1,
+                         error_message=$2,
+                         last_heartbeat_at=now(),
+                         completed_at=now()
+                     WHERE task_id=$1",
+                )
+                .bind(&tid)
+                .bind(&error)
+                .execute(&state.db)
+                .await;
+            }
+        }
+    });
+
+    Json(json!({
+        "code": 0,
+        "data": {
+            "task_id": task_id,
+            "status": "running",
+            "task_type": plan.task_type,
+            "combo_name": plan.combo_name,
+            "version": plan.version,
+            "start_date": plan.start_date,
+            "end_date": plan.end_date,
+        }
+    }))
+}
+
 pub async fn backfill_phase7_unlock_supply_pressure_background(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Phase7UnlockSupplyPressureBackfillRequest>,

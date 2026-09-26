@@ -1357,6 +1357,24 @@ pub(crate) fn phase7_repurchase_supply_shock_backfill_specs() -> Vec<Phase7Backf
     ]
 }
 
+/// P3 第二轮（2026-09-26）涨跌停净压力因子：40 自然日窗口内 D 次数 - U 次数。
+/// pre-register 验证：ICIR -0.803 / t=-8.65 / 2017-2026 全历史 116 月 / 2024+ 78% 方向月；
+/// 相关性预检：与活跃池平均 |sp| 0.164、最大 0.577（与量价反转正交——捕捉事件密度）。
+/// limit_type 2020-2025 断裂已修复（derive 回补 78,463 行），验证基于完整历史。
+pub(crate) fn phase7_limit_pressure_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
+    vec![Phase7BackfillFactorSpec {
+        factor_code: "limit_net_pressure_40d_inverse_std",
+        name: "PIT limit net pressure inverse (down-limit minus up-limit count over 40d)",
+        period: 40,
+        kind: Phase7BackfillFactorKind::LimitPressureWindow {
+            higher_is_better: true,
+            window_days: 40,
+            decay_days: 0,
+        },
+        weight: 1.0,
+    }]
+}
+
 pub(crate) fn phase7_block_trade_supply_demand_backfill_specs() -> Vec<Phase7BackfillFactorSpec> {
     vec![
         Phase7BackfillFactorSpec {

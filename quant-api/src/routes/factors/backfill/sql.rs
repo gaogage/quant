@@ -71,6 +71,11 @@ pub(crate) fn phase7_factor_backfill_sql(spec: &Phase7BackfillFactorSpec) -> Str
             window_days,
             decay_days,
         ),
+        Phase7BackfillFactorKind::LimitPressureWindow {
+            higher_is_better,
+            window_days,
+            decay_days,
+        } => phase7_limit_pressure_window_backfill_sql(higher_is_better, window_days, decay_days),
         Phase7BackfillFactorKind::UnlockPressure { horizon_days } => {
             phase7_unlock_pressure_backfill_sql(horizon_days)
         }
@@ -4719,4 +4724,105 @@ pub(crate) fn phase7_optional_overlay_blend_backfill_sql() -> &'static str {
         normalized_score = EXCLUDED.normalized_score,
         available_at = EXCLUDED.available_at,
         created_at = NOW()"
+}
+
+/// 涨跌停净压力因子 SQL（P3 第二轮 2026-09-26 验证投产：ICIR -0.803 / t=-8.65，
+/// 2017-2026 全历史 116 月，2024+ 78% 方向月——涨停密度高=投机过热→未来弱，
+/// 跌停密度高=超跌→未来强，取 inverse 方向 D:+1 / U:-1）。
+///
+/// PIT 口径：market_stock_limit 无 available_at 列（EOD 盘后同步），用
+/// `td.trade_date > event.trade_date` 严格 T-1 截面（当日涨跌停收盘后才可得，
+/// 保守不含当日）。available_at = MAX(event_trade_date)（最近事件日，保守）。
+///
+/// decay_days <= 0 时无衰减纯计数（忠实 pre-register 验证口径：40 自然日窗口
+/// 均匀权重净次数）；> 0 时线性衰减（预留变体，未验证不上生产）。
+pub(crate) fn phase7_limit_pressure_window_backfill_sql(
+    higher_is_better: bool,
+    window_days: i32,
+    decay_days: i32,
+) -> String {
+    let rank_order = if higher_is_better {
+        "raw_value"
+    } else {
+        "raw_value DESC"
+    };
+    let window_days = window_days.clamp(1, 365);
+    let decay_expr = if decay_days <= 0 {
+        "1.0".to_string()
+    } else {
+        format!(
+            "GREATEST(0.0, 1.0 - ((td.trade_date - event.event_trade_date)::double precision / {}.0))",
+            decay_days.max(1)
+        )
+    };
+
+    format!(
+        "WITH trade_days AS (
+            SELECT trade_date
+            FROM market_trade_calendar
+            WHERE exchange = 'SSE'
+              AND is_open = true
+              AND trade_date BETWEEN $3 AND $4
+        ),
+        events AS (
+            SELECT
+                event.symbol,
+                event.trade_date AS event_trade_date,
+                CASE
+                    WHEN event.limit_type = 'D' THEN 1.0
+                    WHEN event.limit_type = 'U' THEN -1.0
+                    ELSE NULL
+                END AS event_raw_value
+            FROM market_stock_limit event
+            WHERE event.limit_type IN ('U', 'D')
+              AND event.trade_date >= $3 - INTERVAL '{window_days} days'
+              AND event.trade_date < $4
+        ),
+        expanded AS (
+            SELECT
+                events.symbol,
+                td.trade_date,
+                events.event_trade_date,
+                events.event_raw_value,
+                {decay_expr} AS decay_weight
+            FROM events
+            JOIN trade_days td
+              ON td.trade_date > events.event_trade_date
+             AND td.trade_date <= events.event_trade_date + INTERVAL '{window_days} days'
+            WHERE events.event_raw_value IS NOT NULL
+        ),
+        raw AS (
+            SELECT
+                symbol,
+                trade_date,
+                MAX(event_trade_date) AS available_at,
+                SUM(event_raw_value * decay_weight) AS raw_value
+            FROM expanded
+            WHERE decay_weight > 0.0
+            GROUP BY symbol, trade_date
+        ),
+        ranked AS (
+            SELECT
+                symbol,
+                trade_date,
+                available_at,
+                raw_value,
+                COUNT(*) OVER (PARTITION BY trade_date) AS symbol_count,
+                CASE
+                    WHEN COUNT(*) OVER (PARTITION BY trade_date) = 1 THEN 1.0
+                    ELSE percent_rank() OVER (PARTITION BY trade_date ORDER BY {rank_order})
+                END AS normalized_value
+            FROM raw
+            WHERE raw_value IS NOT NULL
+        )
+        INSERT INTO factor_value
+            (factor_code, factor_version, symbol, trade_date, raw_value, normalized_value, available_at)
+        SELECT $1, $2, symbol, trade_date, raw_value, normalized_value, available_at
+        FROM ranked
+        ON CONFLICT (factor_code, factor_version, symbol, trade_date) DO UPDATE SET
+            raw_value = EXCLUDED.raw_value,
+            normalized_value = EXCLUDED.normalized_value,
+            available_at = EXCLUDED.available_at,
+            created_at = NOW()"
+    )
 }

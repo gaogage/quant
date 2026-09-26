@@ -213,6 +213,15 @@ pub struct Phase7BlockTradeSupplyDemandBackfillRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Phase7LimitPressureBackfillRequest {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub version: Option<String>,
+    pub combo_name: Option<String>,
+    pub statement_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Phase7UnlockSupplyPressureBackfillRequest {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
@@ -379,6 +388,7 @@ pub(crate) type Phase7EventSurpriseBackfillPlan = SetBasedFactorBackfillPlan;
 pub(crate) type Phase7ForecastRevisionSurpriseBackfillPlan = SetBasedFactorBackfillPlan;
 pub(crate) type Phase7RepurchaseSupplyShockBackfillPlan = SetBasedFactorBackfillPlan;
 pub(crate) type Phase7BlockTradeSupplyDemandBackfillPlan = SetBasedFactorBackfillPlan;
+pub(crate) type Phase7LimitPressureBackfillPlan = SetBasedFactorBackfillPlan;
 pub(crate) type Phase7UnlockSupplyPressureBackfillPlan = SetBasedFactorBackfillPlan;
 pub(crate) type Phase7LiquidityQualityBackfillPlan = SetBasedFactorBackfillPlan;
 pub(crate) type Phase7MarketResidualRiskBackfillPlan = SetBasedFactorBackfillPlan;
@@ -482,6 +492,14 @@ pub(crate) enum Phase7BackfillFactorKind {
     },
     BlockTradeWindow {
         value_expression: &'static str,
+        higher_is_better: bool,
+        window_days: i32,
+        decay_days: i32,
+    },
+    /// 涨跌停净压力（P3 第二轮 2026-09-26）：窗口内 D 次数 - U 次数（inverse 方向，
+    /// 涨停密度=投机过热→弱）。PIT 用事件日严格早于截面日（T-1 保守）。
+    /// decay_days <= 0 = 无衰减纯计数（验证口径），> 0 = 线性衰减（预留变体）。
+    LimitPressureWindow {
         higher_is_better: bool,
         window_days: i32,
         decay_days: i32,
@@ -1630,6 +1648,54 @@ impl Phase7BlockTradeSupplyDemandBackfillRequest {
     }
 }
 
+impl Phase7LimitPressureBackfillRequest {
+    pub(crate) fn into_plan(self) -> Result<Phase7LimitPressureBackfillPlan, String> {
+        let start_date = parse_phase7_backfill_date(
+            self.start_date,
+            NaiveDate::from_ymd_opt(2017, 1, 3).expect("static date"),
+            "start_date",
+        )?;
+        let end_date =
+            parse_phase7_backfill_date(self.end_date, chrono::Utc::now().date_naive(), "end_date")?;
+
+        if start_date > end_date {
+            return Err("start_date must be <= end_date".to_string());
+        }
+
+        let version = trim_or_default(self.version, "1.0.0", "version")?;
+        let combo_name =
+            trim_or_default(self.combo_name, "phase7_limit_pressure_v1", "combo_name")?;
+
+        if version.len() > 32 {
+            return Err("version must be <= 32 chars".to_string());
+        }
+        if combo_name.len() > 128 {
+            return Err("combo_name must be <= 128 chars".to_string());
+        }
+
+        Ok(Phase7LimitPressureBackfillPlan {
+            start_date,
+            end_date,
+            version,
+            combo_name,
+            statement_timeout_ms: self.statement_timeout_ms.unwrap_or(0),
+            task_type: "phase7_limit_pressure_backfill",
+            source: "factor",
+            heartbeat_timeout_seconds: 3600,
+            bundle_name: "phase7_limit_pressure_v1",
+            category: "limit_behavior_alpha",
+            phase: "7-P3.23",
+            dependencies: &[
+                "market_stock_limit",
+                "market_trade_calendar",
+            ],
+            combo_method: "weighted_combo_blend",
+            experiment_type: "phase7_factor_backfill_profile",
+            source_combos: Vec::new(),
+        })
+    }
+}
+
 impl Phase7UnlockSupplyPressureBackfillRequest {
     pub(crate) fn into_plan(self) -> Result<Phase7UnlockSupplyPressureBackfillPlan, String> {
         let start_date = parse_phase7_backfill_date(
@@ -2614,6 +2680,69 @@ async fn run_phase7_block_trade_supply_demand_backfill(
     let specs = phase7_block_trade_supply_demand_backfill_specs();
     run_segmented_set_based_factor_backfill(db, task_id, plan, &specs, phase7_factor_backfill_sql)
         .await
+}
+
+async fn run_phase7_limit_pressure_backfill(
+    db: &sqlx::PgPool,
+    task_id: &str,
+    plan: &Phase7LimitPressureBackfillPlan,
+) -> Result<Phase7BackfillCompletion, String> {
+    let specs = phase7_limit_pressure_backfill_specs();
+    run_segmented_set_based_factor_backfill(db, task_id, plan, &specs, phase7_factor_backfill_sql)
+        .await
+}
+
+#[cfg(test)]
+mod limit_pressure_tests {
+    use super::*;
+
+    /// SQL PIT 纪律断言：T-1 严格口径（截面日 > 事件日）、limit_type 方向过滤、
+    /// 无衰减纯计数（验证口径）、NULL limit_type 不进事件集。
+    #[test]
+    fn phase7_limit_pressure_sql_is_strict_t1_no_decay() {
+        let specs = phase7_limit_pressure_backfill_specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].factor_code, "limit_net_pressure_40d_inverse_std");
+
+        let sql = phase7_factor_backfill_sql(&specs[0]);
+        // 事件源与方向过滤（NULL limit_type 不进事件集）
+        assert!(sql.contains("FROM market_stock_limit event"));
+        assert!(sql.contains("event.limit_type IN ('U', 'D')"));
+        assert!(sql.contains("WHEN event.limit_type = 'D' THEN 1.0"));
+        assert!(sql.contains("WHEN event.limit_type = 'U' THEN -1.0"));
+        // PIT 严格 T-1：截面日必须严格晚于事件日（当日涨跌停收盘后才可得）
+        assert!(sql.contains("td.trade_date > events.event_trade_date"));
+        // 无衰减纯计数（pre-register 验证口径：decay_days=0 → 权重恒 1.0）
+        assert!(sql.contains("1.0 AS decay_weight"));
+        assert!(!sql.contains("GREATEST(\n                    0.0"));
+        // 聚合语义与 PIT available_at 口径
+        assert!(sql.contains("SUM(event_raw_value * decay_weight) AS raw_value"));
+        assert!(sql.contains("MAX(event_trade_date) AS available_at"));
+        assert!(sql.contains("percent_rank() OVER"));
+    }
+
+    /// 请求计划默认值断言（对齐 block_trade 模板契约）。
+    #[test]
+    fn phase7_limit_pressure_request_builds_plan_defaults() {
+        let plan = Phase7LimitPressureBackfillRequest {
+            start_date: None,
+            end_date: None,
+            version: None,
+            combo_name: None,
+            statement_timeout_ms: None,
+        }
+        .into_plan()
+        .expect("valid limit-pressure plan");
+
+        assert_eq!(plan.combo_name, "phase7_limit_pressure_v1");
+        assert_eq!(plan.task_type, "phase7_limit_pressure_backfill");
+        assert_eq!(plan.phase, "7-P3.23");
+        assert_eq!(
+            plan.dependencies,
+            &["market_stock_limit", "market_trade_calendar"]
+        );
+        assert!(plan.combo_method.len() <= 32);
+    }
 }
 
 async fn run_phase7_unlock_supply_pressure_backfill(
