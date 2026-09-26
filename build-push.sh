@@ -12,7 +12,7 @@ ACR_IMAGE="$ACR_REGISTRY/gaogage/quant-api:latest"
 # 2026-09-26 版本管理定版（用户裁决）：镜像 tag 从 1.0.0 起与代码语义版本同步——
 # 每次构建双 tag（latest + vX.Y.Z），X.Y.Z 读 workspace Cargo.toml。
 # a=大版本(框架/大功能) b=小版本(小功能) c=bug修复
-VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version *= *"\(.*\)"//')
+VERSION=$(grep -m1 '^version' Cargo.toml | cut -d" -f2)
 ACR_VERSIONED_IMAGE="$ACR_REGISTRY/gaogage/quant-api:v$VERSION"
 BUILDX_BUILDER="${BUILDX_BUILDER:-default-builder}"
 
