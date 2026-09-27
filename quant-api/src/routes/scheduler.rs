@@ -31,8 +31,7 @@ use crate::routes::strategy::{AssetClass, ResolvedStrategy};
 /// 2026-09-18 7→14: 7-01~07-08 管道断档 6 个交易日(8 自然日)恰好滑出 7 天窗口,
 /// 之后每晚回填永远刷不到断档期(永久留洞)。14 天让两周内断档可自愈;
 /// 更长断档靠 data_quality 滞缓告警 + 手动区间回填(warmup 已修复必成功)。
-const BACKFILL_WINDOW_DAYS: chrono::Duration = chrono::Duration::days(14);
-
+// C7: BACKFILL_WINDOW_DAYS → config_env env 化(2026-09-27)
 /// v24 因子全量回填路由清单（覆盖白名单全部 14 活跃因子）。
 /// 新增因子类别时只需在此处添加一行，factor_backfill 任务和 T+1 补偿同步共用。
 /// (route_path_segment, label)：route_path_segment 拼接到 `/api/v1/quant/factors/{seg}/background`。
@@ -363,6 +362,11 @@ mod tests {
             kelly_scale_base: 0.5,
             kelly_scale_floor: 0.3,
             kelly_scale_cap: 1.5,
+            cash_park_symbol: "511880.SH".into(),
+            cash_park_threshold: 0.01,
+            stop_loss_portfolio_dd: 0.10,
+            stop_loss_stock_dd: 0.25,
+            regime_lookback_days: 400,
             mvo_lookback_months: 36,
             regime_momentum_window_short: 3,
             regime_momentum_window_long: 6,
@@ -827,7 +831,7 @@ pub(crate) async fn dispatch_mvo_equity_curve_update(db: &PgPool, params: &serde
 pub(crate) async fn dispatch_factor_backfill(db: &PgPool) {
     // v24 因子全量回填:覆盖所有 active 策略依赖的全部因子类别
     // （量价/财务/资金流/分析师/回购/大宗/流动性/市场风险）。
-    // 幂等刷新 BACKFILL_WINDOW_DAYS 窗口，保证盘中调仓依赖的 factor_value/multi_factor_value 新鲜。
+    // 幂等刷新 crate::routes::shared::backfill_window_days() 窗口，保证盘中调仓依赖的 factor_value/multi_factor_value 新鲜。
     // 可被 check_task_dependency_order 检查、可手动触发、可配 CRON。
     let today = chrono::Local::now().date_naive();
     let last_trade_date: Option<(chrono::NaiveDate,)> = sqlx::query_as(
@@ -845,7 +849,7 @@ pub(crate) async fn dispatch_factor_backfill(db: &PgPool) {
         return;
     };
     let sync_date_str = sync_date.format("%Y%m%d").to_string();
-    let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS)
+    let backfill_start = (sync_date - crate::routes::shared::backfill_window_days())
         .format("%Y%m%d")
         .to_string();
     trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
@@ -869,9 +873,10 @@ pub(crate) async fn dispatch_nightly_signal_prep(db: &PgPool, tushare: &TushareC
     let date = chrono::Local::now().date_naive();
     tokio::spawn(async move {
         let t0 = std::time::Instant::now();
-        let sd = (date - chrono::Duration::days(190))
-            .format("%Y%m%d")
-            .to_string();
+        let sd = (date
+            - chrono::Duration::days(crate::routes::shared::curve_sync_start_lookback_days()))
+        .format("%Y%m%d")
+        .to_string();
         let ed = date.format("%Y%m%d").to_string();
         let trigger_started = chrono::Utc::now();
         trigger_v24_backfill_routes(&db2, &sd, &ed).await;
@@ -917,7 +922,10 @@ pub(crate) async fn dispatch_nightly_signal_prep(db: &PgPool, tushare: &TushareC
                     // 任务80: C类特许 → env 化（默认=原写死值）
                     factor_version: &factor_version(),
                     horizon,
-                    start_date: date - chrono::Duration::days(120),
+                    start_date: date
+                        - chrono::Duration::days(
+                            crate::routes::shared::pit_materialize_window_days(),
+                        ),
                     end_date: date,
                     include_fundamentals: ind_cfg.include_fundamentals,
                     min_abs_ic_ir: None,
@@ -962,7 +970,10 @@ pub(crate) async fn dispatch_nightly_signal_prep(db: &PgPool, tushare: &TushareC
                     // 任务80: C类特许 → env 化（默认=原写死值）
                     factor_version: &factor_version(),
                     horizon,
-                    start_date: date - chrono::Duration::days(120),
+                    start_date: date
+                        - chrono::Duration::days(
+                            crate::routes::shared::pit_materialize_window_days(),
+                        ),
                     end_date: date,
                     include_fundamentals: cfg.include_fundamentals,
                     min_abs_ic_ir: None,
@@ -991,7 +1002,7 @@ pub(crate) async fn dispatch_nightly_signal_prep(db: &PgPool, tushare: &TushareC
         match crate::routes::equity_curve_sync::sync_strategy_equity_curve(
             &db2,
             "v24",
-            date - chrono::Duration::days(10),
+            date - chrono::Duration::days(crate::routes::shared::v24_curve_sync_window_days()),
             date,
             false,
         )
@@ -1108,7 +1119,8 @@ pub(crate) async fn dispatch_pit_combo_refresh(db: &PgPool, params: &serde_json:
         .and_then(|v| v.as_str())
         .unwrap_or(default_ver.as_str());
     // 增量区间：默认最近一年（覆盖当前+上季度，幂等刷新）
-    let refresh_start = chrono::Utc::now().date_naive() - chrono::Duration::days(370);
+    let refresh_start = chrono::Utc::now().date_naive()
+        - chrono::Duration::days(crate::routes::shared::morning_curve_rebuild_lookback_days());
     let refresh_end = chrono::Utc::now().date_naive();
     let pit_combos: Vec<_> = load_active_combo_materialize_configs(db)
         .await
@@ -1918,7 +1930,7 @@ async fn run_tick(
             // Step 4: 日线就绪后才触发因子回填（覆盖v24全部因子类别）
             if retries < max_retries {
                 info!("[scheduler] 触发因子回填 (依赖数据已就绪)");
-                let backfill_start = (sync_date - BACKFILL_WINDOW_DAYS)
+                let backfill_start = (sync_date - crate::routes::shared::backfill_window_days())
                     .format("%Y%m%d")
                     .to_string();
                 trigger_v24_backfill_routes(db, &backfill_start, &sync_date_str).await;
@@ -3560,6 +3572,11 @@ mod sixth_batch {
             kelly_scale_base: 0.5,
             kelly_scale_floor: 0.3,
             kelly_scale_cap: 1.5,
+            cash_park_symbol: "511880.SH".into(),
+            cash_park_threshold: 0.01,
+            stop_loss_portfolio_dd: 0.10,
+            stop_loss_stock_dd: 0.25,
+            regime_lookback_days: 400,
             mvo_lookback_months: 36,
             regime_momentum_window_short: 3,
             regime_momentum_window_long: 6,
@@ -4199,7 +4216,9 @@ mod twelfth_batch {
             );
             assert_eq!(
                 start,
-                end - chrono::Duration::days(370),
+                end - chrono::Duration::days(
+                    crate::routes::shared::morning_curve_rebuild_lookback_days()
+                ),
                 "默认 lookback=370 天: {p:?}"
             );
         }
@@ -4357,14 +4376,14 @@ mod twelfth_batch {
     // ── dispatch_factor_backfill: 14 天窗口 + DB 驱动路由 ──
 
     /// 正常分支(日历有数据): 向 factor_backfill_route 表的全部启用路由 POST,
-    /// 窗口 = [最新开市日-14 天, 最新开市日](BACKFILL_WINDOW_DAYS 锚定为 14)。
+    /// 窗口 = [最新开市日-14 天, 最新开市日](crate::routes::shared::backfill_window_days() 锚定为 14)。
     /// 经捕获服务拦截, 不触达生产 8080 的真实回填。
     #[tokio::test]
     async fn factor_backfill_posts_14d_window_to_enabled_db_routes() {
         assert_eq!(
-            BACKFILL_WINDOW_DAYS.num_days(),
+            crate::routes::shared::backfill_window_days().num_days(),
             14,
-            "BACKFILL_WINDOW_DAYS 值锚定(改动需同步断言)"
+            "crate::routes::shared::backfill_window_days() 值锚定(改动需同步断言)"
         );
         let _lock = PORT_ENV_LOCK.lock().await;
         let db = test_db().await;

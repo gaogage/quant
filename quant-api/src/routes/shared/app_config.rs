@@ -8,6 +8,24 @@
 use sqlx::PgPool;
 
 /// 读 f64 型配置。键缺失/解析失败返回 None（调用方兜底）。
+/// app_config 字符串读取(带 JSON 引号剥离——值形如 "09:35" 存储为 '"09:35"')。
+pub async fn app_config_str(db: &PgPool, key: &str) -> Option<String> {
+    let v: Option<String> =
+        sqlx::query_scalar("SELECT config_value FROM app_config WHERE config_key = $1")
+            .bind(key)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    v.map(|s| {
+        let t = s.trim();
+        t.strip_prefix('"')
+            .and_then(|x| x.strip_suffix('"'))
+            .unwrap_or(t)
+            .to_string()
+    })
+}
+
 pub async fn app_config_f64(db: &PgPool, key: &str) -> Option<f64> {
     let v: Option<String> =
         sqlx::query_scalar("SELECT config_value FROM app_config WHERE config_key = $1")

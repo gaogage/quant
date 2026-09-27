@@ -376,7 +376,13 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
     .unwrap_or_default()
     .into_iter()
     .collect();
-    let etf_allocs = build_etf_allocations(&mvo_weights, regime, &listed);
+    let etf_allocs = build_etf_allocations(
+        &mvo_weights,
+        regime,
+        &listed,
+        &sc.cash_park_symbol,
+        sc.cash_park_threshold,
+    );
     let etf_allocs = crate::routes::shared::apply_premium_exit_overlay(
         &etf_allocs,
         &premium_map,
@@ -396,6 +402,19 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
         .ok_or_else(|| format!("nav: 账号 {} 不存在", account_id))?;
     let nav: f64 = nav_dec.to_string().parse().unwrap_or(0.0);
 
+    // C3 配置化(原写死 09:35-10:30/10:35-11:30): PTrade 执行窗口从 app_config 读
+    let ew_start = crate::routes::shared::app_config_str(db, "signal.execute_window_start")
+        .await
+        .unwrap_or_else(|| "09:35".into());
+    let ew_end = crate::routes::shared::app_config_str(db, "signal.execute_window_end")
+        .await
+        .unwrap_or_else(|| "10:30".into());
+    let dw_start = crate::routes::shared::app_config_str(db, "signal.deferred_window_start")
+        .await
+        .unwrap_or_else(|| "10:35".into());
+    let dw_end = crate::routes::shared::app_config_str(db, "signal.deferred_window_end")
+        .await
+        .unwrap_or_else(|| "11:30".into());
     let mut signal = serde_json::json!({
         "version": 1,
         "signal_id": format!("{}_{}_001", rs.strategy_id, trade_date.format("%Y%m%d")),
@@ -405,8 +424,8 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
         // 主窗口保持 09:35-10:30(正常标的); 门禁命中标的的交易推迟到复牌后的
         // 延迟窗口(10:30 溢价停牌复牌, 留 5 分钟行情稳定), 执行器按 blocked_side
         // 在延迟窗口只执行允许方向(高溢价→只卖, 高折价→只买)。
-        "execute_window": {"start": "09:35", "end": "10:30"},
-        "deferred_execute_window": {"start": "10:35", "end": "11:30"},
+        "execute_window": {"start": ew_start, "end": ew_end},
+        "deferred_execute_window": {"start": dw_start, "end": dw_end},
         "nav_estimate": (nav * 100.0).round() / 100.0,
         "target_positions": targets
             .iter()
@@ -610,7 +629,7 @@ async fn build_run_factor_body(
     sc: &StrategyConfig,
     date: chrono::NaiveDate,
 ) -> serde_json::Value {
-    let start = (date - chrono::Duration::days(180))
+    let start = (date - chrono::Duration::days(crate::routes::shared::wfa_params_lookback_days()))
         .format("%Y%m%d")
         .to_string();
     let end = date.format("%Y%m%d").to_string();
@@ -1017,6 +1036,11 @@ mod sixth_batch {
             kelly_scale_base: 0.5,
             kelly_scale_floor: 0.3,
             kelly_scale_cap: 1.5,
+            cash_park_symbol: "511880.SH".into(),
+            cash_park_threshold: 0.01,
+            stop_loss_portfolio_dd: 0.10,
+            stop_loss_stock_dd: 0.25,
+            regime_lookback_days: 400,
             mvo_lookback_months: 36,
             regime_momentum_window_short: 3,
             regime_momentum_window_long: 6,
@@ -1173,7 +1197,7 @@ mod sixth_batch {
         // 窗口: 当日截面往前 180 天(与模拟盘 [ALIGN] 口径一致)
         assert_eq!(
             body["start_date"],
-            (date - chrono::Duration::days(180))
+            (date - chrono::Duration::days(crate::routes::shared::wfa_params_lookback_days()))
                 .format("%Y%m%d")
                 .to_string()
         );

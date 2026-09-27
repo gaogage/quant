@@ -594,7 +594,13 @@ pub async fn rebalance_account(
             listed_etf_symbols.push(s.clone());
         }
     }
-    let etf_allocations = build_etf_allocations(&mvo_weights, regime, &listed_etf_symbols);
+    let etf_allocations = build_etf_allocations(
+        &mvo_weights,
+        regime,
+        &listed_etf_symbols,
+        &sc.cash_park_symbol,
+        sc.cash_park_threshold,
+    );
     // P2-C:批量预加载 ETF 当日收盘价(EodClose 模式,替代 fetch_etf_price 逐个查)
     let etf_eod_prices: HashMap<String, f64> = if matches!(
         price_source,
@@ -1473,6 +1479,8 @@ pub fn build_etf_allocations(
     mvo_weights: &[f64],
     regime: f64,
     etf_symbols: &[String],
+    cash_park_symbol: &str,
+    cash_park_threshold: f64,
 ) -> Vec<(String, f64)> {
     let mut v: Vec<(String, f64)> = etf_symbols
         .iter()
@@ -1485,9 +1493,9 @@ pub fn build_etf_allocations(
             )
         })
         .collect();
-    // 现金段:regime < 1 时补银华日利
-    if 1.0 - regime > 0.01 {
-        v.push(("511880.SH".to_string(), 1.0 - regime));
+    // 现金段:regime 减仓缺口超阈值时补现金管理标的(C1 配置化,原写死 511880.SH/0.01)
+    if 1.0 - regime > cash_park_threshold {
+        v.push((cash_park_symbol.to_string(), 1.0 - regime));
     }
     v
 }
@@ -1619,7 +1627,7 @@ mod tests {
     fn test_build_etf_allocations_dynamic_symbols() {
         let weights = vec![0.12, 0.22, 0.28, 0.05]; // A股 + 2 ETF
         let symbols = vec!["518880.SH".to_string(), "511010.SH".to_string()];
-        let allocs = build_etf_allocations(&weights, 1.0, &symbols);
+        let allocs = build_etf_allocations(&weights, 1.0, &symbols, "511880.SH", 0.01);
         assert_eq!(allocs.len(), 2);
         assert_eq!(allocs[0].0, "518880.SH");
         assert!((allocs[0].1 - 0.22).abs() < 1e-9);
@@ -1653,6 +1661,11 @@ mod tests {
             kelly_scale_base: 0.5,
             kelly_scale_floor: 0.3,
             kelly_scale_cap: 1.5,
+            cash_park_symbol: "511880.SH".into(),
+            cash_park_threshold: 0.01,
+            stop_loss_portfolio_dd: 0.10,
+            stop_loss_stock_dd: 0.25,
+            regime_lookback_days: 400,
             mvo_lookback_months: 36,
             regime_momentum_window_short: 3,
             regime_momentum_window_long: 6,
@@ -1721,6 +1734,11 @@ mod fifth_batch {
             kelly_scale_base: 0.5,
             kelly_scale_floor: 0.3,
             kelly_scale_cap: 1.5,
+            cash_park_symbol: "511880.SH".into(),
+            cash_park_threshold: 0.01,
+            stop_loss_portfolio_dd: 0.10,
+            stop_loss_stock_dd: 0.25,
+            regime_lookback_days: 400,
             mvo_lookback_months: 36,
             regime_momentum_window_short: 3,
             regime_momentum_window_long: 6,
@@ -1769,13 +1787,20 @@ mod fifth_batch {
     #[test]
     fn build_etf_allocations_adds_cash_leg_and_falls_back_to_zero() {
         // mvo_weights 短缺：无对应权重 → 0
-        let allocs = build_etf_allocations(&[0.12], 1.0, &["518880.SH".to_string()]);
+        let allocs =
+            build_etf_allocations(&[0.12], 1.0, &["518880.SH".to_string()], "511880.SH", 0.01);
         assert_eq!(allocs.len(), 1, "regime=1 不加现金段: {allocs:?}");
         assert_eq!(allocs[0].0, "518880.SH");
         assert_eq!(allocs[0].1, 0.0);
 
         // regime < 1：追加 511880 现金段 = 1 - regime
-        let allocs = build_etf_allocations(&[0.10, 0.30], 0.6, &["518880.SH".to_string()]);
+        let allocs = build_etf_allocations(
+            &[0.10, 0.30],
+            0.6,
+            &["518880.SH".to_string()],
+            "511880.SH",
+            0.01,
+        );
         assert_eq!(allocs.len(), 2);
         assert!(
             (allocs[0].1 - 0.18).abs() < 1e-9,

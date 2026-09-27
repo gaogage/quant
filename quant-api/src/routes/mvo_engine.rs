@@ -139,7 +139,7 @@ pub async fn run_daily_simulation(
     // 2. 交易日序列 + task_id（回放传 rs 的 equity_curve_task_id）
     let (a_task_id, dates) = load_simulation_dates(db, rs, start, end).await?;
     // 2.1 CSI300 预加载（regime 检测内存缓存）
-    let csi300_map = preload_csi300_map(db, &dates).await?;
+    let csi300_map = preload_csi300_map(db, &dates, rs_mvo_regime_lookback(rs)).await?;
     // 2.2 维保强平滑点(策略配置,任务80 批1 配置权威——循环外读一次)
     let maint_slippage_cfg: f64 = sqlx::query_scalar(
         "SELECT slippage_pct FROM strategy_config WHERE strategy_id = $1 AND status = 'active'",
@@ -333,11 +333,22 @@ pub(crate) async fn load_simulation_dates(
 /// 步骤 2.1：预加载 CSI300 日线到内存(detect_regime_exposure 每天查 252 天,改内存读
 /// 省 ~N 次 DB)。复用 paper.rs:721 bench_map 模式。first_d 往前推 400 天确保
 /// trailing 252 天有边界数据。
+/// C4 配置化:从 resolved strategy 取 regime 回看窗(单 asset 策略无 mvo 时用默认 400)。
+fn rs_mvo_regime_lookback(rs: &crate::routes::strategy::ResolvedStrategy) -> i32 {
+    rs.mvo
+        .as_ref()
+        .map(|m| m.regime_lookback_days)
+        .unwrap_or(400)
+}
+
 pub(crate) async fn preload_csi300_map(
     db: &PgPool,
     dates: &[NaiveDate],
+    regime_lookback_days: i32,
 ) -> Result<std::collections::HashMap<NaiveDate, f64>, String> {
-    let csi300_first = *dates.first().unwrap() - chrono::Duration::days(400);
+    // C4 配置化(原写死 400 天): CSI300 regime 判定回看窗
+    let csi300_first =
+        *dates.first().unwrap() - chrono::Duration::days(regime_lookback_days as i64);
     let csi300_last = *dates.last().unwrap();
     let csi300_rows = sqlx::query_as::<_, (NaiveDate, f64)>(
         "SELECT trade_date, close::double precision FROM market_index_daily_bar
@@ -2198,6 +2209,11 @@ mod eleventh_batch {
             kelly_scale_base: 0.5,
             kelly_scale_floor: 0.3,
             kelly_scale_cap: 1.5,
+            cash_park_symbol: "511880.SH".into(),
+            cash_park_threshold: 0.01,
+            stop_loss_portfolio_dd: 0.10,
+            stop_loss_stock_dd: 0.25,
+            regime_lookback_days: 400,
             mvo_lookback_months: 36,
             regime_momentum_window_short: 3,
             regime_momentum_window_long: 6,
@@ -2908,7 +2924,7 @@ mod eleventh_batch {
         )
         .await;
         let dates = vec![first, last];
-        let map = preload_csi300_map(&db, &dates)
+        let map = preload_csi300_map(&db, &dates, 400)
             .await
             .expect("preload 应 Ok");
         assert_eq!(map.len(), 3, "close>0 且窗口内的 3 行: {map:?}");

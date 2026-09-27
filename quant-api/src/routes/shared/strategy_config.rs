@@ -51,6 +51,17 @@ pub struct StrategyConfig {
     pub regime_momentum_window_long: i32,
     #[serde(default = "default_regime_bull_min_stock_fallback")]
     pub regime_bull_min_stock_fallback: f64,
+    // 第二轮审计 C1/C2/C4 配置化(2026-09-27)
+    #[serde(default = "default_cash_park_symbol")]
+    pub cash_park_symbol: String,
+    #[serde(default = "default_cash_park_threshold")]
+    pub cash_park_threshold: f64,
+    #[serde(default = "default_stop_loss_portfolio_dd")]
+    pub stop_loss_portfolio_dd: f64,
+    #[serde(default = "default_stop_loss_stock_dd")]
+    pub stop_loss_stock_dd: f64,
+    #[serde(default = "default_regime_lookback_days")]
+    pub regime_lookback_days: i32,
     // detect_regime_exposure 深熊降仓阈值/暴露(P1-2 配置化,原硬编码 -0.10/0.60)。
     // trailing-12m 收益 < deep_bear_threshold → 仓位降为 deep_bear_exposure。
     #[serde(default = "default_deep_bear_threshold")]
@@ -156,6 +167,21 @@ fn default_regime_momentum_window_long() -> i32 {
 fn default_regime_bull_min_stock_fallback() -> f64 {
     0.20
 }
+fn default_cash_park_symbol() -> String {
+    "511880.SH".into()
+}
+fn default_cash_park_threshold() -> f64 {
+    0.01
+}
+fn default_stop_loss_portfolio_dd() -> f64 {
+    0.10
+}
+fn default_stop_loss_stock_dd() -> f64 {
+    0.25
+}
+fn default_regime_lookback_days() -> i32 {
+    400
+}
 fn default_deep_bear_exposure() -> f64 {
     0.60
 }
@@ -239,6 +265,11 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         regime_momentum_window_short: mvo.regime_momentum_window_short,
         regime_momentum_window_long: mvo.regime_momentum_window_long,
         regime_bull_min_stock_fallback: mvo.regime_bull_min_stock_fallback,
+        cash_park_symbol: mvo.cash_park_symbol.clone(),
+        cash_park_threshold: mvo.cash_park_threshold,
+        stop_loss_portfolio_dd: mvo.stop_loss_portfolio_dd,
+        stop_loss_stock_dd: mvo.stop_loss_stock_dd,
+        regime_lookback_days: mvo.regime_lookback_days,
         deep_bear_threshold: mvo.deep_bear_threshold,
         deep_bear_exposure: mvo.deep_bear_exposure,
         kelly_fraction: mvo.kelly_fraction,
@@ -311,6 +342,11 @@ mod tests {
                 regime_momentum_window_short: 3,
                 regime_momentum_window_long: 6,
                 regime_bull_min_stock_fallback: 0.20,
+                cash_park_symbol: "511880.SH".into(),
+                cash_park_threshold: 0.01,
+                stop_loss_portfolio_dd: 0.10,
+                stop_loss_stock_dd: 0.25,
+                regime_lookback_days: 400,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,
@@ -556,6 +592,11 @@ mod tests {
                 regime_momentum_window_short: 3,
                 regime_momentum_window_long: 6,
                 regime_bull_min_stock_fallback: 0.20,
+                cash_park_symbol: "511880.SH".into(),
+                cash_park_threshold: 0.01,
+                stop_loss_portfolio_dd: 0.10,
+                stop_loss_stock_dd: 0.25,
+                regime_lookback_days: 400,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,

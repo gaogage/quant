@@ -894,6 +894,9 @@ pub struct MultiWindowSimRequest {
     pub rebalance_freq_days: Option<usize>,
     pub benchmark: Option<String>,
     pub commission_pct: Option<f64>,
+    // C2 配置化(2026-09-27,原写死 0.10/0.25): 组合止损双阈值
+    pub stop_loss_portfolio_dd: Option<f64>,
+    pub stop_loss_stock_dd: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -923,6 +926,9 @@ async fn simulate_multi_window_inner(
     let reb_days = req.rebalance_freq_days.unwrap_or(20);
     let benchmark = req.benchmark.unwrap_or_else(|| "000300.SH".into());
     let commission = req.commission_pct.unwrap_or(0.0003);
+    // C2 配置化: 止损双阈值(默认=原写死值)
+    let stop_loss_portfolio_dd = req.stop_loss_portfolio_dd.unwrap_or(0.10);
+    let stop_loss_stock_dd = req.stop_loss_stock_dd.unwrap_or(0.25);
 
     let capital = PgPaperAccountRepo::new(db)
         .find_initial_capital(&account_id)
@@ -1128,8 +1134,8 @@ async fn simulate_multi_window_inner(
                         continue;
                     }
                     let stock_dd = 1.0 - current / entry;
-                    // Only stop if portfolio is stressed (>10% DD) AND stock is down >25%
-                    if portfolio_dd > 0.10 && stock_dd > 0.25 {
+                    // Only stop if portfolio is stressed AND stock is down(C2 配置化阈值)
+                    if portfolio_dd > stop_loss_portfolio_dd && stock_dd > stop_loss_stock_dd {
                         cash += shares * current * (1.0 - commission);
                         stopped.push(sym.clone());
                         stop_losses += 1;
@@ -2768,6 +2774,8 @@ mod fifth_batch {
             rebalance_freq_days: None,
             benchmark: None,
             commission_pct: None,
+            stop_loss_portfolio_dd: None,
+            stop_loss_stock_dd: None,
         };
 
         // 账户不存在
