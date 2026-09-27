@@ -23,7 +23,7 @@ const PROFESSIONAL_MAX_DRAWDOWN: f64 = 35.0;
 const ELITE_ANNUAL_RETURN: f64 = 20.0;
 const ELITE_SHARPE: f64 = 1.5;
 const ELITE_SORTINO: f64 = 1.8;
-const ELITE_CALMAR: f64 = 2.0;
+const ELITE_CALMAR: f64 = 1.5; // 2026-09-27 用户裁决: 2.0 过于艰难下调至 1.5(放弃原目标)
 const ELITE_TRADES: f64 = 200.0;
 
 /// GET /api/v1/quant/blueprint/progress
