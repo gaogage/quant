@@ -461,13 +461,16 @@ pub async fn account_detail(
             Option<rust_decimal::Decimal>,
             Option<rust_decimal::Decimal>,
             Option<rust_decimal::Decimal>,
+            Option<String>,
         ),
     >(
         "SELECT o.order_id, o.symbol, o.side, o.status, o.quantity, o.limit_price,
                 f.price as fill_price, f.fill_time,
                 o.target_price, o.price_upper_limit, o.price_lower_limit,
-                o.slippage_pct, f.quantity as fill_quantity, f.amount as fill_amount
+                o.slippage_pct, f.quantity as fill_quantity, f.amount as fill_amount,
+                ms.name as stock_name
          FROM paper_order o LEFT JOIN paper_fill f ON o.order_id = f.planned_order_id
+         LEFT JOIN market_stock ms ON ms.symbol = o.symbol
          WHERE o.paper_account_id = $1
          ORDER BY COALESCE(f.fill_time, o.created_at) DESC LIMIT 50",
     )
@@ -492,9 +495,11 @@ pub async fn account_detail(
             slip,
             fill_qty,
             fill_amt,
+            stock_name,
         )| {
             serde_json::json!({
                 "order_id": oid, "symbol": sym, "side": side, "status": sts,
+                "name": stock_name.unwrap_or_default(),
                 "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
                 "limit_price": lim.map(|v| v.to_string()).unwrap_or_default(),
                 "fill_price": fill_price.map(|v| v.to_string()).unwrap_or_default(),
@@ -836,14 +841,17 @@ pub async fn rebalance_history(
         Option<rust_decimal::Decimal>,
         Option<rust_decimal::Decimal>,
         String,
+        Option<String>,
     )> = sqlx::query_as(
         "SELECT DATE(o.created_at) as trade_date,
                 o.order_id, o.symbol, o.side,
                 o.quantity, o.target_price,
                 f.price as fill_price,
-                o.status
+                o.status,
+                ms.name as stock_name
          FROM paper_order o
          LEFT JOIN paper_fill f ON o.order_id = f.planned_order_id
+         LEFT JOIN market_stock ms ON ms.symbol = o.symbol
          WHERE o.paper_account_id = $1 AND o.status = 'filled'
          ORDER BY o.created_at DESC",
     )
@@ -855,7 +863,8 @@ pub async fn rebalance_history(
     // 3. 按日期分组交易明细
     let mut trades_by_date: std::collections::HashMap<String, Vec<serde_json::Value>> =
         std::collections::HashMap::new();
-    for (trade_date, oid, symbol, side, qty, target_price, fill_price, status) in trades {
+    for (trade_date, oid, symbol, side, qty, target_price, fill_price, status, stock_name) in trades
+    {
         let key = trade_date.format("%Y-%m-%d").to_string();
         trades_by_date
             .entry(key)
@@ -863,6 +872,7 @@ pub async fn rebalance_history(
             .push(serde_json::json!({
                 "order_id": oid,
                 "symbol": symbol,
+                "name": stock_name.unwrap_or_default(),
                 "side": side,
                 "quantity": qty.map(|v| v.to_string()).unwrap_or_default(),
                 "target_price": target_price.map(|v| v.to_string()),

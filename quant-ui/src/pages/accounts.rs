@@ -1099,12 +1099,18 @@ pub fn AccountsContent() -> Element {
                                                                                     let side = t["side"].as_str().unwrap_or("-");
                                                                                     let side_class = if side == "buy" { "text-green-600 dark:text-green-400" } else { "text-red-600 dark:text-red-400" };
                                                                                     let sym = t["symbol"].as_str().unwrap_or("-");
+                                                                                    let stock_name = t["name"].as_str().unwrap_or("");
                                                                                     let qty = t["quantity"].as_str().unwrap_or("0");
                                                                                     let price = t["fill_price"].as_str().unwrap_or("-");
                                                                                     let ftime = t["fill_time"].as_str().unwrap_or("-");
                                                                                     rsx! {
                                                                                         tr { class: "border-b border-gray-100 dark:border-gray-800/50",
-                                                                                            td { class: "py-1.5 pr-2 text-gray-900 dark:text-white font-mono", "{sym}" }
+                                                                                            td { class: "py-1.5 pr-2",
+                                                                                                span { class: "text-gray-900 dark:text-white font-mono", "{sym}" }
+                                                                                                if !stock_name.is_empty() {
+                                                                                                    span { class: "block text-xs text-gray-400 dark:text-gray-500", "{stock_name}" }
+                                                                                                }
+                                                                                            }
                                                                                             td { class: "py-1.5 px-1 text-center", span { class: side_class, "{side}" } }
                                                                                             td { class: "py-1.5 pl-2 text-right text-gray-700 dark:text-gray-300", "{qty}@{price}" }
                                                                                             td { class: "py-1.5 pl-2 text-right text-gray-500 dark:text-gray-400", "{ftime}" }
@@ -1462,6 +1468,7 @@ fn RebalanceHistoryPanel(account_id: String) -> Element {
                                                 for t in trades.iter() {
                                                     {
                                                         let sym = t["symbol"].as_str().unwrap_or("-");
+                                                        let stock_name = t["name"].as_str().unwrap_or("");
                                                         let side = t["side"].as_str().unwrap_or("-");
                                                         let qty = t["quantity"].as_str().unwrap_or("-");
                                                         let target_price = t["target_price"].as_str().unwrap_or("-");
@@ -1474,7 +1481,12 @@ fn RebalanceHistoryPanel(account_id: String) -> Element {
                                                         let side_label = if side == "buy" { "买入" } else { "卖出" };
                                                         rsx! {
                                                             tr { class: "border-b border-gray-50 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/50",
-                                                                td { class: "py-1.5 pl-3 pr-2 font-mono text-gray-900 dark:text-white", "{sym}" }
+                                                                td { class: "py-1.5 pl-3 pr-2",
+                                                                    span { class: "font-mono text-gray-900 dark:text-white", "{sym}" }
+                                                                    if !stock_name.is_empty() {
+                                                                        span { class: "block text-xs text-gray-400 dark:text-gray-500", "{stock_name}" }
+                                                                    }
+                                                                }
                                                                 td { class: "py-1.5 px-1 text-center {side_color}", "{side_label}" }
                                                                 td { class: "py-1.5 px-1 text-right font-mono text-gray-700 dark:text-gray-300", "{qty}" }
                                                                 td { class: "py-1.5 px-1 text-right font-mono text-gray-500 dark:text-gray-400", "{target_price}" }
