@@ -1012,6 +1012,8 @@ mod sixth_batch {
             default_weights: vec![],
             regime_bull_min_stock: 0.0,
             regime_bear_min_stock: 0.0,
+            regime_bull_momentum_threshold: 0.15,
+            regime_bear_momentum_threshold: -0.03,
             deep_bear_threshold: -0.10,
             deep_bear_exposure: 0.60,
             signal_source: String::new(),

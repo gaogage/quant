@@ -168,6 +168,10 @@ pub struct MvoParams {
     pub regime_bear_threshold: f64,
     pub regime_bull_min_stock: f64,
     pub regime_bear_min_stock: f64,
+    // adaptive min_stock 动量门槛(2026-09-27 配置化,原写死 -0.03/0.15):
+    // sleeve 3 月累计 < bear_momentum_threshold → 防守;6 月累计 > bull_momentum_threshold → bull 分支
+    pub regime_bull_momentum_threshold: f64,
+    pub regime_bear_momentum_threshold: f64,
     // detect_regime_exposure 深熊降仓阈值/暴露(P1-2 配置化)。
     pub deep_bear_threshold: f64,
     pub deep_bear_exposure: f64,
@@ -259,6 +263,9 @@ struct CompositeRow {
     regime_bear_threshold: Option<f64>,
     regime_bull_min_stock: Option<f64>,
     regime_bear_min_stock: Option<f64>,
+    // 2026-09-27 regime 动量门槛配置化(原 mvo_weights.rs 写死 -0.03/0.15)
+    regime_bull_momentum_threshold: Option<f64>,
+    regime_bear_momentum_threshold: Option<f64>,
     deep_bear_threshold: Option<f64>,
     deep_bear_exposure: Option<f64>,
     dynamic_target_cap: Option<f64>,
@@ -330,6 +337,7 @@ pub async fn load_resolved_strategy(
                 ga_population, ga_generations, ga_elite_count,
                 regime_bull_threshold, regime_bear_threshold,
                 regime_bull_min_stock, regime_bear_min_stock,
+                regime_bull_momentum_threshold, regime_bear_momentum_threshold,
                 deep_bear_threshold, deep_bear_exposure,
                 dynamic_target_cap, dynamic_target_floor, risk_free_rate, grid_step,
                 leverage_regime_threshold, slippage_pct, mvo_objective, allocation_mode, mu_estimation,
@@ -388,6 +396,10 @@ pub async fn load_resolved_strategy(
                 regime_bear_threshold: main.regime_bear_threshold.unwrap_or(0.0),
                 regime_bull_min_stock: main.regime_bull_min_stock.unwrap_or(0.0),
                 regime_bear_min_stock: main.regime_bear_min_stock.unwrap_or(0.0),
+                regime_bull_momentum_threshold: main.regime_bull_momentum_threshold.unwrap_or(0.15),
+                regime_bear_momentum_threshold: main
+                    .regime_bear_momentum_threshold
+                    .unwrap_or(-0.03),
                 deep_bear_threshold: main.deep_bear_threshold.unwrap_or(-0.10),
                 deep_bear_exposure: main.deep_bear_exposure.unwrap_or(0.60),
                 dynamic_target_cap: main.dynamic_target_cap.unwrap_or(0.30),
@@ -515,6 +527,8 @@ mod tests {
                 regime_bear_threshold: 0.0,
                 regime_bull_min_stock: 0.0,
                 regime_bear_min_stock: 0.0,
+                regime_bull_momentum_threshold: 0.15,
+                regime_bear_momentum_threshold: -0.03,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,

@@ -31,6 +31,11 @@ pub struct StrategyConfig {
     pub regime_bull_min_stock: f64,
     #[serde(default)]
     pub regime_bear_min_stock: f64,
+    // adaptive min_stock 动量门槛(2026-09-27 配置化,原 mvo_weights.rs 写死 0.15/-0.03)。
+    #[serde(default = "default_regime_bull_momentum_threshold")]
+    pub regime_bull_momentum_threshold: f64,
+    #[serde(default = "default_regime_bear_momentum_threshold")]
+    pub regime_bear_momentum_threshold: f64,
     // detect_regime_exposure 深熊降仓阈值/暴露(P1-2 配置化,原硬编码 -0.10/0.60)。
     // trailing-12m 收益 < deep_bear_threshold → 仓位降为 deep_bear_exposure。
     #[serde(default = "default_deep_bear_threshold")]
@@ -109,6 +114,12 @@ fn default_top_n() -> i64 {
 fn default_deep_bear_threshold() -> f64 {
     -0.10
 }
+fn default_regime_bull_momentum_threshold() -> f64 {
+    0.15
+}
+fn default_regime_bear_momentum_threshold() -> f64 {
+    -0.03
+}
 fn default_deep_bear_exposure() -> f64 {
     0.60
 }
@@ -183,6 +194,8 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         default_weights: mvo.default_weights.clone(),
         regime_bull_min_stock: mvo.regime_bull_min_stock,
         regime_bear_min_stock: mvo.regime_bear_min_stock,
+        regime_bull_momentum_threshold: mvo.regime_bull_momentum_threshold,
+        regime_bear_momentum_threshold: mvo.regime_bear_momentum_threshold,
         deep_bear_threshold: mvo.deep_bear_threshold,
         deep_bear_exposure: mvo.deep_bear_exposure,
         kelly_fraction: mvo.kelly_fraction,
@@ -246,6 +259,8 @@ mod tests {
                 regime_bear_threshold: 0.0,
                 regime_bull_min_stock: 0.0,
                 regime_bear_min_stock: 0.0,
+                regime_bull_momentum_threshold: 0.15,
+                regime_bear_momentum_threshold: -0.03,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,
@@ -482,6 +497,8 @@ mod tests {
                 regime_bear_threshold: 0.0,
                 regime_bull_min_stock: 0.0,
                 regime_bear_min_stock: 0.0,
+                regime_bull_momentum_threshold: 0.15,
+                regime_bear_momentum_threshold: -0.03,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,

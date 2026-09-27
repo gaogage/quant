@@ -195,7 +195,7 @@ pub(crate) async fn compute_lw_mvo_weights(
         } else {
             trail_3m * 2.0
         };
-        if trail_3m < -0.03 {
+        if trail_3m < sc.regime_bear_momentum_threshold {
             // 熊市:优先用策略配置 regime_bear_min_stock(若>0),否则降仓到 0 转 ETF 防守
             let bear_target = if sc.regime_bear_min_stock > 0.0 {
                 sc.regime_bear_min_stock
@@ -209,7 +209,7 @@ pub(crate) async fn compute_lw_mvo_weights(
                 bear_target
             );
             bear_target
-        } else if trail_6m > 0.15 {
+        } else if trail_6m > sc.regime_bull_momentum_threshold {
             // 牛市:优先用策略配置 regime_bull_min_stock(若>0),否则用默认 0.20
             let bull_target = if sc.regime_bull_min_stock > 0.0 {
                 sc.regime_bull_min_stock
