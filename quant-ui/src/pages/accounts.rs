@@ -756,7 +756,7 @@ pub fn AccountsContent() -> Element {
                                             }
                                         }
                                         // 第一行：资产 + 杠杆 + 策略 + 累计收益率（杠杆↔策略已互换，最大回撤位改累计收益率）
-                                        div { class: "grid grid-cols-2 md:grid-cols-5 gap-4 text-sm",
+                                        div { class: "grid grid-cols-2 md:grid-cols-6 gap-4 text-sm",
                                             {
                                                 let cash_val = acc["cash"].as_f64().unwrap_or(cap);
                                                 let reserve_val = acc["reserve_amount"].as_f64().unwrap_or(0.0);
@@ -765,11 +765,19 @@ pub fn AccountsContent() -> Element {
                                                 // 总资产 = 净值 + 融资负债（margin_amount；无杠杆账户=净值）
                                                 let margin_val = acc["margin_amount"].as_f64().unwrap_or(0.0);
                                                 let total_assets = nav + margin_val;
+                                                // 维保比率 = 总资产/融资负债（与 rebalance.maintenance_ratio 同口径）；
+                                                // 无杠杆账户无融资负债，显示 "-"
+                                                let maint_ratio = if margin_val > 0.0 {
+                                                    format!("{:.2}", total_assets / margin_val)
+                                                } else {
+                                                    "-".to_string()
+                                                };
                                                 rsx! {
-                                                    // 总资产/净值/期初本金/现金(预留) — col-span-2 加宽
-                                                    div { class: "col-span-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3",
-                                                        div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "总资产 / 净值 / 期初本金 / 现金(预留)" }
-                                                        div { class: "text-gray-900 dark:text-white font-mono text-sm", "¥{total_assets as i64} / ¥{nav as i64} / ¥{cap as i64} / ¥{cash_val as i64}(¥{reserve_val as i64})" }
+                                                    // 总资产/净值/融资负债/期初本金/现金/维保比率 — col-span-3 加宽
+                                                    // 2026-09-27 用户定版：融资负债插净值与期初本金之间，现金后加维保
+                                                    div { class: "col-span-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3",
+                                                        div { class: "text-xs text-gray-500 dark:text-gray-400 mb-1", "总资产 / 净值 / 融资负债 / 期初本金 / 现金(预留) / 维保比率" }
+                                                        div { class: "text-gray-900 dark:text-white font-mono text-sm", "¥{total_assets as i64} / ¥{nav as i64} / ¥{margin_val as i64} / ¥{cap as i64} / ¥{cash_val as i64}(¥{reserve_val as i64}) / {maint_ratio}" }
                                                     }
                                                 }
                                             }
