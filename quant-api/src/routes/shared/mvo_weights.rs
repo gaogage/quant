@@ -170,7 +170,7 @@ pub(crate) async fn compute_lw_mvo_weights(
     let min_stock = sc.min_stock;
 
     // 获取过去 36 个月的月度收益数据
-    let lookback_start = date - chrono::Duration::days(36 * 31);
+    let lookback_start = date - chrono::Duration::days(sc.mvo_lookback_months as i64 * 31);
 
     // A 股月度收益（从策略配置的权益曲线获取）
     let a_monthly = get_monthly_returns(db, lookback_start, date, "A_SHARE", sc).await;
@@ -181,19 +181,24 @@ pub(crate) async fn compute_lw_mvo_weights(
         // 原代码用 a_monthly[..3]/[..6] 取的是最老的月份而非最近月份 — trail_3m/trail_6m 方向完全错误。
         // 实测:原实现取到 2020 年最老 3 月累计 +3.08%，而真实最近 3 月为 -8.60%(熊市信号完全颠倒)。
         // 修复:统一用尾部切片(最近 N 月)替代头部切片(最老 N 月)。
-        let tail_start_3 = a_monthly.len().saturating_sub(3);
+        let tail_start_3 = a_monthly
+            .len()
+            .saturating_sub(sc.regime_momentum_window_short as usize);
         let trail_3m: f64 = a_monthly[tail_start_3..]
             .iter()
             .fold(1.0, |acc, r| acc * (1.0 + r))
             - 1.0;
-        let trail_6m: f64 = if a_monthly.len() >= 6 {
-            let tail_start_6 = a_monthly.len().saturating_sub(6);
+        let trail_6m: f64 = if a_monthly.len() >= sc.regime_momentum_window_long as usize {
+            let tail_start_6 = a_monthly
+                .len()
+                .saturating_sub(sc.regime_momentum_window_long as usize);
             a_monthly[tail_start_6..]
                 .iter()
                 .fold(1.0, |acc, r| acc * (1.0 + r))
                 - 1.0
         } else {
-            trail_3m * 2.0
+            trail_3m
+                * (sc.regime_momentum_window_long as f64 / sc.regime_momentum_window_short as f64)
         };
         if trail_3m < sc.regime_bear_momentum_threshold {
             // 熊市:优先用策略配置 regime_bear_min_stock(若>0),否则降仓到 0 转 ETF 防守
@@ -214,7 +219,7 @@ pub(crate) async fn compute_lw_mvo_weights(
             let bull_target = if sc.regime_bull_min_stock > 0.0 {
                 sc.regime_bull_min_stock
             } else {
-                0.20
+                sc.regime_bull_min_stock_fallback
             };
             info!(
                 "[MVO] Adaptive: bull detected (6m={:.1}%), min_stock {} -> {:.2}",
@@ -231,9 +236,12 @@ pub(crate) async fn compute_lw_mvo_weights(
     };
 
     // Kelly-inspired A股仓位缩放
-    let kelly_scale = if adaptive_min_stock > 0.0 && a_monthly.len() >= 6 {
-        // 同上修复:取最近 6 个月而非最老 6 个月
-        let trail_rets: Vec<f64> = a_monthly[a_monthly.len() - 6..].to_vec();
+    let kelly_scale = if adaptive_min_stock > 0.0
+        && a_monthly.len() >= sc.regime_momentum_window_long as usize
+    {
+        // 同上修复:取最近 N 月而非最老 N 月(N=regime_momentum_window_long)
+        let trail_rets: Vec<f64> =
+            a_monthly[a_monthly.len() - sc.regime_momentum_window_long as usize..].to_vec();
         let n = trail_rets.len() as f64;
         let avg = trail_rets.iter().sum::<f64>() / n;
         if n > 1.0 {
@@ -244,7 +252,7 @@ pub(crate) async fn compute_lw_mvo_weights(
                 0.0
             };
             let annual_ir = monthly_ir * (12.0_f64).sqrt();
-            (0.5 + annual_ir).clamp(0.3, 1.5)
+            (sc.kelly_scale_base + annual_ir).clamp(sc.kelly_scale_floor, sc.kelly_scale_cap)
         } else {
             1.0
         }

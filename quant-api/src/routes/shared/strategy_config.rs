@@ -36,6 +36,21 @@ pub struct StrategyConfig {
     pub regime_bull_momentum_threshold: f64,
     #[serde(default = "default_regime_bear_momentum_threshold")]
     pub regime_bear_momentum_threshold: f64,
+    // Kelly 缩放与动量窗口(2026-09-27 全量配置化,原 mvo_weights.rs 写死)
+    #[serde(default = "default_kelly_scale_base")]
+    pub kelly_scale_base: f64,
+    #[serde(default = "default_kelly_scale_floor")]
+    pub kelly_scale_floor: f64,
+    #[serde(default = "default_kelly_scale_cap")]
+    pub kelly_scale_cap: f64,
+    #[serde(default = "default_mvo_lookback_months")]
+    pub mvo_lookback_months: i32,
+    #[serde(default = "default_regime_momentum_window_short")]
+    pub regime_momentum_window_short: i32,
+    #[serde(default = "default_regime_momentum_window_long")]
+    pub regime_momentum_window_long: i32,
+    #[serde(default = "default_regime_bull_min_stock_fallback")]
+    pub regime_bull_min_stock_fallback: f64,
     // detect_regime_exposure 深熊降仓阈值/暴露(P1-2 配置化,原硬编码 -0.10/0.60)。
     // trailing-12m 收益 < deep_bear_threshold → 仓位降为 deep_bear_exposure。
     #[serde(default = "default_deep_bear_threshold")]
@@ -120,6 +135,27 @@ fn default_regime_bull_momentum_threshold() -> f64 {
 fn default_regime_bear_momentum_threshold() -> f64 {
     -0.03
 }
+fn default_kelly_scale_base() -> f64 {
+    0.5
+}
+fn default_kelly_scale_floor() -> f64 {
+    0.3
+}
+fn default_kelly_scale_cap() -> f64 {
+    1.5
+}
+fn default_mvo_lookback_months() -> i32 {
+    36
+}
+fn default_regime_momentum_window_short() -> i32 {
+    3
+}
+fn default_regime_momentum_window_long() -> i32 {
+    6
+}
+fn default_regime_bull_min_stock_fallback() -> f64 {
+    0.20
+}
 fn default_deep_bear_exposure() -> f64 {
     0.60
 }
@@ -196,6 +232,13 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         regime_bear_min_stock: mvo.regime_bear_min_stock,
         regime_bull_momentum_threshold: mvo.regime_bull_momentum_threshold,
         regime_bear_momentum_threshold: mvo.regime_bear_momentum_threshold,
+        kelly_scale_base: mvo.kelly_scale_base,
+        kelly_scale_floor: mvo.kelly_scale_floor,
+        kelly_scale_cap: mvo.kelly_scale_cap,
+        mvo_lookback_months: mvo.mvo_lookback_months,
+        regime_momentum_window_short: mvo.regime_momentum_window_short,
+        regime_momentum_window_long: mvo.regime_momentum_window_long,
+        regime_bull_min_stock_fallback: mvo.regime_bull_min_stock_fallback,
         deep_bear_threshold: mvo.deep_bear_threshold,
         deep_bear_exposure: mvo.deep_bear_exposure,
         kelly_fraction: mvo.kelly_fraction,
@@ -261,6 +304,13 @@ mod tests {
                 regime_bear_min_stock: 0.0,
                 regime_bull_momentum_threshold: 0.15,
                 regime_bear_momentum_threshold: -0.03,
+                kelly_scale_base: 0.5,
+                kelly_scale_floor: 0.3,
+                kelly_scale_cap: 1.5,
+                mvo_lookback_months: 36,
+                regime_momentum_window_short: 3,
+                regime_momentum_window_long: 6,
+                regime_bull_min_stock_fallback: 0.20,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,
@@ -499,6 +549,13 @@ mod tests {
                 regime_bear_min_stock: 0.0,
                 regime_bull_momentum_threshold: 0.15,
                 regime_bear_momentum_threshold: -0.03,
+                kelly_scale_base: 0.5,
+                kelly_scale_floor: 0.3,
+                kelly_scale_cap: 1.5,
+                mvo_lookback_months: 36,
+                regime_momentum_window_short: 3,
+                regime_momentum_window_long: 6,
+                regime_bull_min_stock_fallback: 0.20,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,
