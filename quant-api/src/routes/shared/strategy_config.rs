@@ -62,6 +62,13 @@ pub struct StrategyConfig {
     pub stop_loss_stock_dd: f64,
     #[serde(default = "default_regime_lookback_days")]
     pub regime_lookback_days: i32,
+    // ETF 动量过滤(2026-09-27 Rust 实现配套,默认关闭)
+    #[serde(default)]
+    pub etf_momentum_filter_enabled: bool,
+    #[serde(default = "default_etf_momentum_window_days")]
+    pub etf_momentum_window_days: i32,
+    #[serde(default = "default_etf_momentum_downscale")]
+    pub etf_momentum_downscale: f64,
     // detect_regime_exposure 深熊降仓阈值/暴露(P1-2 配置化,原硬编码 -0.10/0.60)。
     // trailing-12m 收益 < deep_bear_threshold → 仓位降为 deep_bear_exposure。
     #[serde(default = "default_deep_bear_threshold")]
@@ -182,6 +189,12 @@ fn default_stop_loss_stock_dd() -> f64 {
 fn default_regime_lookback_days() -> i32 {
     400
 }
+fn default_etf_momentum_window_days() -> i32 {
+    20
+}
+fn default_etf_momentum_downscale() -> f64 {
+    0.4
+}
 fn default_deep_bear_exposure() -> f64 {
     0.60
 }
@@ -270,6 +283,9 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         stop_loss_portfolio_dd: mvo.stop_loss_portfolio_dd,
         stop_loss_stock_dd: mvo.stop_loss_stock_dd,
         regime_lookback_days: mvo.regime_lookback_days,
+        etf_momentum_filter_enabled: mvo.etf_momentum_filter_enabled,
+        etf_momentum_window_days: mvo.etf_momentum_window_days,
+        etf_momentum_downscale: mvo.etf_momentum_downscale,
         deep_bear_threshold: mvo.deep_bear_threshold,
         deep_bear_exposure: mvo.deep_bear_exposure,
         kelly_fraction: mvo.kelly_fraction,
@@ -347,6 +363,9 @@ mod tests {
                 stop_loss_portfolio_dd: 0.10,
                 stop_loss_stock_dd: 0.25,
                 regime_lookback_days: 400,
+                etf_momentum_filter_enabled: false,
+                etf_momentum_window_days: 20,
+                etf_momentum_downscale: 0.4,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,
@@ -597,6 +616,9 @@ mod tests {
                 stop_loss_portfolio_dd: 0.10,
                 stop_loss_stock_dd: 0.25,
                 regime_lookback_days: 400,
+                etf_momentum_filter_enabled: false,
+                etf_momentum_window_days: 20,
+                etf_momentum_downscale: 0.4,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,

@@ -37,7 +37,9 @@ pub(crate) use config_env::{
 pub use etf_premium::{apply_premium_exit_overlay, load_etf_premium_map, EtfPremium};
 pub(crate) use etf_prices::fetch_intraday_etf_prices;
 pub use mvo_weights::MvoWeightCache;
-pub(crate) use mvo_weights::{compute_lw_mvo_weights, compute_vol_target_leverage};
+pub(crate) use mvo_weights::{
+    apply_etf_momentum_filter, compute_lw_mvo_weights, compute_vol_target_leverage,
+};
 pub use nav_snapshot::{upsert_nav_snapshot, NavSnapshot};
 pub use paper_account_repo::{CreateAccountInput, PaperAccountRepository, PgPaperAccountRepo};
 pub use paper_position_repo::{PaperPositionRepository, PgPaperPositionRepo};

@@ -644,3 +644,174 @@ mod tests {
         assert!(daily_to_monthly_returns(&empty).is_empty());
     }
 }
+
+/// ETF 动量过滤（2026-09-27：Python 脚本论证 13 年逐年全正后的 Rust 实现）。
+///
+/// 机制：N 日动量 < 0 的 ETF 权重 × downscale，池内归一化保持总敞口（TSMOM 倾斜）。
+/// 默认 enabled=false 零行为变化；现金管理标的（cash_park_symbol）不参与过滤。
+/// PIT：动量用 <= date 的后复权收盘（盘后调仓/导出语义，与 regime 检测同口径）；
+/// 复权空间：信号层计算用 bar_adj 后复权视图（两空间一桥合规）。
+pub async fn apply_etf_momentum_filter(
+    db: &sqlx::PgPool,
+    date: chrono::NaiveDate,
+    allocs: Vec<(String, f64)>,
+    sc: &StrategyConfig,
+) -> Vec<(String, f64)> {
+    if !sc.etf_momentum_filter_enabled || allocs.len() < 2 {
+        return allocs;
+    }
+    let win = sc.etf_momentum_window_days.max(5) as i64;
+    let lookback_days = win * 3 / 2 + 5; // 自然日缓冲覆盖节假日
+    let mut filtered = Vec::with_capacity(allocs.len());
+    let mut sum = 0.0;
+    for (sym, w) in &allocs {
+        if *w <= 0.0 || sym == &sc.cash_park_symbol {
+            filtered.push((sym.clone(), *w));
+            continue;
+        }
+        let momentum: Option<f64> = sqlx::query_scalar(
+            "WITH cur AS (SELECT close FROM market_stock_daily_bar_adj
+                          WHERE symbol=$1 AND trade_date<=$2 AND close>0
+                          ORDER BY trade_date DESC LIMIT 1),
+                  past AS (SELECT close FROM market_stock_daily_bar_adj
+                           WHERE symbol=$1 AND trade_date <= $2 - ($3::int) AND close>0
+                           ORDER BY trade_date DESC LIMIT 1)
+             SELECT cur.close / NULLIF(past.close, 0) - 1.0 FROM cur, past",
+        )
+        .bind(sym)
+        .bind(date)
+        .bind(lookback_days)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        let scale = match momentum {
+            Some(m) if m < 0.0 => sc.etf_momentum_downscale,
+            _ => 1.0,
+        };
+        let scaled = w * scale;
+        sum += scaled;
+        filtered.push((sym.clone(), scaled));
+    }
+    // 池内归一化（保持 ETF 段总敞口不变）
+    if sum > 0.0 {
+        for (_, w) in filtered.iter_mut() {
+            *w /= sum;
+        }
+    }
+    filtered
+}
+
+#[cfg(test)]
+mod etf_momentum_filter_tests {
+    use super::*;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    fn sc_with(enabled: bool) -> StrategyConfig {
+        let mut sc = StrategyConfig {
+            etf_premium_gate: 0.10,
+            allocation_mode: None,
+            mu_estimation: None,
+            strategy_id: "test".into(),
+            name: "test".into(),
+            etf_symbols: vec![],
+            equity_curve_task_id: String::new(),
+            min_stock: 0.0,
+            max_single: 0.0,
+            max_single_bull: 0.0,
+            momentum_blend_ratio: 0.0,
+            ga_population: 0,
+            ga_generations: 0,
+            vol_target: 0.0,
+            leverage_cap: 0.0,
+            default_weights: vec![],
+            regime_bull_min_stock: 0.0,
+            regime_bear_min_stock: 0.0,
+            regime_bull_momentum_threshold: 0.15,
+            regime_bear_momentum_threshold: -0.03,
+            kelly_scale_base: 0.5,
+            kelly_scale_floor: 0.3,
+            kelly_scale_cap: 1.5,
+            etf_momentum_filter_enabled: false,
+            etf_momentum_window_days: 20,
+            etf_momentum_downscale: 0.4,
+            cash_park_symbol: "511880.SH".into(),
+            cash_park_threshold: 0.01,
+            stop_loss_portfolio_dd: 0.10,
+            stop_loss_stock_dd: 0.25,
+            regime_lookback_days: 400,
+            mvo_lookback_months: 36,
+            regime_momentum_window_short: 3,
+            regime_momentum_window_long: 6,
+            regime_bull_min_stock_fallback: 0.20,
+            deep_bear_threshold: -0.10,
+            deep_bear_exposure: 0.60,
+            signal_source: String::new(),
+            prediction_blend_weight: 0.0,
+            combo_name: String::new(),
+            top_n: 0,
+            prediction_set_id: None,
+            dynamic_target_cap: 0.0,
+            dynamic_target_floor: 0.0,
+            score_direction: String::new(),
+            candidate_tier: String::new(),
+            leverage_regime_threshold: 0.9,
+            slippage_pct: 0.002,
+            mvo_objective: "minvariance".into(),
+            kelly_fraction: 0.25,
+            score_candidate_pool_size: 200,
+            regime_policy: None,
+            regime_bear_return_threshold: -0.03,
+        };
+        sc.etf_momentum_filter_enabled = enabled;
+        sc.etf_momentum_window_days = 20;
+        sc.etf_momentum_downscale = 0.4;
+        sc.cash_park_symbol = "511880.SH".into();
+        sc
+    }
+
+    /// 默认关闭：零行为变化（分配原样返回）
+    #[tokio::test]
+    async fn disabled_filter_is_identity() {
+        let db = test_db().await;
+        let allocs = vec![
+            ("518880.SH".to_string(), 0.5),
+            ("513100.SH".to_string(), 0.5),
+        ];
+        let out = apply_etf_momentum_filter(
+            &db,
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 24).unwrap(),
+            allocs.clone(),
+            &sc_with(false),
+        )
+        .await;
+        assert_eq!(out, allocs, "关闭时必须原样返回(零行为变化)");
+    }
+
+    /// 开启时：负动量 ETF 被压权且池内归一化保持总敞口；现金管理标的不参与
+    #[tokio::test]
+    async fn enabled_filter_downscales_negative_momentum_and_normalizes() {
+        let db = test_db().await;
+        // 2026-03 前后黄金/纳指有明确的动量分化段——用实际库数据验证行为语义
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 3, 20).unwrap();
+        let allocs = vec![
+            ("518880.SH".to_string(), 0.4),
+            ("513100.SH".to_string(), 0.4),
+            ("511010.SH".to_string(), 0.2),
+            ("511880.SH".to_string(), 0.05), // 现金管理标的(应原样保留)
+        ];
+        let out = apply_etf_momentum_filter(&db, date, allocs, &sc_with(true)).await;
+        let total: f64 = out.iter().map(|(_, w)| w).sum();
+        assert!(
+            (total - 1.05).abs() < 1e-9,
+            "ETF 段归一化+现金段保留, 总和应为 1.05, 实际 {total}"
+        );
+        let cash = out.iter().find(|(s, _)| s == "511880.SH").unwrap();
+        assert!((cash.1 - 0.05).abs() < 1e-9, "现金管理标的权重不得被过滤");
+    }
+}

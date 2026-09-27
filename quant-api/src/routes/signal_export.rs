@@ -383,6 +383,9 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
         &sc.cash_park_symbol,
         sc.cash_park_threshold,
     );
+    // ETF 动量过滤(2026-09-27,默认关闭;调仓与信号导出共享同口径)
+    let etf_allocs =
+        crate::routes::shared::apply_etf_momentum_filter(db, date, etf_allocs, &sc).await;
     let etf_allocs = crate::routes::shared::apply_premium_exit_overlay(
         &etf_allocs,
         &premium_map,
@@ -1036,6 +1039,9 @@ mod sixth_batch {
             kelly_scale_base: 0.5,
             kelly_scale_floor: 0.3,
             kelly_scale_cap: 1.5,
+            etf_momentum_filter_enabled: false,
+            etf_momentum_window_days: 20,
+            etf_momentum_downscale: 0.4,
             cash_park_symbol: "511880.SH".into(),
             cash_park_threshold: 0.01,
             stop_loss_portfolio_dd: 0.10,

@@ -601,6 +601,9 @@ pub async fn rebalance_account(
         &sc.cash_park_symbol,
         sc.cash_park_threshold,
     );
+    // ETF 动量过滤(2026-09-27,默认关闭零行为变化;现金管理标的不参与)
+    let etf_allocations =
+        crate::routes::shared::apply_etf_momentum_filter(db, date, etf_allocations, &sc).await;
     // P2-C:批量预加载 ETF 当日收盘价(EodClose 模式,替代 fetch_etf_price 逐个查)
     let etf_eod_prices: HashMap<String, f64> = if matches!(
         price_source,
@@ -1661,6 +1664,9 @@ mod tests {
             kelly_scale_base: 0.5,
             kelly_scale_floor: 0.3,
             kelly_scale_cap: 1.5,
+            etf_momentum_filter_enabled: false,
+            etf_momentum_window_days: 20,
+            etf_momentum_downscale: 0.4,
             cash_park_symbol: "511880.SH".into(),
             cash_park_threshold: 0.01,
             stop_loss_portfolio_dd: 0.10,
@@ -1739,6 +1745,9 @@ mod fifth_batch {
             stop_loss_portfolio_dd: 0.10,
             stop_loss_stock_dd: 0.25,
             regime_lookback_days: 400,
+            etf_momentum_filter_enabled: false,
+            etf_momentum_window_days: 20,
+            etf_momentum_downscale: 0.4,
             mvo_lookback_months: 36,
             regime_momentum_window_short: 3,
             regime_momentum_window_long: 6,
