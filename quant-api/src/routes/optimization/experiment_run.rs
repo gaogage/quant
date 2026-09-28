@@ -346,12 +346,10 @@ pub(crate) async fn ensure_phase7_oos_request_references_exist(
         ));
     }
 
+    // data_version 集中化(任务82): 存在性校验走 shared 单一真相源(错误吞并为 false,
+    // 与下游 !data_version_exists 报错路径语义一致)
     let data_version_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM data_version WHERE data_version_id = $1)")
-            .bind(&req.data_version_id)
-            .fetch_one(db)
-            .await
-            .map_err(|error| format!("Failed to check data_version: {}", error))?;
+        crate::routes::shared::data_version_exists(db, &req.data_version_id).await;
     if !data_version_exists {
         return Err(missing_optimization_data_version_error_message(
             &req.data_version_id,

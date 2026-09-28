@@ -1,0 +1,3699 @@
+/// 数据同步路由
+use axum::{
+    extract::{Query, State},
+    response::IntoResponse,
+    Json,
+};
+use chrono::{Datelike, Duration, NaiveDate};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+// 时间序列化统一走本地时区（Asia/Shanghai），避免 UI 出现 "... UTC" 后缀
+use quant_common::time_utils::fmt_rfc3339_local;
+
+use crate::AppState;
+
+use super::*;
+
+mod equity_pledge;
+mod futures_price_chain;
+mod margin_detail;
+mod shareholder_structure;
+
+// 重导出各数据源域的公开项，保持 routes::sync::phase7_audit::xxx 与 routes::sync::xxx 路径不变
+pub use equity_pledge::*;
+pub use futures_price_chain::*;
+pub use margin_detail::*;
+pub use shareholder_structure::*;
+
+#[derive(Debug, Clone, Deserialize)]
+
+pub struct MainBusinessAvailableAtAuditReq {
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+
+pub struct MainBusinessReadinessAuditReq {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub business_type: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+
+pub(crate) struct MainBusinessPeriodMapping {
+    pub(crate) ts_code: String,
+    pub(crate) end_date: NaiveDate,
+    pub(crate) available_at: Option<NaiveDate>,
+    pub(crate) source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+
+pub(crate) struct MainBusinessAvailableAtJoinDecision {
+    pub(crate) passed: bool,
+    pub(crate) status: &'static str,
+    pub(crate) readiness: &'static str,
+    pub(crate) missing_mapping_count: usize,
+    pub(crate) pit_violation_count: usize,
+    pub(crate) source_counts: BTreeMap<String, usize>,
+}
+
+fn main_business_available_at_audit_period_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(MAIN_BUSINESS_AVAILABLE_AT_AUDIT_MAX_PERIODS)
+        .clamp(1, MAIN_BUSINESS_AVAILABLE_AT_AUDIT_MAX_PERIODS)
+}
+
+fn main_business_readiness_breakdown_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(24)
+        .clamp(1, MAIN_BUSINESS_READINESS_BREAKDOWN_MAX_PERIODS)
+}
+
+fn main_business_business_type(value: Option<&str>) -> &'static str {
+    match value.map(str::trim).map(str::to_ascii_uppercase).as_deref() {
+        Some("D") => "D",
+        Some("I") => "I",
+        _ => "P",
+    }
+}
+
+fn main_business_quarter_end_dates_in_range(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    if start > end {
+        return Vec::new();
+    }
+
+    let mut periods = Vec::new();
+    for year in start.year()..=end.year() {
+        for (month, day) in [(3, 31), (6, 30), (9, 30), (12, 31)] {
+            if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+                if date >= start && date <= end {
+                    periods.push(date);
+                }
+            }
+        }
+    }
+    periods
+}
+
+pub(crate) fn main_business_attempt_metric(error_message: Option<&str>, prefix: &str) -> i64 {
+    let Some(message) = error_message else {
+        return 0;
+    };
+    message
+        .split(',')
+        .find_map(|part| {
+            let part = part.trim();
+            part.strip_prefix(prefix)?.parse::<i64>().ok()
+        })
+        .unwrap_or(0)
+}
+
+pub(crate) fn phase7_share_float_next_chunk_start(
+    start: NaiveDate,
+    granularity: &str,
+) -> NaiveDate {
+    let months = match granularity {
+        "month" => 1,
+        "quarter" => 3,
+        _ => 12,
+    };
+    add_months_clamped(
+        NaiveDate::from_ymd_opt(start.year(), start.month(), 1).expect("valid first day"),
+        months,
+    )
+}
+
+pub(crate) fn phase7_attempt_coverage_readiness(
+    source: &str,
+    attempted_symbols: i64,
+    reference_symbols: i64,
+) -> &'static str {
+    let grade = phase7_coverage_grade(attempted_symbols, reference_symbols);
+    if source == "financial" {
+        phase7_financial_source_readiness(grade)
+    } else {
+        match grade {
+            "broad" => "ready_for_feature_factory",
+            "partial" => "partial_feature_candidate",
+            "unknown_reference" => "coverage_reference_missing",
+            "missing" => "needs_sync",
+            _ => "sample_only_do_not_train",
+        }
+    }
+}
+
+fn phase7_tushare_probe_json(
+    source: &str,
+    symbol: Option<&str>,
+    scope: &str,
+    result: quant_common::QuantResult<
+        quant_data::model::tushare_dto::TushareResponse<Vec<serde_json::Value>>,
+    >,
+) -> Value {
+    match result {
+        Ok(response) => {
+            let row_count = response
+                .data
+                .as_ref()
+                .map(|data| data.items.len())
+                .unwrap_or_default();
+            let fields = response
+                .data
+                .as_ref()
+                .map(|data| data.fields.clone())
+                .unwrap_or_default();
+            let sample_rows: Vec<Value> = response
+                .data
+                .as_ref()
+                .map(|data| {
+                    data.to_maps()
+                        .into_iter()
+                        .take(2)
+                        .map(Value::Object)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            json!({
+                "source": source,
+                "scope": scope,
+                "symbol": symbol,
+                "status": if row_count > 0 { "ok" } else { "ok_empty" },
+                "permission": "available",
+                "row_count": row_count,
+                "fields": fields,
+                "sample_rows": sample_rows,
+            })
+        }
+        Err(error) => {
+            let message = error.to_string();
+            json!({
+                "source": source,
+                "scope": scope,
+                "symbol": symbol,
+                "status": classify_tushare_permission_error(&message),
+                "permission": "unknown_or_unavailable",
+                "error": message,
+            })
+        }
+    }
+}
+
+fn phase7_tushare_source_status(probes: &[Value]) -> &'static str {
+    if probes.iter().any(|probe| {
+        matches!(
+            probe.get("status").and_then(|status| status.as_str()),
+            Some("ok" | "ok_empty")
+        )
+    }) {
+        "available"
+    } else if probes.iter().any(|probe| {
+        probe.get("status").and_then(|status| status.as_str()) == Some("permission_denied")
+    }) {
+        "permission_denied"
+    } else {
+        "error"
+    }
+}
+
+pub(crate) fn phase7_optional_source_next_step(readiness: &str) -> &'static str {
+    match readiness {
+        "ready_for_feature_factory" => "build_pit_feature_factory",
+        "partial_feature_candidate" => "run_feature_smoke_then_expand_coverage",
+        "sample_only_do_not_train" => "expand_sync_before_training",
+        "needs_sync" => "run_bounded_sync_smoke_then_coverage_audit",
+        "schema_missing" => "apply_phase7_optional_financial_sources_schema",
+        _ => "repair_reference_coverage_before_feature_factory",
+    }
+}
+
+pub(crate) fn phase7_market_level_source_readiness(
+    stats: &Phase7MarketLevelSourceAudit,
+) -> &'static str {
+    if stats.data_rows <= 0 || stats.latest_trade_date.is_none() {
+        return "market_level_needs_sync";
+    }
+    if stats.open_day_lag.unwrap_or(i64::MAX) > 2 {
+        return "market_level_stale_needs_sync";
+    }
+    "market_level_ready_for_regime_feature"
+}
+
+pub(crate) fn phase7_market_level_zero_row_sync_covers_gap(
+    last_sync: Option<&Phase7MarketLevelSyncAudit>,
+    sync_start: NaiveDate,
+    today: NaiveDate,
+) -> bool {
+    let Some(last_sync) = last_sync else {
+        return false;
+    };
+    last_sync.status == "completed"
+        && last_sync.total_count == 0
+        && last_sync.success_count == 0
+        && last_sync
+            .start_date
+            .map(|start_date| start_date <= sync_start)
+            .unwrap_or(false)
+        && last_sync
+            .end_date
+            .map(|end_date| end_date >= today)
+            .unwrap_or(false)
+}
+
+pub(crate) fn phase7_block_trade_readiness(stats: &Phase7BlockTradeSourceAudit) -> &'static str {
+    if stats.data_rows <= 0 || stats.latest_trade_date.is_none() {
+        return "schema_and_client_ready_needs_bounded_sync";
+    }
+    if stats.pit_violation_rows > 0 {
+        return "raw_source_pit_failed";
+    }
+    if stats.open_days_in_range >= 120
+        && phase7_ratio(stats.covered_trade_days, stats.open_days_in_range).unwrap_or(0.0) >= 0.80
+    {
+        return "raw_source_ready_for_p310_diagnostics";
+    }
+    "bounded_sample_ready_needs_history_coverage"
+}
+
+pub(crate) fn phase7_industry_membership_readiness(
+    stats: &Phase7IndustryMembershipSourceAudit,
+) -> &'static str {
+    if stats.data_rows <= 0 {
+        return "industry_membership_schema_ready_needs_bounded_sync";
+    }
+    if stats.pit_violation_rows > 0
+        || stats.invalid_interval_rows > 0
+        || stats.duplicate_key_rows > 0
+    {
+        return "industry_membership_raw_source_pit_failed";
+    }
+    if phase7_ratio(
+        stats.current_covered_stock_symbols,
+        stats.current_active_stock_symbols,
+    )
+    .unwrap_or(0.0)
+        < 0.95
+    {
+        return "industry_membership_current_coverage_undercovered";
+    }
+    "industry_membership_raw_source_ready_for_coverage_audit"
+}
+
+pub async fn phase7_feasibility_audit(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match build_phase7_feasibility_audit(&state).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/tushare/permission-smoke
+pub async fn tushare_permission_smoke(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TusharePermissionSmokeReq>,
+) -> impl IntoResponse {
+    match build_tushare_permission_smoke(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/main-business/available-at-audit
+pub async fn main_business_available_at_audit(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MainBusinessAvailableAtAuditReq>,
+) -> impl IntoResponse {
+    match build_main_business_available_at_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/main-business/readiness-audit
+pub async fn main_business_readiness_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<MainBusinessReadinessAuditReq>,
+) -> impl IntoResponse {
+    match build_main_business_readiness_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/broad-analyst-revision/audit
+pub async fn phase7_optional_source_coverage_sync(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7OptionalSourceCoverageSyncReq>,
+) -> impl IntoResponse {
+    match build_phase7_optional_source_coverage_sync(state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/phase7-optional-source-coverage-batches
+pub async fn phase7_optional_source_coverage_batches(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7OptionalSourceCoverageBatchReq>,
+) -> impl IntoResponse {
+    match build_phase7_optional_source_coverage_batches(state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/phase7-coverage-expansion-runner
+pub async fn phase7_coverage_expansion_runner(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7CoverageExpansionRunnerReq>,
+) -> impl IntoResponse {
+    match build_phase7_coverage_expansion_runner(state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/phase7-share-float-coverage-batches
+pub async fn phase7_share_float_coverage_batches(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7ShareFloatCoverageReq>,
+) -> impl IntoResponse {
+    match build_phase7_share_float_coverage_batches(state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// POST /api/v1/quant/data/phase7-share-float-readiness-audit
+pub async fn phase7_share_float_readiness_audit(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<Phase7ShareFloatReadinessAuditReq>,
+) -> impl IntoResponse {
+    match build_phase7_share_float_readiness_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+/// GET /api/v1/quant/data/phase7-industry-membership-coverage-audit
+pub async fn phase7_industry_membership_coverage_audit(
+    State(state): State<Arc<AppState>>,
+    Query(req): Query<Phase7IndustryMembershipCoverageAuditReq>,
+) -> impl IntoResponse {
+    match build_phase7_industry_membership_coverage_audit(&state, req).await {
+        Ok(data) => Json(json!({"code": 0, "data": data})),
+        Err(error) => Json(json!({"code": 1, "message": error})),
+    }
+}
+
+async fn build_tushare_permission_smoke(
+    state: &AppState,
+    req: TusharePermissionSmokeReq,
+) -> Result<Value, String> {
+    parse_optional_date(req.start_date.as_deref())?;
+    parse_optional_date(req.end_date.as_deref())?;
+
+    let sources = phase7_permission_smoke_sources(&req.sources);
+    let symbols = resolve_phase7_permission_smoke_symbols(state, &req.symbols).await?;
+    let row_limit = phase7_permission_smoke_limit(req.limit);
+    let today = chrono::Utc::now().date_naive();
+    let default_start = (today - Duration::days(365 * 3))
+        .format("%Y%m%d")
+        .to_string();
+    let default_end = today.format("%Y%m%d").to_string();
+    let start_date = req.start_date.unwrap_or(default_start);
+    let end_date = req.end_date.unwrap_or(default_end);
+
+    let mut source_results = Vec::new();
+    for source in sources {
+        source_results.push(
+            run_tushare_permission_source_smoke(
+                state,
+                &source,
+                &symbols,
+                &start_date,
+                &end_date,
+                row_limit,
+            )
+            .await,
+        );
+    }
+
+    Ok(json!({
+        "audit_version": "phase7-fe-v1",
+        "mode": "read_only_permission_smoke",
+        "max_symbols": PHASE7_PERMISSION_SMOKE_MAX_SYMBOLS,
+        "row_limit_per_probe": row_limit,
+        "sample_symbols": symbols,
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "sources": source_results,
+        "notes": [
+            "This endpoint performs only small read-only Tushare API probes; it does not create tables or sync full-market data.",
+            "cashflow and dividend are probed by sample ts_code; repurchase is probed by announcement date range because the Tushare repurchase API has no ts_code input parameter.",
+            "share_float is probed by unlock float_date range; ann_date is still persisted as PIT available_at.",
+            "industry_membership probes index_classify and index_member only; it remains blocked from factor backfill until schema and available_at policy are audited.",
+            "main_business probes fina_mainbz only; it has no native ann_date and remains blocked from schema/sync/factor backfill until available_at join audit passes.",
+            "report_rc probes sell-side research earnings forecasts by report_date range only; production smoke on 2026-06-21 returned Tushare 40101 unknown data source, so it remains blocked from schema/sync/factor work until the callable API path is verified.",
+            "futures_price_chain probes fut_daily/fut_wsr/fut_holding only; these remain blocked from schema/sync/factor work until permission, source publication timing, product-to-stock mapping, coverage and P3.10 diagnostics pass.",
+            "equity_pledge_pressure probes pledge_stat and pledge_detail only; pledge_detail.ann_date is the native PIT candidate, while pledge_stat.end_date is a measurement date and must not be used alone as availability.",
+            "shareholder_structure probes stk_holdernumber/top10_holders/top10_floatholders/stk_holdertrade only; ann_date is the native PIT candidate, and end_date must never be used as availability.",
+            "margin_detail probes security-level financing and short-selling detail only; official publication timing must be handled as conservative next-session availability before any intraday use.",
+            "Use this result to decide whether an optional source should proceed to Rust schema/repository/sync implementation or stay blocked."
+        ],
+    }))
+}
+
+async fn build_main_business_available_at_audit(
+    state: &AppState,
+    req: MainBusinessAvailableAtAuditReq,
+) -> Result<Value, String> {
+    parse_optional_date(req.start_date.as_deref())?;
+    parse_optional_date(req.end_date.as_deref())?;
+
+    let symbols = resolve_phase7_permission_smoke_symbols(state, &req.symbols).await?;
+    let period_limit = main_business_available_at_audit_period_limit(req.limit);
+    let today = chrono::Utc::now().date_naive();
+    let default_start = (today - Duration::days(365 * 3))
+        .format("%Y%m%d")
+        .to_string();
+    let default_end = today.format("%Y%m%d").to_string();
+    let start_date = req.start_date.unwrap_or(default_start);
+    let end_date = req.end_date.unwrap_or(default_end);
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+
+    let mut source_errors = Vec::new();
+    let mut symbol_summaries = Vec::new();
+    let mut observed_periods = BTreeSet::new();
+    let mut malformed_row_count = 0usize;
+    let mut sample_row_count = 0usize;
+
+    for symbol in &symbols {
+        match state
+            .tushare
+            .fina_mainbz(symbol, None, Some("P"), Some(&start_date), Some(&end_date))
+            .await
+        {
+            Ok(rows) => {
+                let maps = rows.data.map(|data| data.to_maps()).unwrap_or_default();
+                let mut parsed_period_rows = 0usize;
+                sample_row_count += maps.len();
+                for row in &maps {
+                    if let Some(period_key) =
+                        main_business_period_key_from_row(&Value::Object(row.clone()))
+                    {
+                        observed_periods.insert(period_key);
+                        parsed_period_rows += 1;
+                    } else {
+                        malformed_row_count += 1;
+                    }
+                }
+                symbol_summaries.push(json!({
+                    "symbol": symbol,
+                    "status": "available",
+                    "row_count": maps.len(),
+                    "parsed_period_key_rows": parsed_period_rows,
+                }));
+            }
+            Err(error) => {
+                source_errors.push(json!({
+                    "symbol": symbol,
+                    "status": classify_tushare_permission_error(&error.to_string()),
+                    "error": error.to_string(),
+                }));
+                symbol_summaries.push(json!({
+                    "symbol": symbol,
+                    "status": "error",
+                }));
+            }
+        }
+    }
+
+    let observed_unique_periods = observed_periods.len();
+    let audit_periods: Vec<(String, NaiveDate)> =
+        observed_periods.into_iter().take(period_limit).collect();
+    let mappings = load_main_business_available_at_mappings(&state.db, &audit_periods).await?;
+    let mut decision = decide_main_business_available_at_join_audit(audit_periods.len(), &mappings);
+
+    if !source_errors.is_empty() {
+        decision.passed = false;
+        decision.status = "blocked_source_probe_failed";
+        decision.readiness = "blocked_available_at_join_audit_required";
+    } else if malformed_row_count > 0 {
+        decision.passed = false;
+        decision.status = "blocked_malformed_main_business_rows";
+        decision.readiness = "blocked_available_at_join_audit_required";
+    }
+
+    let missing_samples: Vec<Value> = mappings
+        .iter()
+        .filter(|mapping| mapping.available_at.is_none())
+        .take(20)
+        .map(main_business_period_mapping_json)
+        .collect();
+    let pit_violation_samples: Vec<Value> = mappings
+        .iter()
+        .filter(|mapping| {
+            mapping
+                .available_at
+                .map(|available_at| available_at < mapping.end_date)
+                .unwrap_or(false)
+        })
+        .take(20)
+        .map(main_business_period_mapping_json)
+        .collect();
+    let sample_mappings: Vec<Value> = mappings
+        .iter()
+        .filter(|mapping| mapping.available_at.is_some())
+        .take(20)
+        .map(main_business_period_mapping_json)
+        .collect();
+
+    Ok(json!({
+        "audit_version": "p3.19d-main-business-available-at-join-v1",
+        "mode": "read_only_available_at_join_audit",
+        "source": "tushare:fina_mainbz",
+        "business_type": "P",
+        "passed": decision.passed,
+        "status": decision.status,
+        "readiness": decision.readiness,
+        "admission_gate": if decision.passed {
+            "sample_join_passed_schema_sync_design_allowed_next"
+        } else {
+            "schema_sync_factor_p310_wfa_blocked"
+        },
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "sample": {
+            "symbols": symbols,
+            "symbol_summaries": symbol_summaries,
+            "row_count": sample_row_count,
+            "malformed_row_count": malformed_row_count,
+            "observed_unique_periods": observed_unique_periods,
+            "audited_unique_periods": audit_periods.len(),
+            "period_limit": period_limit,
+            "truncated_by_period_limit": observed_unique_periods > audit_periods.len(),
+        },
+        "join_policy": {
+            "join_key": ["ts_code", "end_date"],
+            "primary_available_at": "MIN(market_financial_statement.ann_date) grouped by ts_code,end_date",
+            "fallback_available_at": "MIN(market_stock_disclosure_date.available_at) grouped by symbol,end_date",
+            "pit_violation_rule": "available_at must be >= end_date for segment values; available_at < end_date is blocked as impossible availability for report-period business composition",
+            "prohibited": ["using fina_mainbz.end_date as available_at", "using market_stock_disclosure_date.pre_date as true available_at"]
+        },
+        "counts": {
+            "missing_mapping_count": decision.missing_mapping_count,
+            "pit_violation_count": decision.pit_violation_count,
+            "mapped_period_count": mappings.iter().filter(|mapping| mapping.available_at.is_some()).count(),
+            "source_errors_count": source_errors.len(),
+        },
+        "join_sources": decision.source_counts,
+        "source_errors": source_errors,
+        "missing_samples": missing_samples,
+        "pit_violation_samples": pit_violation_samples,
+        "sample_mappings": sample_mappings,
+        "notes": [
+            "This is a read-only sample audit. It does not create tables, sync main-business history, write factors, or launch P3.10/WFA.",
+            "fina_mainbz has report-period segment values but no native ann_date/f_ann_date; schema and sync design stay blocked until this join audit passes.",
+            "A passed sample only opens the next engineering step: schema/sync design with full-history coverage/readiness gates. It is not alpha admission."
+        ]
+    }))
+}
+
+async fn build_main_business_readiness_audit(
+    state: &AppState,
+    req: MainBusinessReadinessAuditReq,
+) -> Result<Value, String> {
+    let today = chrono::Utc::now().date_naive();
+    let start_date = req.start_date.unwrap_or_else(|| "20140101".to_string());
+    let end_date = req
+        .end_date
+        .unwrap_or_else(|| today.format("%Y%m%d").to_string());
+    let start = parse_optional_date(Some(start_date.as_str()))?
+        .ok_or_else(|| "start_date is required".to_string())?;
+    let end = parse_optional_date(Some(end_date.as_str()))?
+        .ok_or_else(|| "end_date is required".to_string())?;
+    if start > end {
+        return Err("start_date must be <= end_date".to_string());
+    }
+
+    let business_type = main_business_business_type(req.business_type.as_deref());
+    let periods = main_business_quarter_end_dates_in_range(start, end);
+    let expected_period_count = periods.len();
+    let period_keys: Vec<String> = periods
+        .iter()
+        .map(|period| format!("period:{}", period.format("%Y%m%d")))
+        .collect();
+
+    let summary = sqlx::query_as::<
+        _,
+        (
+            i64,
+            i64,
+            i64,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            Option<NaiveDate>,
+            i64,
+        ),
+    >(main_business_readiness_summary_sql())
+    .bind(start)
+    .bind(end)
+    .bind(business_type)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| {
+        format!(
+            "Failed to audit main_business raw table readiness: {}",
+            error
+        )
+    })?;
+
+    let (
+        row_count,
+        symbol_count,
+        distinct_periods,
+        min_end_date,
+        max_end_date,
+        min_available_at,
+        max_available_at,
+        pit_violation_rows,
+    ) = summary;
+
+    let attempt_rows = if periods.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<
+            _,
+            (
+                NaiveDate,
+                String,
+                Option<String>,
+                Option<i64>,
+                Option<String>,
+                Option<String>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ),
+        >(
+            r#"
+            WITH expected AS (
+                SELECT *
+                FROM UNNEST($1::date[], $2::text[]) AS input(period_end, period_key)
+            )
+            SELECT
+                expected.period_end,
+                expected.period_key,
+                attempt.status,
+                attempt.row_count,
+                attempt.error_message,
+                attempt.task_id,
+                attempt.updated_at
+            FROM expected
+            LEFT JOIN data_sync_attempt attempt
+              ON attempt.source = 'main_business'
+             AND attempt.symbol = expected.period_key
+             AND attempt.start_date = expected.period_end
+             AND attempt.end_date = expected.period_end
+            ORDER BY expected.period_end DESC
+            "#,
+        )
+        .bind(&periods)
+        .bind(&period_keys)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to audit main_business period sync attempts: {}",
+                error
+            )
+        })?
+    };
+
+    let completed_periods = attempt_rows
+        .iter()
+        .filter(|(_, _, status, _, _, _, _)| status.as_deref() == Some("completed"))
+        .count();
+    let failed_periods = attempt_rows
+        .iter()
+        .filter(|(_, _, status, _, _, _, _)| status.as_deref() == Some("failed"))
+        .count();
+    let missing_available_at_raw_rows: i64 = attempt_rows
+        .iter()
+        .map(|(_, _, _, _, error_message, _, _)| {
+            main_business_missing_available_at_rows(error_message.as_deref())
+        })
+        .sum();
+    let out_of_universe_raw_rows: i64 = attempt_rows
+        .iter()
+        .map(|(_, _, _, _, error_message, _, _)| {
+            main_business_out_of_universe_rows(error_message.as_deref())
+        })
+        .sum();
+    let periods_with_available_at_mapping_gaps = attempt_rows
+        .iter()
+        .filter(|(_, _, _, _, error_message, _, _)| {
+            main_business_missing_available_at_rows(error_message.as_deref()) > 0
+        })
+        .count();
+    let periods_with_out_of_universe_rows = attempt_rows
+        .iter()
+        .filter(|(_, _, _, _, error_message, _, _)| {
+            main_business_out_of_universe_rows(error_message.as_deref()) > 0
+        })
+        .count();
+    let missing_periods = expected_period_count.saturating_sub(completed_periods + failed_periods);
+    let readiness = main_business_raw_source_readiness(
+        row_count,
+        expected_period_count,
+        completed_periods,
+        failed_periods,
+        pit_violation_rows,
+    );
+
+    let breakdown_limit = main_business_readiness_breakdown_limit(req.limit);
+    let period_breakdown: Vec<Value> = attempt_rows
+        .iter()
+        .take(breakdown_limit)
+        .map(
+            |(period_end, period_key, status, row_count, error_message, task_id, updated_at)| {
+                json!({
+                    "period_end": period_end.to_string(),
+                    "period_key": period_key,
+                    "status": status.as_deref().unwrap_or("missing"),
+                    "row_count": row_count.unwrap_or(0),
+                    "error_message": error_message,
+                    "task_id": task_id,
+                    "updated_at": fmt_rfc3339_local(*updated_at),
+                })
+            },
+        )
+        .collect();
+
+    let blocking_reasons: Vec<&str> = [
+        (
+            row_count <= 0,
+            "raw source table has no rows for requested scope",
+        ),
+        (
+            pit_violation_rows > 0,
+            "available_at before end_date violates PIT availability",
+        ),
+        (
+            completed_periods < expected_period_count,
+            "full-market period sync ledger is incomplete",
+        ),
+        (
+            failed_periods > 0,
+            "one or more full-market period sync attempts failed",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(blocked, reason)| blocked.then_some(reason))
+    .collect();
+    let data_quality_warnings: Vec<&str> = [(
+        missing_available_at_raw_rows > 0,
+        "some raw fina_mainbz rows could not be PIT-mapped and were skipped before persistence",
+    )]
+    .into_iter()
+    .filter_map(|(warn, reason)| warn.then_some(reason))
+    .collect();
+
+    Ok(json!({
+        "audit_version": "p3.19e-main-business-raw-readiness-v1",
+        "dataset": "main_business",
+        "source": "tushare:fina_mainbz_vip",
+        "table": "market_stock_main_business",
+        "business_type": business_type,
+        "date_range": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "readiness": readiness,
+        "admission_gate": if readiness == "raw_source_ready_for_full_history_coverage_audit" {
+            "raw_source_ready_for_coverage_readiness_audit_only"
+        } else {
+            "factor_p310_wfa_blocked"
+        },
+        "counts": {
+            "row_count": row_count,
+            "symbol_count": symbol_count,
+            "distinct_periods": distinct_periods,
+            "expected_period_count": expected_period_count,
+            "completed_period_count": completed_periods,
+            "failed_period_count": failed_periods,
+            "missing_period_count": missing_periods,
+            "pit_violation_rows": pit_violation_rows,
+            "missing_available_at_raw_rows": missing_available_at_raw_rows,
+            "periods_with_available_at_mapping_gaps": periods_with_available_at_mapping_gaps,
+            "out_of_universe_raw_rows": out_of_universe_raw_rows,
+            "periods_with_out_of_universe_rows": periods_with_out_of_universe_rows,
+        },
+        "range": {
+            "min_end_date": min_end_date,
+            "max_end_date": max_end_date,
+            "min_available_at": min_available_at,
+            "max_available_at": max_available_at,
+        },
+        "period_breakdown": period_breakdown,
+        "breakdown_limit": breakdown_limit,
+        "truncated_period_breakdown": attempt_rows.len() > period_breakdown.len(),
+        "blocking_reasons": blocking_reasons,
+        "data_quality_warnings": data_quality_warnings,
+        "pit_contract": {
+            "source_period": "fina_mainbz_vip.period/end_date",
+            "available_at": "joined from market_financial_statement.ann_date first, then market_stock_disclosure_date.available_at fallback",
+            "hard_rule": "available_at >= end_date and downstream features must filter available_at <= trade_date",
+            "prohibited": ["using end_date as available_at", "treating symbol-limited smoke attempts as full-market completion"]
+        },
+        "notes": [
+            "This endpoint audits raw source readiness only; it does not construct a factor, run P3.10 diagnostics, run WFA, or admit v19 train selection.",
+            "Only data_sync_attempt.source='main_business' period rows count as full-market sync completion; symbol-limited smoke runs must use main_business_sample.",
+            "After this passes, the next step is a separate full-history coverage/readiness audit and then P3.10A-D diagnostics before any bounded WFA."
+        ]
+    }))
+}
+
+fn main_business_period_key_from_row(row: &Value) -> Option<(String, NaiveDate)> {
+    let ts_code = row.get("ts_code")?.as_str()?.trim().to_ascii_uppercase();
+    if ts_code.is_empty() {
+        return None;
+    }
+    let end_date = main_business_yyyymmdd_field(row, "end_date")?;
+    Some((ts_code, end_date))
+}
+
+fn main_business_yyyymmdd_field(row: &Value, field: &str) -> Option<NaiveDate> {
+    let raw = match row.get(field)? {
+        Value::String(value) => value.trim().to_string(),
+        Value::Number(value) => value.to_string(),
+        _ => return None,
+    };
+    NaiveDate::parse_from_str(&raw, "%Y%m%d").ok()
+}
+
+async fn load_main_business_available_at_mappings(
+    db: &sqlx::PgPool,
+    keys: &[(String, NaiveDate)],
+) -> Result<Vec<MainBusinessPeriodMapping>, String> {
+    let mut mappings = BTreeMap::new();
+    for (ts_code, end_date) in keys {
+        mappings.insert(
+            (ts_code.clone(), *end_date),
+            MainBusinessPeriodMapping {
+                ts_code: ts_code.clone(),
+                end_date: *end_date,
+                available_at: None,
+                source: None,
+            },
+        );
+    }
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let symbols: Vec<String> = keys.iter().map(|(ts_code, _)| ts_code.clone()).collect();
+    let end_dates: Vec<NaiveDate> = keys.iter().map(|(_, end_date)| *end_date).collect();
+
+    let financial_rows = sqlx::query_as::<_, (String, NaiveDate, Option<NaiveDate>, i64)>(
+        r#"
+        WITH keys AS (
+            SELECT *
+            FROM UNNEST($1::text[], $2::date[]) AS input(ts_code, end_date)
+        )
+        SELECT
+            keys.ts_code,
+            keys.end_date,
+            MIN(fs.ann_date) AS available_at,
+            COUNT(*)::bigint AS row_count
+        FROM keys
+        JOIN market_financial_statement fs
+          ON fs.ts_code = keys.ts_code
+         AND fs.end_date = keys.end_date
+        GROUP BY keys.ts_code, keys.end_date
+        "#,
+    )
+    .bind(&symbols)
+    .bind(&end_dates)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("financial_statement available_at join failed: {}", error))?;
+
+    for (ts_code, end_date, available_at, _row_count) in financial_rows {
+        if let Some(mapping) = mappings.get_mut(&(ts_code, end_date)) {
+            if available_at.is_some() {
+                mapping.available_at = available_at;
+                mapping.source = Some("financial_statement".to_string());
+            }
+        }
+    }
+
+    let disclosure_rows = sqlx::query_as::<_, (String, NaiveDate, Option<NaiveDate>, i64)>(
+        r#"
+        WITH keys AS (
+            SELECT *
+            FROM UNNEST($1::text[], $2::date[]) AS input(ts_code, end_date)
+        )
+        SELECT
+            keys.ts_code,
+            keys.end_date,
+            MIN(disclosure.available_at) AS available_at,
+            COUNT(*)::bigint AS row_count
+        FROM keys
+        JOIN market_stock_disclosure_date disclosure
+          ON disclosure.symbol = keys.ts_code
+         AND disclosure.end_date = keys.end_date
+        GROUP BY keys.ts_code, keys.end_date
+        "#,
+    )
+    .bind(&symbols)
+    .bind(&end_dates)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("disclosure_date available_at join failed: {}", error))?;
+
+    for (ts_code, end_date, available_at, _row_count) in disclosure_rows {
+        if let Some(mapping) = mappings.get_mut(&(ts_code, end_date)) {
+            if mapping.available_at.is_none() && available_at.is_some() {
+                mapping.available_at = available_at;
+                mapping.source = Some("disclosure_date".to_string());
+            }
+        }
+    }
+
+    Ok(mappings.into_values().collect())
+}
+
+fn main_business_period_mapping_json(mapping: &MainBusinessPeriodMapping) -> Value {
+    json!({
+        "ts_code": mapping.ts_code,
+        "end_date": mapping.end_date.to_string(),
+        "available_at": mapping.available_at.map(|date| date.to_string()),
+        "source": mapping.source,
+    })
+}
+
+pub(crate) async fn phase7_completed_attempts_by_source_for_window(
+    state: &AppState,
+    sources: &[String],
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<BTreeMap<String, i64>, String> {
+    let mut attempts = BTreeMap::new();
+    if sources.is_empty() {
+        return Ok(attempts);
+    }
+    for source in sources {
+        attempts.insert(source.clone(), 0);
+    }
+
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT source::text, COUNT(DISTINCT symbol)::bigint
+        FROM data_sync_attempt
+        WHERE source = ANY($1)
+          AND status = 'completed'
+          AND start_date <= $2
+          AND end_date >= $3
+        GROUP BY source
+        "#,
+    )
+    .bind(sources)
+    .bind(start)
+    .bind(end)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    for (source, symbols) in rows {
+        attempts.insert(source, symbols);
+    }
+    Ok(attempts)
+}
+
+fn phase7_first_tushare_string_field(
+    response: &quant_data::model::tushare_dto::TushareResponse<Vec<serde_json::Value>>,
+    field: &str,
+) -> Option<String> {
+    response
+        .data
+        .as_ref()?
+        .to_maps()
+        .into_iter()
+        .find_map(|row| {
+            row.get(field)
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
+async fn run_tushare_permission_source_smoke(
+    state: &AppState,
+    source: &str,
+    symbols: &[String],
+    start_date: &str,
+    end_date: &str,
+    row_limit: usize,
+) -> Value {
+    match source {
+        "cashflow" => {
+            let mut probes = Vec::new();
+            for symbol in symbols {
+                let result = state
+                    .tushare
+                    .cashflow(
+                        symbol,
+                        Some(start_date),
+                        Some(end_date),
+                        Some(row_limit),
+                        Some(0),
+                    )
+                    .await;
+                probes.push(phase7_tushare_probe_json(
+                    source,
+                    Some(symbol.as_str()),
+                    "symbol",
+                    result,
+                ));
+            }
+            json!({
+                "source": source,
+                "query_scope": "symbol",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+            })
+        }
+        "dividend" => {
+            let mut probes = Vec::new();
+            for symbol in symbols {
+                let result = state
+                    .tushare
+                    .dividend(symbol, None, None, None, None, Some(row_limit), Some(0))
+                    .await;
+                probes.push(phase7_tushare_probe_json(
+                    source,
+                    Some(symbol.as_str()),
+                    "symbol",
+                    result,
+                ));
+            }
+            json!({
+                "source": source,
+                "query_scope": "symbol",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+            })
+        }
+        "repurchase" => {
+            let result = state
+                .tushare
+                .repurchase(
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            let probe = phase7_tushare_probe_json(source, None, "announcement_date_range", result);
+            let probes = vec![probe];
+            json!({
+                "source": source,
+                "query_scope": "announcement_date_range",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": false,
+            })
+        }
+        "share_float" => {
+            let result = state
+                .tushare
+                .share_float(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            let probe = phase7_tushare_probe_json(source, None, "unlock_date_range", result);
+            let probes = vec![probe];
+            json!({
+                "source": source,
+                "query_scope": "unlock_date_range",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": false,
+                "pit_available_at": "ann_date"
+            })
+        }
+        "industry_membership" => {
+            let classify_result = state
+                .tushare
+                .index_classify(None, Some("L1"), None, Some("SW2021"))
+                .await;
+            let index_code = classify_result
+                .as_ref()
+                .ok()
+                .and_then(|response| phase7_first_tushare_string_field(response, "index_code"))
+                .unwrap_or_else(|| "801010.SI".to_string());
+            let classify_probe = phase7_tushare_probe_json(
+                source,
+                None,
+                "sw2021_l1_index_classify",
+                classify_result,
+            );
+
+            let member_result = state
+                .tushare
+                .index_member(Some(&index_code), None, Some("Y"), Some(row_limit), Some(0))
+                .await;
+            let member_probe = phase7_tushare_probe_json(
+                source,
+                None,
+                "sw_index_member_by_index_code",
+                member_result,
+            );
+
+            let history_member_result = state
+                .tushare
+                .index_member(Some(&index_code), None, None, Some(row_limit), Some(0))
+                .await;
+            let history_member_probe = phase7_tushare_probe_json(
+                source,
+                None,
+                "sw_index_member_history_by_index_code",
+                history_member_result,
+            );
+            let probes = vec![classify_probe, member_probe, history_member_probe];
+
+            json!({
+                "source": source,
+                "query_scope": "classification_and_membership",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "classification_source": "SW2021",
+                "sample_index_code": index_code,
+                "symbol_filter_supported": true,
+                "pit_required_fields": ["in_date", "out_date", "is_new"],
+                "pit_available_at_policy": "schema audit required; if source has no publication date, available_at must be no earlier than membership effective in_date and must never revise prior samples before the change is observable",
+                "admission_gate": "schema_and_available_at_audit_required_before_factor_backfill"
+            })
+        }
+        "main_business" => {
+            let mut probes = Vec::new();
+            for symbol in symbols {
+                let result = state
+                    .tushare
+                    .fina_mainbz(symbol, None, Some("P"), Some(start_date), Some(end_date))
+                    .await;
+                probes.push(phase7_tushare_probe_json(
+                    source,
+                    Some(symbol.as_str()),
+                    "symbol_report_period_range",
+                    result,
+                ));
+            }
+            json!({
+                "source": source,
+                "query_scope": "symbol_report_period_range",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": true,
+                "business_type": "P",
+                "pit_available_at": "not_native; must join financial announcement/disclosure date before schema or factor backfill",
+                "admission_gate": "permission_smoke_only_available_at_audit_required_before_sync"
+            })
+        }
+        "report_rc" => {
+            let result = state
+                .tushare
+                .report_rc(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            let probe = phase7_tushare_probe_json(source, None, "report_date_range", result);
+            let probes = vec![probe];
+            json!({
+                "source": source,
+                "query_scope": "report_date_range",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": true,
+                "official_doc": "https://tushare.pro/wctapi/documents/292.md",
+                "source_semantics": "sell_side_research_report_earnings_forecast_daily_since_2010",
+                "pit_available_at": "report_date is native available_at candidate; create_time may audit Tushare update lag but must not move availability earlier",
+                "required_fields_for_schema_audit": ["ts_code", "report_date", "quarter", "org_name", "author_name", "eps", "rating", "max_price", "min_price"],
+                "admission_gate": "permission_smoke_only_schema_available_at_and_full_history_coverage_audit_required_before_sync"
+            })
+        }
+        "futures_price_chain" => {
+            let fut_daily_result = state
+                .tushare
+                .fut_daily(
+                    None,
+                    Some(start_date),
+                    None,
+                    None,
+                    None,
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            let fut_daily_probe =
+                phase7_tushare_probe_json(source, None, "fut_daily_trade_date", fut_daily_result);
+
+            let fut_wsr_result = state
+                .tushare
+                .fut_wsr(
+                    Some(start_date),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            let fut_wsr_probe =
+                phase7_tushare_probe_json(source, None, "fut_wsr_trade_date", fut_wsr_result);
+
+            let fut_holding_result = state
+                .tushare
+                .fut_holding(
+                    Some(start_date),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            let fut_holding_probe = phase7_tushare_probe_json(
+                source,
+                None,
+                "fut_holding_trade_date",
+                fut_holding_result,
+            );
+
+            let probes = vec![fut_daily_probe, fut_wsr_probe, fut_holding_probe];
+            json!({
+                "source": source,
+                "query_scope": "futures_price_warehouse_holding_smoke",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": false,
+                "official_docs": [
+                    "https://tushare.pro/wctapi/documents/138.md",
+                    "https://tushare.pro/wctapi/documents/139.md",
+                    "https://tushare.pro/wctapi/documents/140.md"
+                ],
+                "source_semantics": "daily futures price settlement open_interest warehouse_receipt_and_position_ranking",
+                "pit_available_at": "trade_date_after_futures_market_close_or_verified_source_published_at; intraday stock decisions must use previous available futures trade_date until publication timing is audited",
+                "required_fields_for_schema_audit": ["trade_date", "ts_code_or_symbol", "close_or_settle", "vol", "oi", "vol_chg", "long_hld", "short_hld", "exchange"],
+                "mapping_gate": "product-to-industry-stock exposure mapping must be versioned and PIT-stable before any factor backfill",
+                "admission_gate": "permission_smoke_only_schema_mapping_available_at_and_full_history_coverage_audit_required_before_sync"
+            })
+        }
+        "equity_pledge_pressure" => {
+            let mut probes = Vec::new();
+            for symbol in symbols {
+                let result = state
+                    .tushare
+                    .pledge_stat(Some(symbol.as_str()), None, Some(row_limit), Some(0))
+                    .await;
+                probes.push(phase7_tushare_probe_json(
+                    source,
+                    Some(symbol.as_str()),
+                    "pledge_stat_by_symbol",
+                    result,
+                ));
+            }
+
+            let detail_result = state
+                .tushare
+                .pledge_detail(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            probes.push(phase7_tushare_probe_json(
+                source,
+                None,
+                "pledge_detail_announcement_date_range",
+                detail_result,
+            ));
+
+            json!({
+                "source": source,
+                "query_scope": "pledge_stat_symbol_and_detail_ann_date_range",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": true,
+                "official_docs": [
+                    "https://tushare.pro/wctapi/documents/110.md",
+                    "https://tushare.pro/wctapi/documents/111.md"
+                ],
+                "source_semantics": "equity_pledge_snapshot_and_pledge_detail_events_for_shareholder_financing_pressure",
+                "pit_available_at": "pledge_detail.ann_date is native available_at candidate; pledge_stat.end_date is only a measurement date and must be joined or derived conservatively before factor use",
+                "required_fields_for_schema_audit": ["ts_code", "ann_date", "holder_name", "pledge_amount", "start_date", "end_date", "is_release", "release_date", "pledge_ratio"],
+                "admission_gate": "permission_smoke_only_schema_available_at_and_full_history_coverage_audit_required_before_sync",
+                "blocked_until": ["permission_available", "detail_ann_date_coverage_verified", "stat_snapshot_available_at_policy_verified", "bounded_sync_plan_reviewed"]
+            })
+        }
+        "shareholder_structure" => {
+            let mut probes = Vec::new();
+
+            let holder_number_result = state
+                .tushare
+                .stk_holdernumber(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            probes.push(phase7_tushare_probe_json(
+                source,
+                None,
+                "holder_number_announcement_date_range",
+                holder_number_result,
+            ));
+
+            for symbol in symbols {
+                let top10_result = state
+                    .tushare
+                    .top10_holders(
+                        Some(symbol.as_str()),
+                        None,
+                        None,
+                        None,
+                        Some(row_limit),
+                        Some(0),
+                    )
+                    .await;
+                probes.push(phase7_tushare_probe_json(
+                    source,
+                    Some(symbol.as_str()),
+                    "top10_holders_by_symbol",
+                    top10_result,
+                ));
+
+                let top10_float_result = state
+                    .tushare
+                    .top10_floatholders(
+                        Some(symbol.as_str()),
+                        None,
+                        None,
+                        None,
+                        Some(row_limit),
+                        Some(0),
+                    )
+                    .await;
+                probes.push(phase7_tushare_probe_json(
+                    source,
+                    Some(symbol.as_str()),
+                    "top10_floatholders_by_symbol",
+                    top10_float_result,
+                ));
+            }
+
+            let holder_trade_result = state
+                .tushare
+                .stk_holdertrade(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            probes.push(phase7_tushare_probe_json(
+                source,
+                None,
+                "holder_trade_announcement_date_range",
+                holder_trade_result,
+            ));
+
+            json!({
+                "source": source,
+                "query_scope": "holder_count_top10_and_holder_trade_smoke",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": true,
+                "source_semantics": "shareholder_count_concentration_and_major_holder_trade_events",
+                "pit_available_at": "ann_date is native available_at; end_date is only the measurement period and must not move availability earlier",
+                "required_fields_for_schema_audit": [
+                    "ts_code", "ann_date", "end_date", "holder_num",
+                    "holder_name", "hold_amount", "hold_ratio", "hold_float_ratio", "hold_change", "holder_type",
+                    "in_de", "change_vol", "change_ratio", "after_share", "after_ratio", "begin_date", "close_date"
+                ],
+                "admission_gate": "permission_smoke_only_schema_available_at_full_history_coverage_and_p310_required_before_sync",
+                "blocked_until": ["schema_contract_reviewed", "bounded_sync_plan_reviewed", "ann_date_coverage_verified", "holder_count_breadth_verified", "p310_diagnostics_passed"]
+            })
+        }
+        "margin_detail" => {
+            let result = state
+                .tushare
+                .margin_detail(
+                    None,
+                    None,
+                    Some(start_date),
+                    Some(end_date),
+                    Some(row_limit),
+                    Some(0),
+                )
+                .await;
+            let probe =
+                phase7_tushare_probe_json(source, None, "margin_detail_trade_date_range", result);
+            let probes = vec![probe];
+            json!({
+                "source": source,
+                "query_scope": "security_level_margin_detail_trade_date_range",
+                "status": phase7_tushare_source_status(&probes),
+                "probes": probes,
+                "symbol_filter_supported": true,
+                "official_doc": "https://tushare.pro/document/2?doc_id=59",
+                "source_semantics": "security-level margin financing and short-selling detail by trade_date",
+                "pit_available_at": "official source publishes prior-day records around next trading day 08:30; use conservative next-session available_at unless source_published_at is audited",
+                "required_fields_for_schema_audit": [
+                    "trade_date", "ts_code", "rzye", "rqye", "rzmre", "rqyl", "rzche", "rqchl", "rqmcl", "rzrqye"
+                ],
+                "admission_gate": "permission_smoke_only_schema_available_at_correlation_and_full_history_coverage_audit_required_before_sync",
+                "blocked_until": ["permission_available", "source_publication_timing_audited", "full_history_coverage_verified", "correlation_to_existing_moneyflow_liquidity_price_volume_checked", "p310_diagnostics_passed"]
+            })
+        }
+        unsupported => json!({
+            "source": unsupported,
+            "status": "unsupported_source",
+            "supported_sources": PHASE7_OPTIONAL_SOURCE_SMOKE_ALLOWED,
+        }),
+    }
+}
+
+// ─── 第三批补充测试（非 ignored，秒级；纯函数直测 + 真实本机 PG 只读审计）───
+//
+// 覆盖策略：phase7_audit 的准入/审计决策函数优先（纯函数直调），
+// SQL 重型函数只测参数校验早退分支与只读路径（不写任何表、不触发 Tushare）。
+
+#[cfg(test)]
+mod third_batch {
+    use super::*;
+    use quant_common::QuantError;
+    use quant_data::model::tushare_dto::{TushareData, TushareResponse};
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+    }
+
+    // ── main_business 辅助纯函数 ──
+
+    #[test]
+    fn main_business_period_limits_are_bounded() {
+        // available_at 审计上限 100，readiness 明细上限 200（mod.rs 常量）
+        assert_eq!(
+            main_business_available_at_audit_period_limit(None),
+            MAIN_BUSINESS_AVAILABLE_AT_AUDIT_MAX_PERIODS
+        );
+        assert_eq!(main_business_available_at_audit_period_limit(Some(0)), 1);
+        assert_eq!(main_business_available_at_audit_period_limit(Some(50)), 50);
+        assert_eq!(
+            main_business_available_at_audit_period_limit(Some(10_000)),
+            MAIN_BUSINESS_AVAILABLE_AT_AUDIT_MAX_PERIODS
+        );
+
+        // readiness 明细默认 24 期，clamp 到 [1, 200]
+        assert_eq!(main_business_readiness_breakdown_limit(None), 24);
+        assert_eq!(main_business_readiness_breakdown_limit(Some(0)), 1);
+        assert_eq!(
+            main_business_readiness_breakdown_limit(Some(10_000)),
+            MAIN_BUSINESS_READINESS_BREAKDOWN_MAX_PERIODS
+        );
+    }
+
+    #[test]
+    fn main_business_business_type_normalizes_and_defaults_to_p() {
+        // trim + 大写归一；D=每日 I=指数 P=个股（默认）
+        assert_eq!(main_business_business_type(None), "P");
+        assert_eq!(main_business_business_type(Some("D")), "D");
+        assert_eq!(main_business_business_type(Some(" d ")), "D");
+        assert_eq!(main_business_business_type(Some("I")), "I");
+        assert_eq!(main_business_business_type(Some("i")), "I");
+        assert_eq!(main_business_business_type(Some("P")), "P");
+        assert_eq!(main_business_business_type(Some("x")), "P");
+        assert_eq!(main_business_business_type(Some("")), "P");
+    }
+
+    #[test]
+    fn main_business_quarter_end_dates_in_range_lists_quarter_ends() {
+        // 完整一年 → 4 个季度末
+        let full = main_business_quarter_end_dates_in_range(date(2024, 1, 1), date(2024, 12, 31));
+        assert_eq!(
+            full,
+            vec![
+                date(2024, 3, 31),
+                date(2024, 6, 30),
+                date(2024, 9, 30),
+                date(2024, 12, 31),
+            ]
+        );
+
+        // 跨年部分区间只含区间内的季度末
+        let partial = main_business_quarter_end_dates_in_range(date(2024, 5, 1), date(2025, 2, 10));
+        assert_eq!(
+            partial,
+            vec![date(2024, 6, 30), date(2024, 9, 30), date(2024, 12, 31)]
+        );
+
+        // 区间内无季度末
+        assert!(
+            main_business_quarter_end_dates_in_range(date(2024, 4, 1), date(2024, 6, 29))
+                .is_empty()
+        );
+        // start > end → 空
+        assert!(
+            main_business_quarter_end_dates_in_range(date(2024, 7, 1), date(2024, 1, 1)).is_empty()
+        );
+    }
+
+    #[test]
+    fn main_business_attempt_metric_extracts_prefixed_counter() {
+        // None / 无匹配前缀 → 0
+        assert_eq!(main_business_attempt_metric(None, "missing="), 0);
+        assert_eq!(
+            main_business_attempt_metric(Some("rows=5, other=2"), "missing="),
+            0
+        );
+        // 逗号分段中找到带前缀的可解析计数
+        assert_eq!(
+            main_business_attempt_metric(Some("rows=5, missing=3"), "missing="),
+            3
+        );
+        // 前缀命中但值非数字 → 跳过该段，最终 0
+        assert_eq!(
+            main_business_attempt_metric(Some("missing=abc"), "missing="),
+            0
+        );
+        // 前缀命中段首（逗号分段后 trim）；值带前导空格无法 parse → 0
+        assert_eq!(
+            main_business_attempt_metric(Some("total=1, missing=7"), "missing="),
+            7
+        );
+        assert_eq!(
+            main_business_attempt_metric(Some("missing= 7"), "missing="),
+            0
+        );
+    }
+
+    // ── share_float chunk / attempt coverage ──
+
+    #[test]
+    fn phase7_share_float_next_chunk_start_aligns_to_next_month_start() {
+        // 先归一到当月 1 号再加粒度月数，结果恒为某月 1 号
+        assert_eq!(
+            phase7_share_float_next_chunk_start(date(2026, 1, 15), "month"),
+            date(2026, 2, 1)
+        );
+        assert_eq!(
+            phase7_share_float_next_chunk_start(date(2026, 1, 15), "quarter"),
+            date(2026, 4, 1)
+        );
+        assert_eq!(
+            phase7_share_float_next_chunk_start(date(2026, 11, 30), "quarter"),
+            date(2027, 2, 1)
+        );
+        assert_eq!(
+            phase7_share_float_next_chunk_start(date(2026, 12, 31), "month"),
+            date(2027, 1, 1)
+        );
+        // 未知粒度按年处理
+        assert_eq!(
+            phase7_share_float_next_chunk_start(date(2026, 11, 30), "week"),
+            date(2027, 11, 1)
+        );
+    }
+
+    #[test]
+    fn phase7_attempt_coverage_readiness_maps_grade_to_gate() {
+        // 非 financial 源：grade → readiness 直接映射
+        assert_eq!(
+            phase7_attempt_coverage_readiness("cashflow", 0, 5_000),
+            "needs_sync"
+        );
+        assert_eq!(
+            phase7_attempt_coverage_readiness("cashflow", 400, 5_000),
+            "sample_only_do_not_train"
+        );
+        assert_eq!(
+            phase7_attempt_coverage_readiness("cashflow", 2_000, 5_000),
+            "partial_feature_candidate"
+        );
+        assert_eq!(
+            phase7_attempt_coverage_readiness("cashflow", 4_200, 5_000),
+            "ready_for_feature_factory"
+        );
+        // reference 缺失 → coverage_reference_missing
+        assert_eq!(
+            phase7_attempt_coverage_readiness("cashflow", 10, 0),
+            "coverage_reference_missing"
+        );
+        // financial 源：走 phase7_financial_source_readiness 映射（undercovered → 不可训练）
+        assert_eq!(
+            phase7_attempt_coverage_readiness("financial", 0, 5_000),
+            "needs_sync"
+        );
+        assert_eq!(
+            phase7_attempt_coverage_readiness("financial", 400, 5_000),
+            "undercovered_do_not_train"
+        );
+        assert_eq!(
+            phase7_attempt_coverage_readiness("financial", 2_000, 5_000),
+            "partial_feature_candidate"
+        );
+        assert_eq!(
+            phase7_attempt_coverage_readiness("financial", 4_200, 5_000),
+            "ready_for_feature_factory"
+        );
+    }
+
+    // ── tushare probe 辅助 ──
+
+    fn probe_response(
+        rows: Vec<Vec<serde_json::Value>>,
+    ) -> TushareResponse<Vec<serde_json::Value>> {
+        TushareResponse {
+            code: 0,
+            msg: None,
+            data: Some(TushareData {
+                fields: vec!["ts_code".to_string(), "ann_date".to_string()],
+                items: rows,
+            }),
+        }
+    }
+
+    #[test]
+    fn phase7_tushare_probe_json_reports_rows_fields_and_samples() {
+        let probe = phase7_tushare_probe_json(
+            "shareholder_structure",
+            Some("000001.SZ"),
+            "smoke",
+            Ok(probe_response(vec![
+                vec![json!("000001.SZ"), json!("20260601")],
+                vec![json!("600000.SH"), json!("20260602")],
+            ])),
+        );
+
+        // 有行 → ok / available；样本最多取 2 行并按 fields 组装成 map
+        assert_eq!(probe["status"], "ok");
+        assert_eq!(probe["permission"], "available");
+        assert_eq!(probe["row_count"], 2);
+        assert_eq!(probe["fields"], json!(["ts_code", "ann_date"]));
+        assert_eq!(probe["sample_rows"][0]["ts_code"], "000001.SZ");
+        assert_eq!(probe["source"], "shareholder_structure");
+        assert_eq!(probe["scope"], "smoke");
+        assert_eq!(probe["symbol"], "000001.SZ");
+
+        // 空行 → ok_empty
+        let empty =
+            phase7_tushare_probe_json("margin_detail", None, "range", Ok(probe_response(vec![])));
+        assert_eq!(empty["status"], "ok_empty");
+        assert_eq!(empty["row_count"], 0);
+    }
+
+    #[test]
+    fn phase7_tushare_probe_json_classifies_error_branches() {
+        // Auth 错误文案含 token → auth_error
+        let auth = phase7_tushare_probe_json(
+            "cashflow",
+            None,
+            "smoke",
+            Err(QuantError::Auth("TUSHARE_TOKEN missing".into())),
+        );
+        assert_eq!(auth["status"], "auth_error");
+        assert_eq!(auth["permission"], "unknown_or_unavailable");
+        assert!(auth["error"].as_str().unwrap().contains("TUSHARE_TOKEN"));
+
+        // API 错误文案含「权限」→ permission_denied
+        let denied = phase7_tushare_probe_json(
+            "cashflow",
+            None,
+            "smoke",
+            Err(QuantError::Api {
+                code: 40101,
+                message: "抱歉，您没有访问该接口的权限".into(),
+            }),
+        );
+        assert_eq!(denied["status"], "permission_denied");
+
+        // 其余错误 → error
+        let other = phase7_tushare_probe_json(
+            "cashflow",
+            None,
+            "smoke",
+            Err(QuantError::Parameter("bad input".into())),
+        );
+        assert_eq!(other["status"], "error");
+    }
+
+    #[test]
+    fn phase7_tushare_source_status_prefers_any_ok_probe() {
+        let ok = json!({"status": "ok"});
+        let ok_empty = json!({"status": "ok_empty"});
+        let denied = json!({"status": "permission_denied"});
+        let error = json!({"status": "error"});
+
+        // 任一 probe ok/ok_empty → available
+        assert_eq!(
+            phase7_tushare_source_status(&[error.clone(), ok]),
+            "available"
+        );
+        assert_eq!(
+            phase7_tushare_source_status(&[denied.clone(), ok_empty]),
+            "available"
+        );
+        // 无 ok 但有 permission_denied → permission_denied
+        assert_eq!(
+            phase7_tushare_source_status(&[error.clone(), denied]),
+            "permission_denied"
+        );
+        // 全 error / 空 → error
+        assert_eq!(phase7_tushare_source_status(&[error]), "error");
+        assert_eq!(phase7_tushare_source_status(&[]), "error");
+    }
+
+    #[test]
+    fn phase7_first_tushare_string_field_skips_null_and_blank() {
+        // 跳过 Null 与空白，返回首个非空字符串（trim 后）
+        let response = probe_response(vec![
+            vec![serde_json::Value::Null, json!("20260601")],
+            vec![json!("600000.SH"), json!("20260602")],
+        ]);
+        assert_eq!(
+            phase7_first_tushare_string_field(&response, "ts_code"),
+            Some("600000.SH".to_string())
+        );
+        assert_eq!(
+            phase7_first_tushare_string_field(&response, "ann_date"),
+            Some("20260601".to_string())
+        );
+        // 字段不存在 / 空白值 → None
+        assert_eq!(phase7_first_tushare_string_field(&response, "nope"), None);
+
+        let blank = probe_response(vec![vec![json!("   "), json!("20260601")]]);
+        assert_eq!(phase7_first_tushare_string_field(&blank, "ts_code"), None);
+        // data 为 None → None
+        let no_data = TushareResponse {
+            code: 0,
+            msg: None,
+            data: None,
+        };
+        assert_eq!(phase7_first_tushare_string_field(&no_data, "ts_code"), None);
+    }
+
+    // ── 可选源 / 市场级 readiness ──
+
+    #[test]
+    fn phase7_optional_source_next_step_maps_each_readiness() {
+        assert_eq!(
+            phase7_optional_source_next_step("ready_for_feature_factory"),
+            "build_pit_feature_factory"
+        );
+        assert_eq!(
+            phase7_optional_source_next_step("partial_feature_candidate"),
+            "run_feature_smoke_then_expand_coverage"
+        );
+        assert_eq!(
+            phase7_optional_source_next_step("sample_only_do_not_train"),
+            "expand_sync_before_training"
+        );
+        assert_eq!(
+            phase7_optional_source_next_step("needs_sync"),
+            "run_bounded_sync_smoke_then_coverage_audit"
+        );
+        assert_eq!(
+            phase7_optional_source_next_step("schema_missing"),
+            "apply_phase7_optional_financial_sources_schema"
+        );
+        // 其余（含 coverage_reference_missing / undercovered）统一走修复参考覆盖
+        assert_eq!(
+            phase7_optional_source_next_step("coverage_reference_missing"),
+            "repair_reference_coverage_before_feature_factory"
+        );
+        assert_eq!(
+            phase7_optional_source_next_step("undercovered_do_not_train"),
+            "repair_reference_coverage_before_feature_factory"
+        );
+    }
+
+    #[test]
+    fn phase7_market_level_source_readiness_gates_on_rows_and_lag() {
+        let base =
+            |rows: i64, latest: Option<NaiveDate>, lag: Option<i64>| Phase7MarketLevelSourceAudit {
+                data_rows: rows,
+                min_trade_date: Some(date(2016, 1, 4)),
+                latest_trade_date: latest,
+                open_day_lag: lag,
+            };
+        // 零行或无最新交易日 → 需要同步
+        assert_eq!(
+            phase7_market_level_source_readiness(&base(0, None, None)),
+            "market_level_needs_sync"
+        );
+        assert_eq!(
+            phase7_market_level_source_readiness(&base(100, None, Some(1))),
+            "market_level_needs_sync"
+        );
+        // 滞后 > 2 → 陈旧需同步
+        assert_eq!(
+            phase7_market_level_source_readiness(&base(100, Some(date(2026, 6, 1)), Some(3))),
+            "market_level_stale_needs_sync"
+        );
+        // lag 缺失按无穷大处理 → 陈旧
+        assert_eq!(
+            phase7_market_level_source_readiness(&base(100, Some(date(2026, 6, 1)), None)),
+            "market_level_stale_needs_sync"
+        );
+        // 滞后 <= 2 → ready
+        assert_eq!(
+            phase7_market_level_source_readiness(&base(100, Some(date(2026, 6, 1)), Some(2))),
+            "market_level_ready_for_regime_feature"
+        );
+        assert_eq!(
+            phase7_market_level_source_readiness(&base(100, Some(date(2026, 6, 1)), Some(0))),
+            "market_level_ready_for_regime_feature"
+        );
+    }
+
+    #[test]
+    fn phase7_market_level_zero_row_sync_covers_gap_requires_full_window() {
+        let sync = Phase7MarketLevelSyncAudit {
+            task_id: "dv-zzz-test".to_string(),
+            task_type: "margin".to_string(),
+            start_date: Some(date(2026, 5, 30)),
+            end_date: Some(date(2026, 6, 20)),
+            status: "completed".to_string(),
+            total_count: 0,
+            success_count: 0,
+            failed_count: 0,
+            error_message: None,
+            completed_at: None,
+        };
+        let sync_start = date(2026, 5, 30);
+        let today = date(2026, 6, 20);
+
+        // 无同步记录 → false
+        assert!(!phase7_market_level_zero_row_sync_covers_gap(
+            None, sync_start, today
+        ));
+        // completed + 零行 + 窗口完整覆盖 → true
+        assert!(phase7_market_level_zero_row_sync_covers_gap(
+            Some(&sync),
+            sync_start,
+            today
+        ));
+
+        // 状态非 completed → false
+        let mut failed = sync.clone();
+        failed.status = "failed".to_string();
+        assert!(!phase7_market_level_zero_row_sync_covers_gap(
+            Some(&failed),
+            sync_start,
+            today
+        ));
+
+        // 有行数的同步不算上游零行证据
+        let mut with_rows = sync.clone();
+        with_rows.total_count = 5;
+        with_rows.success_count = 5;
+        assert!(!phase7_market_level_zero_row_sync_covers_gap(
+            Some(&with_rows),
+            sync_start,
+            today
+        ));
+
+        // 同步窗口未覆盖 [sync_start, today] → false
+        assert!(!phase7_market_level_zero_row_sync_covers_gap(
+            Some(&sync),
+            date(2026, 5, 29),
+            today
+        ));
+        assert!(!phase7_market_level_zero_row_sync_covers_gap(
+            Some(&sync),
+            sync_start,
+            date(2026, 6, 21)
+        ));
+        // 窗口日期缺失 → false
+        let mut no_window = sync.clone();
+        no_window.start_date = None;
+        assert!(!phase7_market_level_zero_row_sync_covers_gap(
+            Some(&no_window),
+            sync_start,
+            today
+        ));
+    }
+
+    // ── 股东结构 / 质押 / 大宗交易 / 行业成分 readiness ──
+
+    #[test]
+    fn decide_shareholder_structure_readiness_walks_admission_ladder() {
+        // schema 未过 → 先 apply schema
+        let no_schema = decide_shareholder_structure_readiness(false, 0, 0);
+        assert_eq!(no_schema["schema_status"], "missing_or_invalid");
+        assert_eq!(no_schema["sync_status"], "blocked");
+        assert_eq!(no_schema["admission_decision"], "apply_schema_before_sync");
+
+        // schema 过但零行 → 需要 bounded sync
+        let no_rows = decide_shareholder_structure_readiness(true, 0, 0);
+        assert_eq!(no_rows["schema_status"], "created");
+        assert_eq!(no_rows["sync_status"], "not_started");
+        assert_eq!(
+            no_rows["admission_decision"],
+            "bounded_sync_required_before_coverage_audit"
+        );
+
+        // PIT 违规 → raw_pit_failed
+        let pit_failed = decide_shareholder_structure_readiness(true, 100, 2);
+        assert_eq!(pit_failed["sync_status"], "raw_synced_pit_failed");
+        assert_eq!(pit_failed["admission_decision"], "raw_pit_failed");
+        assert_eq!(pit_failed["pit_violation_rows"], 2);
+
+        // 干净数据 → 允许进入覆盖审计（P3.10/WFA 仍封锁）
+        let clean = decide_shareholder_structure_readiness(true, 100, 0);
+        assert_eq!(clean["sync_status"], "raw_synced");
+        assert_eq!(
+            clean["admission_decision"],
+            "coverage_readiness_audit_required_before_p310"
+        );
+        assert_eq!(
+            clean["p310_status"],
+            "blocked_until_coverage_readiness_passes"
+        );
+        assert_eq!(clean["wfa_status"], "blocked");
+        assert_eq!(clean["v19_train_selection"], "blocked");
+    }
+
+    #[test]
+    fn shareholder_structure_quarter_count_aligns_to_quarter_starts() {
+        assert_eq!(
+            shareholder_structure_quarter_count(date(2024, 1, 1), date(2024, 12, 31)),
+            4
+        );
+        // start>end → 0
+        assert_eq!(
+            shareholder_structure_quarter_count(date(2024, 6, 1), date(2024, 1, 1)),
+            0
+        );
+        // 季中起点向上取整到所在季度（2024-02-10 → 2024Q1 起）
+        assert_eq!(
+            shareholder_structure_quarter_count(date(2024, 2, 10), date(2024, 3, 20)),
+            1
+        );
+        // 跨年：2024Q4 + 2025Q1
+        assert_eq!(
+            shareholder_structure_quarter_count(date(2024, 11, 5), date(2025, 1, 15)),
+            2
+        );
+        // 单季度内尾部月份（12 月属 Q4）
+        assert_eq!(
+            shareholder_structure_quarter_count(date(2024, 12, 1), date(2024, 12, 31)),
+            1
+        );
+    }
+
+    #[test]
+    fn phase7_block_trade_readiness_gates_on_rows_pit_and_history() {
+        let stats =
+            |rows: i64, pit: i64, covered: i64, open_days: i64| Phase7BlockTradeSourceAudit {
+                data_rows: rows,
+                symbols: 1000,
+                covered_trade_days: covered,
+                open_days_in_range: open_days,
+                min_trade_date: Some(date(2026, 6, 1)),
+                latest_trade_date: if rows > 0 {
+                    Some(date(2026, 6, 18))
+                } else {
+                    None
+                },
+                min_available_at: Some(date(2026, 6, 2)),
+                latest_available_at: Some(date(2026, 6, 19)),
+                pit_violation_rows: pit,
+            };
+        // 零行 → 需要 bounded sync（即使 latest_trade_date 有值也按零行处理）
+        assert_eq!(
+            phase7_block_trade_readiness(&stats(0, 0, 0, 0)),
+            "schema_and_client_ready_needs_bounded_sync"
+        );
+        // PIT 违规优先于覆盖判断
+        assert_eq!(
+            phase7_block_trade_readiness(&stats(100, 2, 14, 14)),
+            "raw_source_pit_failed"
+        );
+        // 开市日 >= 120 且覆盖 >= 0.80 → 可进 P3.10 诊断
+        assert_eq!(
+            phase7_block_trade_readiness(&stats(100, 0, 96, 120)),
+            "raw_source_ready_for_p310_diagnostics"
+        );
+        // 覆盖不足 0.80 或历史窗不足 120 日 → 仅样本可用
+        assert_eq!(
+            phase7_block_trade_readiness(&stats(100, 0, 95, 120)),
+            "bounded_sample_ready_needs_history_coverage"
+        );
+        assert_eq!(
+            phase7_block_trade_readiness(&stats(100, 0, 100, 100)),
+            "bounded_sample_ready_needs_history_coverage"
+        );
+    }
+
+    #[test]
+    fn equity_pledge_readiness_label_maps_admission_decisions() {
+        assert_eq!(
+            equity_pledge_readiness_label("apply_schema_before_sync"),
+            "schema_contract_ready_schema_not_applied"
+        );
+        assert_eq!(
+            equity_pledge_readiness_label("bounded_sync_required_before_coverage_audit"),
+            "schema_created_bounded_sync_required"
+        );
+        assert_eq!(
+            equity_pledge_readiness_label("raw_pit_failed"),
+            "raw_source_pit_failed"
+        );
+        assert_eq!(
+            equity_pledge_readiness_label("coverage_readiness_audit_required_before_p310"),
+            "raw_source_ready_for_coverage_audit"
+        );
+        // 未知决策 → 保守默认
+        assert_eq!(
+            equity_pledge_readiness_label("whatever"),
+            "schema_contract_ready_review_required"
+        );
+    }
+
+    #[test]
+    fn phase7_industry_membership_readiness_gates_on_pit_and_current_coverage() {
+        let stats = |rows: i64, pit: i64, invalid: i64, dup: i64, covered: i64, active: i64| {
+            Phase7IndustryMembershipSourceAudit {
+                data_rows: rows,
+                symbols: 8,
+                index_codes: 1,
+                current_active_stock_symbols: active,
+                current_covered_stock_symbols: covered,
+                min_in_date: Some(date(2007, 7, 3)),
+                latest_in_date: Some(date(2025, 8, 13)),
+                min_out_date: None,
+                latest_out_date: None,
+                min_available_at: Some(date(2007, 7, 3)),
+                latest_available_at: Some(date(2025, 8, 13)),
+                pit_violation_rows: pit,
+                invalid_interval_rows: invalid,
+                duplicate_key_rows: dup,
+            }
+        };
+        // 零行 → 先 bounded sync
+        assert_eq!(
+            phase7_industry_membership_readiness(&stats(0, 0, 0, 0, 0, 0)),
+            "industry_membership_schema_ready_needs_bounded_sync"
+        );
+        // PIT / 区间 / 重复键任一违规 → pit_failed
+        assert_eq!(
+            phase7_industry_membership_readiness(&stats(10, 1, 0, 0, 10, 10)),
+            "industry_membership_raw_source_pit_failed"
+        );
+        assert_eq!(
+            phase7_industry_membership_readiness(&stats(10, 0, 1, 0, 10, 10)),
+            "industry_membership_raw_source_pit_failed"
+        );
+        assert_eq!(
+            phase7_industry_membership_readiness(&stats(10, 0, 0, 1, 10, 10)),
+            "industry_membership_raw_source_pit_failed"
+        );
+        // 当前覆盖 < 0.95 → undercovered（分母缺失按 0 处理同样 undercovered）
+        assert_eq!(
+            phase7_industry_membership_readiness(&stats(10, 0, 0, 0, 94, 100)),
+            "industry_membership_current_coverage_undercovered"
+        );
+        assert_eq!(
+            phase7_industry_membership_readiness(&stats(10, 0, 0, 0, 10, 0)),
+            "industry_membership_current_coverage_undercovered"
+        );
+        // 覆盖 >= 0.95 → ready
+        assert_eq!(
+            phase7_industry_membership_readiness(&stats(10, 0, 0, 0, 95, 100)),
+            "industry_membership_raw_source_ready_for_coverage_audit"
+        );
+    }
+
+    // ── 期货价格链纯函数 ──
+
+    // 注意：测试函数名不得与被测函数同名——同模块内会遮蔽 `use super::*` 导入的
+    // 真函数，调用解析到 0 参数的测试自身（E0061/E0308 连锁报错）。
+    #[test]
+    fn normalize_raw_product_symbol_maps_pta_and_strips_suffixes() {
+        // PTA 特例映射为 TA
+        assert_eq!(
+            futures_price_chain_normalize_raw_product_symbol(" pta "),
+            Some("TA".to_string())
+        );
+        // 尾部 L（连续合约后缀）剥离
+        assert_eq!(
+            futures_price_chain_normalize_raw_product_symbol("COTTONL"),
+            Some("COTTON".to_string())
+        );
+        // 两位短代码不剥 L
+        assert_eq!(
+            futures_price_chain_normalize_raw_product_symbol("AL"),
+            Some("AL".to_string())
+        );
+        // 尾部 ACTV（主力连续标记）整体剥离
+        assert_eq!(
+            futures_price_chain_normalize_raw_product_symbol("URACTV"),
+            Some("UR".to_string())
+        );
+        // ACTV 本身长度不足 5，不剥
+        assert_eq!(
+            futures_price_chain_normalize_raw_product_symbol("ACTV"),
+            Some("ACTV".to_string())
+        );
+        // 大写归一
+        assert_eq!(
+            futures_price_chain_normalize_raw_product_symbol("rb"),
+            Some("RB".to_string())
+        );
+        // 空串 / 纯空白 → None
+        assert_eq!(futures_price_chain_normalize_raw_product_symbol(""), None);
+        assert_eq!(futures_price_chain_normalize_raw_product_symbol("  "), None);
+    }
+
+    #[test]
+    fn parse_futures_price_chain_dates_accept_both_formats() {
+        assert_eq!(
+            parse_futures_price_chain_mapping_date("2026-01-05").unwrap(),
+            date(2026, 1, 5)
+        );
+        assert_eq!(
+            parse_futures_price_chain_mapping_date("20260105").unwrap(),
+            date(2026, 1, 5)
+        );
+        // 非法格式返回固定错误码文案（前端/上游契约）
+        assert_eq!(
+            parse_futures_price_chain_mapping_date("2026/01/05").unwrap_err(),
+            "date_must_be_yyyy_mm_dd_or_yyyymmdd"
+        );
+
+        // coverage 变体：None → Ok(None)；错误信息带字段前缀
+        assert!(parse_futures_price_chain_coverage_date(None, "start_date")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            parse_futures_price_chain_coverage_date(Some("bad"), "start_date").unwrap_err(),
+            "start_date_date_must_be_yyyy_mm_dd_or_yyyymmdd"
+        );
+        assert_eq!(
+            parse_futures_price_chain_coverage_date(Some("2026-01-05"), "end_date").unwrap(),
+            Some(date(2026, 1, 5))
+        );
+    }
+
+    #[test]
+    fn futures_price_chain_product_set_from_audit_normalizes_symbols() {
+        let audit = json!({
+            "rows": [
+                {"product_symbol": " rb "},
+                {"product_symbol": "TA"},
+                {"product_symbol": ""},
+                {"not_a_symbol": true},
+                {"product_symbol": "COTTON"}
+            ]
+        });
+        let set = futures_price_chain_product_set_from_audit(&audit, "rows");
+        // trim + 大写 + 去空；BTreeSet 语义
+        assert_eq!(
+            set,
+            BTreeSet::from(["COTTON".to_string(), "RB".to_string(), "TA".to_string()])
+        );
+        // 键缺失 / 非数组 → 空集
+        assert!(futures_price_chain_product_set_from_audit(&audit, "nope").is_empty());
+        assert!(futures_price_chain_product_set_from_audit(&json!({}), "rows").is_empty());
+    }
+
+    #[test]
+    fn futures_price_chain_expected_schema_lists_six_pit_tables_with_constraints() {
+        let schema = futures_price_chain_expected_schema();
+        let tables: Vec<&str> = schema.iter().map(|(table, _)| *table).collect();
+        assert_eq!(
+            tables,
+            vec![
+                "market_futures_daily",
+                "market_futures_warehouse_receipt",
+                "market_futures_holding_rank",
+                "market_futures_product_exposure_mapping_pit",
+                "market_futures_product_exclusion_gate_pit",
+                "market_futures_product_signal_pit",
+            ]
+        );
+        // 每张表都必须审计主键与 PIT available_at 约束
+        for (table, constraints) in &schema {
+            assert!(
+                constraints.iter().any(|c| c.ends_with("_pkey")),
+                "{table} 缺主键约束"
+            );
+            assert!(
+                constraints
+                    .iter()
+                    .any(|c| c.contains("available_at") || c.contains("interval")),
+                "{table} 缺 PIT 约束"
+            );
+        }
+    }
+
+    #[test]
+    fn equity_pledge_and_margin_detail_expected_schemas_pin_pit_checks() {
+        let pledge = equity_pledge_expected_schema();
+        assert_eq!(pledge.len(), 2);
+        assert_eq!(pledge[0].0, "market_stock_pledge_stat");
+        assert!(pledge[0]
+            .1
+            .contains(&"market_stock_pledge_stat_available_at_check"));
+        assert_eq!(pledge[1].0, "market_stock_pledge_detail");
+        assert!(pledge[1]
+            .1
+            .contains(&"market_stock_pledge_detail_available_at_check"));
+
+        let margin = margin_detail_expected_schema();
+        assert_eq!(margin.len(), 1);
+        assert_eq!(margin[0].0, "market_stock_margin_detail");
+        // 三重约束：主键 + PIT + 核心字段非负
+        assert!(margin[0].1.contains(&"market_stock_margin_detail_pkey"));
+        assert!(margin[0]
+            .1
+            .contains(&"market_stock_margin_detail_available_at_check"));
+        assert!(margin[0]
+            .1
+            .contains(&"market_stock_margin_detail_core_nonnegative_check"));
+    }
+
+    fn p319_admission_fixture() -> Value {
+        json!({
+            "candidates": [
+                {
+                    "source_id": "futures_price_chain",
+                    "source_discovery_evidence": [
+                        {"candidate": "tushare:fina_mainbz"},
+                        {"candidate": "tushare:futures_price_chain"}
+                    ]
+                },
+                {"source_id": "other_source"}
+            ]
+        })
+    }
+
+    #[test]
+    fn apply_p319_readiness_is_noop_without_decision() {
+        let mut admission = p319_admission_fixture();
+        let readiness = json!({"tables": []});
+        apply_p319_futures_price_chain_readiness(&mut admission, &readiness);
+        // 无 decision → 不改任何字段
+        assert_eq!(admission, p319_admission_fixture());
+    }
+
+    #[test]
+    fn apply_p319_readiness_overrides_candidate_when_data_gate_blocks() {
+        let mut admission = p319_admission_fixture();
+        let readiness = json!({
+            "decision": {
+                "admission_decision": "mapping_required_before_feature_or_p310",
+                "sync_status": "raw_synced_mapping_missing",
+                "schema_status": "created",
+                "next_step": "insert_product_mapping_then_rerun_mapping_audit",
+                "raw_rows": 6349,
+                "mapping_rows": 0
+            }
+        });
+        apply_p319_futures_price_chain_readiness(&mut admission, &readiness);
+
+        let candidate = &admission["candidates"][0];
+        assert_eq!(
+            candidate["admission_decision"],
+            "mapping_required_before_feature_or_p310"
+        );
+        assert_eq!(candidate["sync_status"], "raw_synced_mapping_missing");
+        // schema_status 拼接 fina_mainbz 上下文前缀
+        assert_eq!(
+            candidate["schema_status"],
+            "fina_mainbz_raw_source_schema_available_futures_price_chain_created"
+        );
+        assert_eq!(
+            candidate["next_step"],
+            "insert_product_mapping_then_rerun_mapping_audit"
+        );
+        assert!(candidate["futures_price_chain_readiness"]["decision"]["raw_rows"] == json!(6349));
+        // 证据行同步覆盖 status/raw_rows/mapping_rows
+        let evidence = &candidate["source_discovery_evidence"][1];
+        assert_eq!(evidence["candidate"], "tushare:futures_price_chain");
+        assert_eq!(evidence["status"], "raw_synced_mapping_missing");
+        assert_eq!(evidence["raw_rows"], 6349);
+        assert_eq!(evidence["mapping_rows"], 0);
+    }
+
+    #[test]
+    fn apply_p319_readiness_attaches_pass_through_when_gate_not_blocking() {
+        let mut admission = p319_admission_fixture();
+        let readiness = json!({
+            "decision": {
+                "admission_decision": "coverage_readiness_audit_required_before_p310",
+                "sync_status": "raw_synced"
+            }
+        });
+        apply_p319_futures_price_chain_readiness(&mut admission, &readiness);
+
+        let candidate = &admission["candidates"][0];
+        // 非 blocking 决策只附加 readiness 证据，不改 admission_decision 等字段
+        assert!(candidate.get("admission_decision").is_none());
+        assert_eq!(
+            candidate["futures_price_chain_readiness"]["decision"]["admission_decision"],
+            "coverage_readiness_audit_required_before_p310"
+        );
+        assert_eq!(
+            candidate["source_discovery_evidence"][1]["readiness_decision"]["sync_status"],
+            "raw_synced"
+        );
+        // 其它 candidate 不受影响
+        assert!(admission["candidates"][1]
+            .get("futures_price_chain_readiness")
+            .is_none());
+    }
+
+    // ── main_business 行解析 / 序列化 ──
+
+    #[test]
+    fn main_business_period_key_from_row_parses_and_normalizes() {
+        let row = json!({"ts_code": " 000001.sz ", "end_date": "20240331"});
+        assert_eq!(
+            main_business_period_key_from_row(&row),
+            Some(("000001.SZ".to_string(), date(2024, 3, 31)))
+        );
+        // end_date 支持数字类型（tushare 原始返回）
+        let numeric = json!({"ts_code": "600000.SH", "end_date": 20241231});
+        assert_eq!(
+            main_business_period_key_from_row(&numeric),
+            Some(("600000.SH".to_string(), date(2024, 12, 31)))
+        );
+        // ts_code 空 / 缺失 / end_date 非法格式 → None
+        assert_eq!(
+            main_business_period_key_from_row(&json!({"ts_code": "  ", "end_date": "20240331"})),
+            None
+        );
+        assert_eq!(
+            main_business_period_key_from_row(&json!({"end_date": "20240331"})),
+            None
+        );
+        assert_eq!(
+            main_business_period_key_from_row(
+                &json!({"ts_code": "600000.SH", "end_date": "2024-03-31"})
+            ),
+            None
+        );
+
+        // yyyymmdd_field：字段缺失 / 非字符串数字类型（bool）→ None
+        assert_eq!(main_business_yyyymmdd_field(&row, "nope"), None);
+        assert_eq!(
+            main_business_yyyymmdd_field(&json!({"flag": true}), "flag"),
+            None
+        );
+    }
+
+    #[test]
+    fn main_business_period_mapping_json_serializes_optionals() {
+        let with_source = MainBusinessPeriodMapping {
+            ts_code: "000001.SZ".to_string(),
+            end_date: date(2024, 3, 31),
+            available_at: Some(date(2024, 4, 20)),
+            source: Some("financial_statement".to_string()),
+        };
+        let value = main_business_period_mapping_json(&with_source);
+        assert_eq!(value["ts_code"], "000001.SZ");
+        assert_eq!(value["end_date"], "2024-03-31");
+        assert_eq!(value["available_at"], "2024-04-20");
+        assert_eq!(value["source"], "financial_statement");
+
+        // 未命中映射：available_at / source 序列化为 null
+        let missing = MainBusinessPeriodMapping {
+            ts_code: "000001.SZ".to_string(),
+            end_date: date(2024, 3, 31),
+            available_at: None,
+            source: None,
+        };
+        let value = main_business_period_mapping_json(&missing);
+        assert_eq!(value["available_at"], serde_json::Value::Null);
+        assert_eq!(value["source"], serde_json::Value::Null);
+    }
+
+    // ── margin_detail 同步计划响应 ──
+
+    #[test]
+    fn margin_detail_sync_plan_response_estimates_rows_per_batch() {
+        let batches = vec![
+            MarginDetailSyncPlanBatch {
+                label: "2023".to_string(),
+                start_date: date(2023, 1, 3),
+                end_date: date(2023, 12, 29),
+                open_day_count: 100,
+                observed_avg_rows_per_day: None,
+            },
+            MarginDetailSyncPlanBatch {
+                label: "2024q1".to_string(),
+                start_date: date(2024, 1, 2),
+                end_date: date(2024, 3, 29),
+                open_day_count: 10,
+                observed_avg_rows_per_day: Some(5_000.0),
+            },
+        ];
+        let plan = margin_detail_sync_plan_response(
+            date(2023, 1, 1),
+            date(2024, 3, 31),
+            "year+quarter",
+            batches,
+        );
+
+        assert_eq!(plan["audit_version"], "p3.22d-margin-detail-sync-plan-v1");
+        assert_eq!(plan["source_id"], "margin_detail_leverage_crowding");
+        assert_eq!(plan["mode"], "read_only_bounded_sync_plan");
+        assert_eq!(plan["batch_mode"], "year+quarter");
+        assert_eq!(plan["batch_count"], 2);
+
+        // 无观测值批次用默认 4500 行/日
+        assert_eq!(plan["batches"][0]["estimated_rows"], 450_000);
+        assert_eq!(
+            plan["batches"][0]["estimated_rows_basis"],
+            "default_4500_rows_per_open_day_after_single_day_smoke"
+        );
+        // 有观测值批次用实测均值
+        assert_eq!(plan["batches"][1]["estimated_rows"], 50_000);
+        assert_eq!(
+            plan["batches"][1]["estimated_rows_basis"],
+            "observed_market_stock_margin_detail_rows_per_open_day"
+        );
+        // 总量 = 450000 + 50000
+        assert_eq!(plan["estimated_total_rows"], 500_000);
+        // 推荐请求 payload 使用紧凑日期与批次命名
+        assert_eq!(
+            plan["batches"][1]["recommended_request"]["data_version_id"],
+            "margin-detail-2024q1"
+        );
+        assert_eq!(
+            plan["batches"][1]["recommended_request"]["background"],
+            true
+        );
+        // 禁止项与后续审计要求非空
+        assert!(!plan["prohibited"].as_array().unwrap().is_empty());
+        assert!(!plan["required_follow_up_after_each_batch"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    // ── bounded sync 请求转换（P3.19-P3.22）──
+
+    #[test]
+    fn bounded_sync_requests_convert_to_unified_data_sync_task_req() {
+        let futures = FuturesPriceChainSyncReq {
+            symbols: vec!["RB".to_string()],
+            exchanges: vec!["SHFE".to_string()],
+            start_date: Some("20260101".to_string()),
+            end_date: Some("20260131".to_string()),
+            data_version_id: Some("dv-zzz".to_string()),
+            background: true,
+        }
+        .into_sync_task_req();
+        assert_eq!(futures.dataset, "futures_price_chain");
+        assert_eq!(futures.source, "tushare:futures_price_chain");
+        assert_eq!(futures.mode.as_deref(), Some("bounded_raw_sync"));
+        assert_eq!(futures.exchanges, vec!["SHFE".to_string()]);
+        assert!(futures.background);
+        assert!(futures.create_data_version);
+        assert!(!futures.quality_check);
+        assert!(futures.reason.as_deref().unwrap().contains("p3.19"));
+
+        let pledge = EquityPledgePressureSyncReq {
+            symbols: vec![],
+            start_date: None,
+            end_date: None,
+            data_version_id: None,
+            background: false,
+        }
+        .into_sync_task_req();
+        assert_eq!(pledge.dataset, "equity_pledge_pressure");
+        assert_eq!(pledge.source, "tushare:equity_pledge_pressure");
+        assert!(pledge.reason.as_deref().unwrap().contains("p3.20"));
+        assert!(!pledge.background);
+
+        let shareholder = ShareholderStructureSyncReq {
+            symbols: vec![],
+            source_filters: vec!["holder_number".to_string()],
+            start_date: None,
+            end_date: None,
+            data_version_id: None,
+            background: false,
+        }
+        .into_sync_task_req();
+        assert_eq!(shareholder.dataset, "shareholder_structure");
+        // source_filters 原样透传（低扇出过滤）
+        assert_eq!(
+            shareholder.source_filters,
+            vec!["holder_number".to_string()]
+        );
+        assert!(shareholder.reason.as_deref().unwrap().contains("p3.21"));
+
+        let margin = MarginDetailSyncReq {
+            symbols: vec![],
+            start_date: None,
+            end_date: None,
+            data_version_id: None,
+            background: false,
+        }
+        .into_sync_task_req();
+        assert_eq!(margin.dataset, "margin_detail");
+        assert_eq!(margin.source, "tushare:margin_detail");
+        assert!(margin.reason.as_deref().unwrap().contains("p3.22"));
+    }
+
+    // ── SQL 只读路径（真实本机 PG；全部 SELECT，零写入）──
+
+    #[tokio::test]
+    async fn build_futures_price_chain_readiness_audit_reads_live_schema() {
+        let db = test_db().await;
+        let audit = build_futures_price_chain_readiness_audit(&db)
+            .await
+            .expect("readiness audit should be read-only and succeed");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.19k-futures-price-chain-readiness-v1"
+        );
+        assert_eq!(audit["source_id"], "futures_price_chain");
+        assert_eq!(
+            audit["mode"],
+            "read_only_schema_table_constraint_rowcount_audit"
+        );
+        // 六张 PIT 表逐表审计
+        let tables = audit["tables"].as_array().expect("tables array");
+        assert_eq!(tables.len(), 6);
+        let names: Vec<&str> = tables
+            .iter()
+            .map(|table| table["table"].as_str().expect("table name"))
+            .collect();
+        assert!(names.contains(&"market_futures_daily"));
+        assert!(names.contains(&"market_futures_product_exposure_mapping_pit"));
+        // 每张表都给出布尔 schema 结果与决策对象
+        assert!(audit["schema_passed"].is_boolean());
+        assert!(audit["decision"].is_object());
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_sync_plan_validates_inputs_before_query() {
+        let db = test_db().await;
+        // start > end 在任何 SQL 之前被拒绝
+        let err = build_margin_detail_sync_plan(
+            &db,
+            MarginDetailSyncPlanReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+                batch: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "margin_detail sync-plan start_date cannot be after end_date"
+        );
+
+        // 非法日期格式错误带字段前缀（YYYY-MM-DD 与 YYYYMMDD 之外均拒绝）
+        let err = build_margin_detail_sync_plan(
+            &db,
+            MarginDetailSyncPlanReq {
+                start_date: Some("2026/06/01".to_string()),
+                end_date: None,
+                batch: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "start_date_date_must_be_yyyy_mm_dd_or_yyyymmdd");
+
+        // batch 只允许 year/quarter
+        let err = build_margin_detail_sync_plan(
+            &db,
+            MarginDetailSyncPlanReq {
+                start_date: Some("20240101".to_string()),
+                end_date: Some("20240331".to_string()),
+                batch: Some("month".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "margin_detail sync-plan batch must be 'year' or 'quarter'"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_sync_plan_groups_quarter_batches_from_calendar() {
+        let db = test_db().await;
+        // 只读交易日历 + 行数均值，2024Q1 必有开市日
+        let plan = build_margin_detail_sync_plan(
+            &db,
+            MarginDetailSyncPlanReq {
+                start_date: Some("20240101".to_string()),
+                end_date: Some("20240331".to_string()),
+                batch: Some("quarter".to_string()),
+            },
+        )
+        .await
+        .expect("quarter plan");
+
+        assert_eq!(plan["batch_mode"], "quarter");
+        assert_eq!(plan["batch_count"], 1);
+        assert_eq!(plan["batches"][0]["batch"], "2024q1");
+        assert!(plan["batches"][0]["open_day_count"].as_i64().unwrap() > 0);
+        assert!(plan["batches"][0]["estimated_rows"].as_i64().unwrap() > 0);
+        assert_eq!(plan["date_range"]["start_date"], "2024-01-01");
+        assert_eq!(plan["date_range"]["end_date"], "2024-03-31");
+    }
+
+    #[tokio::test]
+    async fn build_shareholder_structure_sync_plan_estimates_year_batches() {
+        let db = test_db().await;
+        // start > end 拒绝
+        let err = build_shareholder_structure_sync_plan(
+            &db,
+            ShareholderStructureSyncPlanReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "shareholder_structure sync-plan start_date cannot be after end_date"
+        );
+
+        // 只读单年计划：按上市窗口统计 symbol 数，季度数恒 4
+        let plan = build_shareholder_structure_sync_plan(
+            &db,
+            ShareholderStructureSyncPlanReq {
+                start_date: Some("20240101".to_string()),
+                end_date: Some("20241231".to_string()),
+            },
+        )
+        .await
+        .expect("year plan");
+        assert_eq!(
+            plan["audit_version"],
+            "p3.21c-shareholder-structure-sync-plan-v1"
+        );
+        assert_eq!(plan["batch_count"], 1);
+        assert_eq!(plan["batches"][0]["year"], 2024);
+        assert_eq!(plan["batches"][0]["quarter_count"], 4);
+        assert!(plan["batches"][0]["symbol_count"].as_i64().unwrap() > 0);
+        // 单位模型 = 季度数*2 + symbol 数*季度数*2
+        let symbol_count = plan["batches"][0]["symbol_count"].as_i64().unwrap();
+        assert_eq!(
+            plan["batches"][0]["estimated_units"],
+            4 * 2 + symbol_count * 4 * 2
+        );
+        // 推荐请求三档（全量/低扇出/top10）
+        assert_eq!(
+            plan["batches"][0]["recommended_request"]["data_version_id"],
+            "shareholder-structure-2024"
+        );
+        assert_eq!(
+            plan["batches"][0]["recommended_low_fanout_request"]["source_filters"][0],
+            "holder_number"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_main_business_available_at_mappings_handles_empty_and_unknown_keys() {
+        let db = test_db().await;
+        // 空 keys 短路返回空（零查询）
+        let empty = load_main_business_available_at_mappings(&db, &[])
+            .await
+            .expect("empty keys");
+        assert!(empty.is_empty());
+
+        // 未知键：只读 JOIN 无命中 → available_at/source 均为 None
+        let unknown = load_main_business_available_at_mappings(
+            &db,
+            &[("ZZZTEST.NO_SUCH_SYMBOL".to_string(), date(2024, 12, 31))],
+        )
+        .await
+        .expect("unknown key join");
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].ts_code, "ZZZTEST.NO_SUCH_SYMBOL");
+        assert_eq!(unknown[0].available_at, None);
+        assert_eq!(unknown[0].source, None);
+    }
+
+    #[tokio::test]
+    async fn phase7_completed_attempts_by_source_for_window_defaults_to_zero() {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let state = crate::AppState {
+            start_time: Utc::now(),
+            db: test_db().await,
+            tushare: quant_data::tushare::client::TushareClient::from_env()
+                .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)"),
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        };
+
+        // 空 sources 短路返回空映射
+        let empty = phase7_completed_attempts_by_source_for_window(
+            &state,
+            &[],
+            date(2024, 1, 1),
+            date(2024, 12, 31),
+        )
+        .await
+        .expect("empty sources");
+        assert!(empty.is_empty());
+
+        // 未知 source 只读聚合 → 计数为 0（键仍保留）
+        let unknown = phase7_completed_attempts_by_source_for_window(
+            &state,
+            &["zzz_test_no_such_source".to_string()],
+            date(2024, 1, 1),
+            date(2024, 12, 31),
+        )
+        .await
+        .expect("unknown source");
+        assert_eq!(
+            unknown,
+            BTreeMap::from([("zzz_test_no_such_source".to_string(), 0)])
+        );
+    }
+}
+
+// ── 第七批：中段 SQL 重型只读审计函数（真实本机 PG，全部 SELECT 零写入）──
+// 断言结构/数组长度/关键字段存在，不断言具体业务数值
+
+#[cfg(test)]
+mod seventh_batch {
+    use super::*;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+    }
+
+    // ── 纯函数 ──
+
+    #[test]
+    fn parse_futures_price_chain_coverage_date_handles_optional_formats() {
+        // None 直接 Ok(None)，不触发解析
+        assert_eq!(
+            parse_futures_price_chain_coverage_date(None, "start_date").unwrap(),
+            None
+        );
+        // YYYYMMDD 与 YYYY-MM-DD 两种格式都接受
+        assert_eq!(
+            parse_futures_price_chain_coverage_date(Some("20240131"), "start_date").unwrap(),
+            Some(date(2024, 1, 31))
+        );
+        assert_eq!(
+            parse_futures_price_chain_coverage_date(Some("2024-01-31"), "end_date").unwrap(),
+            Some(date(2024, 1, 31))
+        );
+        // 非法格式错误信息携带字段前缀
+        let err =
+            parse_futures_price_chain_coverage_date(Some("2024/01/31"), "start_date").unwrap_err();
+        assert_eq!(err, "start_date_date_must_be_yyyy_mm_dd_or_yyyymmdd");
+    }
+
+    #[test]
+    fn main_business_yyyymmdd_field_parses_strings_and_numbers() {
+        // 字符串载体容忍首尾空白
+        let string_row = json!({"end_date": " 20240331 "});
+        assert_eq!(
+            main_business_yyyymmdd_field(&string_row, "end_date"),
+            Some(date(2024, 3, 31))
+        );
+        // 数字载体按 to_string 归一后解析
+        let number_row = json!({"end_date": 20240331});
+        assert_eq!(
+            main_business_yyyymmdd_field(&number_row, "end_date"),
+            Some(date(2024, 3, 31))
+        );
+        // null 载体、非 YYYYMMDD 格式、缺失字段均返回 None
+        let null_row = json!({"end_date": null});
+        assert_eq!(main_business_yyyymmdd_field(&null_row, "end_date"), None);
+        let dashed_row = json!({"end_date": "2024-03-31"});
+        assert_eq!(main_business_yyyymmdd_field(&dashed_row, "end_date"), None);
+        let missing_row = json!({});
+        assert_eq!(main_business_yyyymmdd_field(&missing_row, "end_date"), None);
+    }
+
+    #[test]
+    fn futures_price_chain_summary_sql_constants_pin_pit_and_evidence_filters() {
+        // mapping 产品汇总固定查 mapping_pit 表并输出 PIT/弱证据过滤列
+        let mapping_sql = futures_price_chain_mapping_product_summary_sql();
+        assert!(mapping_sql.contains("FROM market_futures_product_exposure_mapping_pit"));
+        assert!(mapping_sql.contains("AS mapping_pit_violation_rows"));
+        assert!(mapping_sql.contains("AS weak_evidence_rows"));
+        assert!(mapping_sql.contains("GROUP BY upper(trim(product_symbol))"));
+
+        // 排除产品汇总固定限定 futures_price_chain_factor 作用域
+        let exclusion_sql = futures_price_chain_exclusion_product_summary_sql();
+        assert!(exclusion_sql.contains("FROM market_futures_product_exclusion_gate_pit"));
+        assert!(exclusion_sql.contains("gate_scope = 'futures_price_chain_factor'"));
+        assert!(exclusion_sql.contains("AS exclusion_pit_violation_rows"));
+        assert!(exclusion_sql.contains("AS weak_evidence_rows"));
+    }
+
+    // ── SQL 只读路径（真实本机 PG；全部 SELECT，零写入）──
+
+    #[tokio::test]
+    async fn build_equity_pledge_pressure_readiness_audit_reads_live_schema() {
+        let db = test_db().await;
+        let audit = build_equity_pledge_pressure_readiness_audit(&db)
+            .await
+            .expect("equity pledge readiness audit should be read-only and succeed");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.20c-equity-pledge-pressure-readiness-v1"
+        );
+        assert_eq!(audit["source_id"], "equity_pledge_pressure");
+        assert_eq!(audit["mode"], "read_only_schema_raw_pit_rowcount_audit");
+        // 两张质押表逐表审计
+        let tables = audit["tables"].as_array().expect("tables array");
+        assert_eq!(tables.len(), 2);
+        let names: Vec<&str> = tables
+            .iter()
+            .map(|table| table["table"].as_str().expect("table name"))
+            .collect();
+        assert!(names.contains(&"market_stock_pledge_stat"));
+        assert!(names.contains(&"market_stock_pledge_detail"));
+        for table in tables {
+            assert!(table["table_exists"].is_boolean());
+            assert!(table["row_count"].is_i64());
+            assert!(table["pit_violation_rows"].is_i64());
+            assert!(table["missing_constraints"].is_array());
+            assert!(table["passed"].is_boolean());
+        }
+        assert!(audit["schema_passed"].is_boolean());
+        assert!(audit["sync_attempt_breakdown"].is_array());
+        assert!(audit["decision"].is_object());
+        assert!(audit["pit_policy"].is_object());
+        assert!(audit["prohibited"].as_array().unwrap().len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn build_equity_pledge_pressure_coverage_audit_rejects_inverted_range() {
+        let db = test_db().await;
+        // start > end 在任何 SQL 之前被拒绝
+        let err = build_equity_pledge_pressure_coverage_audit(
+            &db,
+            EquityPledgeCoverageAuditReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "equity_pledge coverage start_date cannot be after end_date"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_equity_pledge_pressure_coverage_audit_summarizes_live_history() {
+        let db = test_db().await;
+        // 全历史窗口：只读聚合 stat/detail 两表
+        let audit = build_equity_pledge_pressure_coverage_audit(
+            &db,
+            EquityPledgeCoverageAuditReq {
+                start_date: None,
+                end_date: None,
+            },
+        )
+        .await
+        .expect("equity pledge coverage audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.20d-equity-pledge-pressure-coverage-audit-v1"
+        );
+        assert_eq!(
+            audit["mode"],
+            "read_only_year_symbol_ann_date_coverage_duplicate_audit"
+        );
+        // 未指定窗口时日期区间序列化为 null
+        assert!(audit["date_range"]["start_date"].is_null());
+        assert!(audit["date_range"]["end_date"].is_null());
+
+        let raw = &audit["raw_summary"];
+        assert!(raw["raw_rows"].is_i64());
+        assert!(raw["pit_violation_rows"].is_i64());
+        assert!(raw["duplicate_source_row_hash_count"].is_i64());
+        assert!(raw["stat_pledge_ratio_out_of_range_count"].is_i64());
+        assert!(raw["detail_release_before_start_count"].is_i64());
+        // 本地库 stat/detail 两表均有数据
+        assert!(raw["raw_rows"].as_i64().unwrap() > 0);
+
+        let breadth = &audit["symbol_breadth_vs_main_chinext_non_st"];
+        assert!(breadth["reference_symbols"].as_i64().unwrap() > 0);
+        assert!(breadth["coverage_ratio"].is_f64());
+
+        let years = audit["year_breakdown"].as_array().expect("year breakdown");
+        assert!(!years.is_empty());
+        for year in years {
+            assert!(year["source"].is_string());
+            assert!(year["year"].is_i64());
+            assert!(year["rows"].is_i64());
+        }
+        assert!(audit["sync_attempt_breakdown"].is_array());
+        assert!(audit["decision"].is_object());
+        assert_eq!(
+            audit["promotion_gate"]["factor_builder"],
+            "blocked_until_coverage_readiness_and_pit_pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_readiness_audit_reads_live_schema() {
+        let db = test_db().await;
+        let audit = build_margin_detail_readiness_audit(&db)
+            .await
+            .expect("margin detail readiness audit");
+
+        assert_eq!(audit["audit_version"], "p3.22d-margin-detail-readiness-v1");
+        assert_eq!(audit["source_id"], "margin_detail_leverage_crowding");
+        assert_eq!(
+            audit["mode"],
+            "read_only_schema_raw_pit_quality_rowcount_audit"
+        );
+        // 单表审计：market_stock_margin_detail
+        let tables = audit["tables"].as_array().expect("tables array");
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0]["table"], "market_stock_margin_detail");
+        assert!(tables[0]["table_exists"].as_bool().unwrap());
+        assert!(tables[0]["row_count"].as_i64().unwrap() > 0);
+        // 负数调整列拆分 rzche/rqchl
+        assert!(tables[0]["negative_adjustment_rows"]["rzche_negative_rows"].is_i64());
+        assert!(tables[0]["negative_adjustment_rows"]["rqchl_negative_rows"].is_i64());
+        assert!(audit["schema_passed"].is_boolean());
+        assert!(audit["decision"].is_object());
+        assert!(audit["quality_policy"]["core_nonnegative_fields"].is_array());
+        assert!(audit["pit_policy"]["source_published_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_correlation_audit_blocks_without_table() {
+        let db = test_db().await;
+        // 表缺失标记直接短路，不触发任何关联查询
+        let blocked = build_margin_detail_correlation_audit(&db, None, None, false)
+            .await
+            .expect("blocked short-circuit");
+        assert_eq!(
+            blocked["status"],
+            "blocked_until_margin_detail_table_exists"
+        );
+        assert_eq!(
+            blocked["decision"],
+            "blocked_until_correlation_sample_available"
+        );
+        assert_eq!(blocked["sample_rows"], 0);
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_correlation_audit_screens_live_quarter() {
+        let db = test_db().await;
+        // 2024Q1 真实数据线性相关性筛查（LAG + 双 JOIN 的只读聚合）
+        let audit = build_margin_detail_correlation_audit(
+            &db,
+            Some(date(2024, 1, 1)),
+            Some(date(2024, 3, 31)),
+            true,
+        )
+        .await
+        .expect("correlation screen");
+
+        // 走到 completed 分支（是否通过由数据决定，只断言状态枚举与结构）
+        let status = audit["status"].as_str().expect("status string");
+        assert!(
+            status == "completed_low_linear_correlation_screen_passed"
+                || status == "completed_correlation_screen_not_passed_or_needs_review"
+        );
+        assert!(audit["decision"].is_string());
+        assert!(audit["sample_rows"].as_i64().unwrap() > 0);
+        assert!(audit["gate_note"].is_string());
+        // 四组相关性键齐备（值可为 null，例如样本退化时 CORR 返回 null）
+        let correlations = &audit["correlations"];
+        assert!(
+            correlations["margin_buy_to_amount_vs_moneyflow_net_to_amount"].is_null()
+                || correlations["margin_buy_to_amount_vs_moneyflow_net_to_amount"].is_f64()
+        );
+        assert!(
+            correlations["margin_buy_to_amount_vs_ln_amount_liquidity"].is_null()
+                || correlations["margin_buy_to_amount_vs_ln_amount_liquidity"].is_f64()
+        );
+        assert!(
+            correlations["margin_buy_to_amount_vs_abs_return_price_volume"].is_null()
+                || correlations["margin_buy_to_amount_vs_abs_return_price_volume"].is_f64()
+        );
+        assert!(
+            correlations["financing_balance_chg1_vs_moneyflow_net_to_amount"].is_null()
+                || correlations["financing_balance_chg1_vs_moneyflow_net_to_amount"].is_f64()
+        );
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_coverage_audit_rejects_inverted_range() {
+        let db = test_db().await;
+        let err = build_margin_detail_coverage_audit(
+            &db,
+            MarginDetailCoverageAuditReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "margin_detail coverage start_date cannot be after end_date"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_margin_detail_coverage_audit_reports_live_history() {
+        let db = test_db().await;
+        // 2024 全年窗口：覆盖/年份/市场三维聚合 + 内嵌 correlation 审计
+        let audit = build_margin_detail_coverage_audit(
+            &db,
+            MarginDetailCoverageAuditReq {
+                start_date: Some("20240101".to_string()),
+                end_date: Some("20241231".to_string()),
+            },
+        )
+        .await
+        .expect("margin detail coverage audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.22d-margin-detail-coverage-audit-v1"
+        );
+        assert_eq!(
+            audit["mode"],
+            "read_only_year_market_symbol_pit_quality_correlation_audit"
+        );
+        assert_eq!(audit["date_range"]["start_date"], "2024-01-01");
+        assert_eq!(audit["date_range"]["end_date"], "2024-12-31");
+        assert_eq!(audit["date_range"]["effective_start_date"], "2024-01-01");
+        assert_eq!(audit["date_range"]["effective_end_date"], "2024-12-31");
+
+        let raw = &audit["raw_summary"];
+        assert!(raw["raw_rows"].as_i64().unwrap() > 0);
+        assert!(raw["symbols"].as_i64().unwrap() > 0);
+        assert!(raw["covered_trade_days"].as_i64().unwrap() > 0);
+        assert!(raw["open_trade_days"].as_i64().unwrap() > 0);
+        assert!(raw["covered_trade_day_ratio"].is_f64());
+        assert!(raw["pit_violation_rows"].is_i64());
+        assert!(raw["missing_source_published_at_rows"].is_i64());
+        assert!(raw["core_negative_rows"].is_i64());
+
+        let breadth = &audit["symbol_breadth_vs_listed_stock_universe"];
+        assert!(breadth["reference_symbols"].as_i64().unwrap() > 0);
+        assert!(breadth["note"].is_string());
+
+        // 年份分解按请求区间补齐（2024 单年必有且 min/max 日期非空）
+        let years = audit["year_breakdown"].as_array().expect("year breakdown");
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0]["year"], 2024);
+        assert!(years[0]["rows"].as_i64().unwrap() > 0);
+        assert!(years[0]["min_trade_date"].is_string());
+
+        // 市场分解至少覆盖一个市场（SH/SZ/BJ 分桶）
+        let markets = audit["market_breakdown"]
+            .as_array()
+            .expect("market breakdown");
+        assert!(!markets.is_empty());
+        for market in markets {
+            assert!(market["market"].is_string());
+            assert!(market["covered_trade_days"].is_i64());
+        }
+
+        // 内嵌 correlation 审计带决策与样本数
+        assert!(audit["correlation_audit"]["decision"].is_string());
+        assert!(audit["correlation_audit"]["sample_rows"].is_i64());
+        assert!(audit["readiness"].is_object());
+        assert!(audit["decision"].is_object());
+        assert_eq!(audit["promotion_gate"]["bounded_wfa"], "blocked");
+    }
+
+    #[tokio::test]
+    async fn build_shareholder_structure_readiness_audit_reads_live_schema() {
+        let db = test_db().await;
+        let audit = build_shareholder_structure_readiness_audit(&db)
+            .await
+            .expect("shareholder readiness audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.21c-shareholder-structure-readiness-v1"
+        );
+        assert_eq!(audit["source_id"], "shareholder_structure");
+        // 四张股东结构表逐表审计
+        let tables = audit["tables"].as_array().expect("tables array");
+        assert_eq!(tables.len(), 4);
+        let names: Vec<&str> = tables
+            .iter()
+            .map(|table| table["table"].as_str().expect("table name"))
+            .collect();
+        assert!(names.contains(&"market_stock_holder_number"));
+        assert!(names.contains(&"market_stock_top10_holders"));
+        assert!(names.contains(&"market_stock_top10_float_holders"));
+        assert!(names.contains(&"market_stock_holder_trade"));
+        for table in tables {
+            assert!(table["table_exists"].is_boolean());
+            assert!(table["pit_violation_rows"].is_i64());
+            assert!(table["missing_constraints"].is_array());
+            assert!(table["passed"].is_boolean());
+        }
+        assert!(audit["schema_passed"].is_boolean());
+        assert!(audit["sync_attempt_breakdown"].is_array());
+        assert!(audit["decision"].is_object());
+        assert!(audit["pit_policy"]["period_snapshot_rule"].is_string());
+    }
+
+    #[tokio::test]
+    async fn build_shareholder_structure_coverage_audit_rejects_inverted_range() {
+        let db = test_db().await;
+        let err = build_shareholder_structure_coverage_audit(
+            &db,
+            ShareholderStructureCoverageAuditReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "shareholder_structure coverage start_date cannot be after end_date"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_shareholder_structure_coverage_audit_walks_admissible_gates() {
+        let db = test_db().await;
+        let audit = build_shareholder_structure_coverage_audit(
+            &db,
+            ShareholderStructureCoverageAuditReq {
+                start_date: None,
+                end_date: None,
+            },
+        )
+        .await
+        .expect("shareholder coverage audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.21d-shareholder-structure-coverage-audit-v1"
+        );
+        assert_eq!(
+            audit["mode"],
+            "read_only_year_source_symbol_ann_date_coverage_duplicate_audit"
+        );
+
+        let schema_passed = audit["schema_passed"].as_bool().unwrap();
+        if schema_passed {
+            // schema 通过：完整覆盖审计分支
+            let raw = &audit["raw_summary"];
+            assert!(raw["raw_rows"].as_i64().unwrap() > 0);
+            assert!(raw["symbols"].as_i64().unwrap() > 0);
+            assert!(raw["pit_violation_rows"].is_i64());
+            assert!(raw["duplicate_source_row_hash_count"].is_i64());
+            assert!(raw["data_quality_violation_rows"].is_i64());
+
+            // 严格低扇出门只统计 holder_number/holder_trade
+            let strict = &audit["strict_low_fanout_admissible_summary"];
+            assert_eq!(
+                strict["gate_id"],
+                SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID
+            );
+            assert_eq!(
+                strict["source_scope"],
+                "holder_number_and_holder_trade_only"
+            );
+            assert!(strict["admissible_rows"].is_i64());
+            // excluded = raw - admissible，不允许为负
+            assert!(strict["excluded_rows"].as_i64().unwrap() >= 0);
+            assert!(strict["row_filter"]["holder_number"].is_string());
+            assert!(strict["requested_year_coverage"]["missing_years"].is_array());
+            assert!(strict["decision"].is_object()); // gate 返回 json 对象（status/admission_decision/next_step 三键）
+
+            assert!(
+                audit["symbol_breadth_vs_main_chinext_non_st"]["reference_symbols"]
+                    .as_i64()
+                    .unwrap()
+                    > 0
+            );
+            assert!(audit["requested_year_coverage"]["observed_years"]
+                .as_array()
+                .is_some());
+            let years = audit["year_breakdown"].as_array().expect("year breakdown");
+            assert!(!years.is_empty());
+            assert!(audit["decision"].is_object());
+            assert_eq!(audit["promotion_gate"]["v19_train_selection"], "blocked");
+        } else {
+            // schema 未通过：短路分支只带 readiness 审计与禁止清单
+            assert!(audit.get("raw_summary").is_none());
+            assert!(audit["readiness_audit"].is_object());
+            assert!(audit["decision"].is_object());
+            assert!(
+                audit["prohibited"]
+                    .as_array()
+                    .expect("prohibited list")
+                    .len()
+                    >= 3
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_futures_price_chain_mapping_audit_joins_raw_and_mapping_products() {
+        let db = test_db().await;
+        let audit = build_futures_price_chain_mapping_audit(&db)
+            .await
+            .expect("futures mapping audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.19m-futures-price-chain-mapping-audit-v1"
+        );
+        assert_eq!(audit["source_id"], "futures_price_chain");
+        assert_eq!(
+            audit["mode"],
+            "read_only_product_mapping_pit_coverage_audit"
+        );
+
+        let schema_passed = audit["schema_passed"].as_bool().unwrap();
+        if schema_passed {
+            // 完整分支：raw/mapping/exclusion 三侧产品汇总互相勾稽
+            let raw_products = audit["raw_products"].as_array().expect("raw products");
+            assert!(!raw_products.is_empty());
+            for product in raw_products {
+                let status = product["mapping_status"].as_str().expect("mapping status");
+                assert!(
+                    status == "mapped" || status == "excluded" || status == "missing",
+                    "未知 mapping_status: {status}"
+                );
+                assert!(product["raw_rows"].is_i64());
+                assert!(product["endpoints"].is_array());
+            }
+            assert!(audit["raw_product_count"].as_i64().unwrap() > 0);
+            assert!(audit["mapping_rows"].is_i64());
+            assert!(audit["exclusion_rows"].is_i64());
+            assert!(audit["mapped_raw_product_count"].is_i64());
+            assert!(audit["excluded_raw_product_count"].is_i64());
+            assert!(audit["missing_products"].is_array());
+            assert!(audit["invalid_interval_rows"].is_i64());
+            assert!(audit["mapping_pit_violation_rows"].is_i64());
+            assert!(audit["weak_evidence_rows"].is_i64());
+            let endpoints = audit["endpoint_breakdown"].as_array().expect("endpoints");
+            assert!(!endpoints.is_empty());
+            assert!(audit["mapping_products"].is_array());
+            assert!(audit["exclusion_products"].is_array());
+            assert!(audit["readiness_audit"].is_object());
+            assert_eq!(audit["promotion_gate"]["wfa_status"], "blocked");
+        } else {
+            // schema 未通过：短路分支只带 readiness 审计
+            assert!(audit.get("raw_products").is_none());
+            assert!(audit["readiness_audit"].is_object());
+            assert!(audit["decision"].is_object());
+        }
+        assert!(audit["pit_policy"]["mapping_filter"].is_string());
+    }
+
+    #[tokio::test]
+    async fn build_futures_price_chain_coverage_audit_rejects_inverted_range() {
+        let db = test_db().await;
+        let err = build_futures_price_chain_coverage_audit(
+            &db,
+            FuturesPriceChainCoverageAuditReq {
+                start_date: Some("20260601".to_string()),
+                end_date: Some("20260101".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "futures_price_chain coverage start_date cannot be after end_date"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_futures_price_chain_coverage_audit_breaks_down_endpoint_years() {
+        let db = test_db().await;
+        let audit = build_futures_price_chain_coverage_audit(
+            &db,
+            FuturesPriceChainCoverageAuditReq {
+                start_date: None,
+                end_date: None,
+            },
+        )
+        .await
+        .expect("futures coverage audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.19p-futures-price-chain-coverage-audit-v1"
+        );
+        assert_eq!(
+            audit["mode"],
+            "read_only_full_history_bounded_sync_coverage_audit"
+        );
+        // 未指定窗口时 requested_range 序列化为 null
+        assert!(audit["requested_range"]["start_date"].is_null());
+        assert!(audit["requested_range"]["end_date"].is_null());
+
+        let schema_passed = audit["schema_passed"].as_bool().unwrap();
+        if schema_passed {
+            assert!(audit["raw_product_count"].as_i64().unwrap() > 0);
+            assert!(audit["covered_product_count"].is_i64());
+            assert!(audit["missing_product_count"].is_i64());
+            assert!(audit["missing_products"].is_array());
+            assert!(audit["raw_pit_violation_rows"].is_i64());
+            assert!(audit["failed_sync_attempt_count"].is_i64());
+            assert!(audit["non_open_sync_attempt_count"].is_i64());
+
+            // 端点×年份二维汇总与行级 coverage 勾稽
+            let endpoint_years = audit["endpoint_year_breakdown"]
+                .as_array()
+                .expect("endpoint year breakdown");
+            assert!(!endpoint_years.is_empty());
+            for entry in endpoint_years {
+                assert!(entry["trade_year"].is_i64());
+                assert!(entry["endpoint"].is_string());
+                assert!(entry["products"].is_array());
+                assert!(entry["exchanges"].is_array());
+            }
+            let breakdown = audit["coverage_breakdown"].as_array().expect("breakdown");
+            assert!(!breakdown.is_empty());
+            for row in breakdown {
+                let status = row["mapping_status"].as_str().expect("mapping status");
+                assert!(
+                    status == "mapped" || status == "excluded" || status == "missing",
+                    "未知 mapping_status: {status}"
+                );
+                assert!(row["trade_date_count"].is_i64());
+            }
+            assert!(audit["sync_attempt_breakdown"].is_array());
+            assert!(audit["mapping_audit_decision"].is_object());
+            assert!(audit["promotion_gate"].is_object());
+        } else {
+            assert!(audit["mapping_audit"].is_object());
+            assert!(audit["decision"].is_object());
+        }
+        assert!(audit["pit_policy"]["raw_available_at_policy"].is_string());
+    }
+
+    #[tokio::test]
+    async fn build_futures_price_chain_mapping_template_lists_sw2021_targets() {
+        let db = test_db().await;
+        let template = build_futures_price_chain_mapping_template(&db)
+            .await
+            .expect("mapping template");
+
+        assert_eq!(
+            template["audit_version"],
+            "p3.19n-futures-price-chain-mapping-template-v1"
+        );
+        assert_eq!(template["mode"], "read_only_mapping_template_no_write");
+        // 模板永不写库
+        assert_eq!(template["write_enabled"], false);
+
+        // SW2021 L1 目标宇宙来自真实行业成员表
+        let universe = &template["target_universe"];
+        assert_eq!(universe["classification_source"], "SW2021");
+        assert_eq!(universe["industry_level"], "L1");
+        assert!(universe["target_count"].as_i64().unwrap() > 0);
+        let targets = universe["targets"].as_array().expect("targets");
+        assert_eq!(
+            targets.len(),
+            universe["target_count"].as_i64().unwrap() as usize
+        );
+        for target in targets {
+            assert!(target["exposure_code"].is_string());
+            assert!(target["index_code"].is_string());
+            assert!(target["current_or_historical_symbols"].is_i64());
+        }
+
+        // 候选行只保留未排除产品，字段骨架与 required_candidate_fields 对齐
+        let candidates = template["candidate_rows"].as_array().expect("candidates");
+        assert_eq!(
+            template["mapping_candidate_product_count"]
+                .as_i64()
+                .unwrap() as usize,
+            candidates.len()
+        );
+        for candidate in candidates {
+            assert_eq!(candidate["exposure_type"], "sw_industry");
+            assert_eq!(candidate["mapping_version"], "p319n-product-sw2021-l1-v1");
+            assert_eq!(candidate["direction"], 1);
+            assert!(candidate["product_symbol"].is_string());
+            assert!(candidate["raw_product_summary"].is_object());
+        }
+        assert!(
+            template["required_candidate_fields"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 11
+        );
+        assert!(!template["guardrails"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn validate_futures_price_chain_mapping_candidates_rejects_malformed_rows() {
+        let db = test_db().await;
+        let result = validate_futures_price_chain_mapping_candidates(
+            &db,
+            FuturesPriceChainMappingValidateReq {
+                rows: vec![
+                    // 行一：仅 product_symbol 为空白，其余字段形态合法
+                    // （exposure_code 用 SW2021 L1 真实 index_code 格式 801010.SI——
+                    //  targets 比对的即是该列，裸 801010/110000 均会命中 unknown）
+                    FuturesPriceChainMappingCandidate {
+                        product_symbol: "   ".to_string(),
+                        exposure_type: "sw_industry".to_string(),
+                        exposure_code: "801010.SI".to_string(),
+                        direction: 1,
+                        weight: 1.0,
+                        valid_from: "2024-01-01".to_string(),
+                        valid_to: None,
+                        available_at: "2024-01-01".to_string(),
+                        source: "manual_review".to_string(),
+                        mapping_version: "p319n-product-sw2021-l1-v1".to_string(),
+                        evidence: json!({"review_note": "第七批测试候选"}),
+                    },
+                    // 行二：多处违规——未知品种/直连个股/方向权重越界/日期非法/来源证据缺失
+                    FuturesPriceChainMappingCandidate {
+                        product_symbol: "ZZZZ_NO_SUCH".to_string(),
+                        exposure_type: "stock_symbol".to_string(),
+                        exposure_code: "600000.SH".to_string(),
+                        direction: 0,
+                        weight: 2.0,
+                        valid_from: "bad-date".to_string(),
+                        valid_to: Some("2020-01-01".to_string()),
+                        available_at: "2024-01-01".to_string(),
+                        source: "   ".to_string(),
+                        mapping_version: String::new(),
+                        evidence: Value::Null,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect("candidate validation");
+
+        assert_eq!(
+            result["audit_version"],
+            "p3.19n-futures-price-chain-mapping-validate-v1"
+        );
+        assert_eq!(result["write_enabled"], false);
+        assert_eq!(result["candidate_row_count"], 2);
+        assert_eq!(result["invalid_row_count"], 2);
+        assert_eq!(result["valid_row_count"], 0);
+        // 校验永不写库的护栏文案齐备
+        assert!(!result["guardrails"].as_array().unwrap().is_empty());
+
+        let rows = result["row_results"].as_array().expect("row results");
+        assert_eq!(rows.len(), 2);
+        // 行一只有 product_symbol 缺失一个错误
+        assert_eq!(rows[0]["passed"], false);
+        assert_eq!(rows[0]["errors"], json!(["product_symbol_required"]));
+        // 行二命中全部校验规则
+        assert_eq!(rows[1]["passed"], false);
+        let errors: Vec<&str> = rows[1]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|error| error.as_str())
+            .collect();
+        for expected in [
+            "unknown_raw_product_symbol",
+            "direct_stock_mapping_requires_separate_evidence_gate",
+            "direction_must_be_minus_one_or_one",
+            "weight_must_be_gt_0_and_lte_1",
+            "valid_from_invalid",
+            "source_required",
+            "mapping_version_required",
+            "evidence_required",
+        ] {
+            assert!(
+                errors.contains(&expected),
+                "缺少错误 {expected}: {errors:?}"
+            );
+        }
+        // 缺少来源链接/评审说明时给 warning 而非 error
+        assert_eq!(
+            rows[1]["warnings"],
+            json!(["evidence_should_include_source_url_or_review_note"])
+        );
+        // 全部行无效 → 覆盖产品数为 0，缺失集合即模板候选全集
+        assert_eq!(result["covered_product_count"], 0);
+        assert!(result["missing_product_count"].as_i64().unwrap() >= 0);
+        assert!(result["missing_products"].is_array());
+        assert!(result["decision"].is_object());
+    }
+
+    #[tokio::test]
+    async fn build_main_business_readiness_audit_reads_raw_ledger() {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let state = crate::AppState {
+            start_time: Utc::now(),
+            db: test_db().await,
+            tushare: quant_data::tushare::client::TushareClient::from_env()
+                .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)"),
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        };
+
+        // start > end 在查库之前被拒绝
+        let err = build_main_business_readiness_audit(
+            &state,
+            MainBusinessReadinessAuditReq {
+                start_date: Some("20250101".to_string()),
+                end_date: Some("20240101".to_string()),
+                business_type: None,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "start_date must be <= end_date");
+
+        // 2024 全年：4 个季度末的只读 readiness 审计（仅查 state.db，无 Tushare 调用）
+        let audit = build_main_business_readiness_audit(
+            &state,
+            MainBusinessReadinessAuditReq {
+                start_date: Some("20240101".to_string()),
+                end_date: Some("20241231".to_string()),
+                business_type: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect("main business readiness audit");
+
+        assert_eq!(
+            audit["audit_version"],
+            "p3.19e-main-business-raw-readiness-v1"
+        );
+        assert_eq!(audit["dataset"], "main_business");
+        assert_eq!(audit["table"], "market_stock_main_business");
+        // business_type 缺省归一为 P
+        assert_eq!(audit["business_type"], "P");
+        assert_eq!(audit["date_range"]["start_date"], "20240101");
+        assert_eq!(audit["date_range"]["end_date"], "20241231");
+
+        let counts = &audit["counts"];
+        // 2024 全年恰好 4 个季度末
+        assert_eq!(counts["expected_period_count"], 4);
+        assert!(counts["row_count"].as_i64().unwrap() > 0);
+        assert!(counts["symbol_count"].as_i64().unwrap() > 0);
+        assert!(counts["pit_violation_rows"].is_i64());
+        assert!(counts["missing_available_at_raw_rows"].is_i64());
+
+        assert!(audit["range"]["min_end_date"].is_string());
+        // 明细最多 4 期且未触发截断
+        let breakdown = audit["period_breakdown"].as_array().expect("breakdown");
+        assert!(breakdown.len() <= 4);
+        assert_eq!(audit["truncated_period_breakdown"], false);
+        assert!(audit["readiness"].is_string());
+        assert!(audit["pit_contract"]["hard_rule"].is_string());
+        assert!(audit["blocking_reasons"].is_array());
+        assert!(audit["notes"].as_array().unwrap().len() >= 3);
+    }
+}

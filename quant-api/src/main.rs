@@ -825,6 +825,18 @@ async fn main() {
             get(routes::dashboard::pipeline_health),
         )
         .route(
+            "/api/v1/quant/execution/orders",
+            post(routes::execution::submit_order_via_gateway),
+        )
+        .route(
+            "/api/v1/quant/execution/orders/{order_id}",
+            get(routes::execution::query_order_via_gateway),
+        )
+        .route(
+            "/api/v1/quant/execution/orders/{order_id}/cancel",
+            post(routes::execution::cancel_order_via_gateway),
+        )
+        .route(
             "/api/v1/quant/paper/historical-replay",
             post(routes::historical_replay::historical_replay),
         )

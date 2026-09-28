@@ -1187,9 +1187,9 @@ pub async fn repair_sync(
                     // 后台异步触发 ML 训练（更新 ETF 预测，供下次重建使用）
                     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
                     let pred_date = chrono::Utc::now().date_naive();
-                    let dv_id: String = sqlx::query_scalar(
-                        "SELECT data_version_id FROM data_version WHERE data_version_id LIKE 'dv-eod-%' ORDER BY end_date DESC LIMIT 1"
-                    ).fetch_optional(&state.db).await.ok().flatten()
+                    // data_version 集中化(任务82): dv-eod-latest 读取走 shared 单一真相源
+                    let dv_id: String = crate::routes::shared::latest_eod_data_version(&state.db)
+                        .await
                         .unwrap_or_else(|| "research-full-2016-2026-20260515".to_string());
                     let payload = serde_json::json!({
                         "model_code": "nlqr_mr", "model_version": "1.0.0",

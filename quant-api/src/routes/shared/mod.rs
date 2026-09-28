@@ -16,6 +16,7 @@
 mod alerts;
 mod app_config;
 mod config_env;
+mod data_version;
 mod etf_premium;
 mod etf_prices;
 mod mvo_weights;
@@ -34,6 +35,7 @@ pub(crate) use config_env::{
     morning_curve_rebuild_lookback_days, pit_materialize_window_days, v24_curve_sync_window_days,
     wfa_params_lookback_days,
 };
+pub use data_version::{data_version_exists, latest_eod_data_version};
 pub use etf_premium::{apply_premium_exit_overlay, load_etf_premium_map, EtfPremium};
 pub(crate) use etf_prices::fetch_intraday_etf_prices;
 pub use mvo_weights::MvoWeightCache;
