@@ -2067,6 +2067,33 @@ async fn run_tick(
                 }
                 Err(e) => warn!("[scheduler] 过期数据清理失败: {}", e),
             }
+
+            // 僵尸任务自动清理(2026-09-28): 心跳超时的 running 任务标记 failed。
+            // 根因: 部署重启容器杀后台 tokio 任务, DB 状态残留 running——48 僵尸
+            // 实证(最老 78 天)。后果: 监控失真 + 部署前置检查被假 running 污染。
+            // 语义与 task_lifecycle::cleanup_stale_sync_tasks 一致(超时判定用
+            // 任务自身 heartbeat_timeout_seconds, 缺省 3600s)。
+            match sqlx::query(
+                "UPDATE data_sync_task
+                 SET status = 'failed',
+                     error_message = 'zombie: heartbeat timeout (auto-cleanup 16:00 window)',
+                     completed_at = now()
+                 WHERE status IN ('running', 'cancel_requested')
+                   AND COALESCE(last_heartbeat_at, started_at, created_at)
+                       < now() - (COALESCE(heartbeat_timeout_seconds, 3600)::text || ' seconds')::interval",
+            )
+            .execute(db)
+            .await
+            {
+                Ok(r) if r.rows_affected() > 0 => {
+                    info!(
+                        "[scheduler] 僵尸任务清理: {} 个超时 running 已标记 failed",
+                        r.rows_affected()
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => warn!("[scheduler] 僵尸任务清理失败: {}", e),
+            }
         }
     }
 
