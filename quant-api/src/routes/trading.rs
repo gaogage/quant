@@ -92,10 +92,10 @@ impl ExecutionFeeSchedule {
     }
 
     /// 印花税: 卖出单边, 买入为 0
-    pub fn stamp_tax(&self, side: &str, symbol: &str, amount: Decimal) -> Decimal {
-        // A股 ETF/LOF 免印花税(2026-09-28 修正: 原不区分品种误收)。识别口径:
-        // 51xxxx.SH(ETF) / 15xxxx.SZ(ETF) / 50xxxx.SH(LOF) / 16xxxx.SZ(LOF)
-        if side != "sell" || is_fund_like_symbol(symbol) {
+    pub fn stamp_tax(&self, side: &str, is_fund: bool, amount: Decimal) -> Decimal {
+        // A股基金类(ETF/LOF)免印花税(2026-09-28 修正)。is_fund 由调用方查
+        // market_stock.instrument_type='etf'——基本信息表权威分类, 不猜代码段。
+        if side != "sell" || is_fund {
             return Decimal::ZERO;
         }
         amount * self.stamp_tax_rate
@@ -105,24 +105,20 @@ impl ExecutionFeeSchedule {
 /// 业务时间戳：trade_date == 今天时为真实成交时刻 now()；
 /// 历史重放日期时为该日 00:00。均取部署环境本地时区(容器 TZ,如 Asia/Shanghai),
 /// 不写死时区偏移——换时区部署自动跟随。
-/// A股基金类品种(ETF/LOF)识别——此类免印花税。代码段口径:
-/// 51xxxx.SH=沪ETF / 58xxxx.SH=沪ETF(新段) / 15xxxx.SZ=深ETF / 50xxxx.SH=沪LOF / 16xxxx.SZ=深LOF
-fn is_fund_like_symbol(symbol: &str) -> bool {
-    let s = symbol.trim();
-    let Some((code, mkt)) = s.split_once('.') else {
-        return false;
-    };
-    if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    let prefix2 = &code[..2];
-    match mkt {
-        // 沪市: 51=ETF / 58=ETF(新) / 50=LOF / 56=LOF(联动)
-        "SH" => matches!(prefix2, "51" | "58" | "50" | "56"),
-        // 深市: 15=ETF / 16=LOF
-        "SZ" => matches!(prefix2, "15" | "16"),
-        _ => false,
-    }
+/// 基金类(ETF/LOF)判定——查 market_stock.instrument_type='etf'（权威分类,
+/// 2026-09-28 用户裁决: 不猜代码段不判名称）。查无此股时保守返回 false（按股票收税）。
+async fn is_fund_symbol(db: &PgPool, symbol: &str) -> bool {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT instrument_type FROM market_stock WHERE symbol = $1",
+    )
+    .bind(symbol)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .map(|t| t.eq_ignore_ascii_case("etf"))
+    .unwrap_or(false)
 }
 
 /// 此前直接绑 NaiveDate 到 timestamptz 列被按连接会话时区解释,fill_time 恒显示 08:00,
@@ -293,7 +289,8 @@ pub async fn execute_simulated_trade(
     // 下方现金扣减按同额独立成笔。
     let fee = ExecutionFeeSchedule::from_config(db).await;
     let commission = fee.commission(fill_amount);
-    let tax = fee.stamp_tax(&trade.side, &trade.symbol, fill_amount);
+    let is_fund = is_fund_symbol(db, &trade.symbol).await;
+    let tax = fee.stamp_tax(&trade.side, is_fund, fill_amount);
     let fill = ActualTrade {
         planned_order_id: order_id.clone(),
         fill_price,
@@ -538,11 +535,11 @@ mod tests {
         let f = super::ExecutionFeeSchedule::default();
         // 印花税卖出单边 万5(2023-08 减半后法定, 2026-09-28 修正原万2.5误配); 买入为 0
         assert_eq!(
-            f.stamp_tax("sell", "600519.SH", Decimal::from(1_000_000)),
+            f.stamp_tax("sell", false, Decimal::from(1_000_000)),
             Decimal::from(500)
         );
         assert_eq!(
-            f.stamp_tax("buy", "600519.SH", Decimal::from(1_000_000)),
+            f.stamp_tax("buy", false, Decimal::from(1_000_000)),
             Decimal::ZERO
         );
     }
@@ -1149,30 +1146,38 @@ mod stamp_tax_fund_exempt_tests {
     #[test]
     fn stock_sell_charged_at_new_rate() {
         let f = fee();
-        let tax = f.stamp_tax("sell", "600519.SH", Decimal::from(1_000_000));
+        let tax = f.stamp_tax("sell", false, Decimal::from(1_000_000));
         assert_eq!(tax, Decimal::from(500), "万5: 100万×0.0005=500");
     }
 
-    /// ETF/LOF 卖出免印花税(2026-09-28 修正)
-    #[test]
-    fn etf_lof_sell_exempt() {
-        let f = fee();
-        for sym in [
-            "518880.SH",
-            "511010.SH",
-            "513100.SH",
-            "513500.SH", // 沪 ETF
-            "159980.SZ",
-            "159985.SZ",
-            "159200.SZ", // 深 ETF
-            "501018.SH", // 沪 LOF
-            "511880.SH", // 货币 ETF
+    /// 基金类(instrument_type=etf)卖出免印花税——连库验证真实持仓品种
+    #[tokio::test]
+    async fn etf_positions_exempt_via_instrument_type() {
+        let db = sqlx::PgPool::connect(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into()),
+        )
+        .await
+        .expect("db");
+        // 生产策略全部 ETF 持仓品种 + 对照股票
+        for (sym, expect_fund) in [
+            ("518880.SH", true),
+            ("511010.SH", true),
+            ("513100.SH", true),
+            ("513500.SH", true),
+            ("159980.SZ", true),
+            ("159985.SZ", true),
+            ("501018.SH", true), // LOF 也是 etf 分类
+            ("511880.SH", true), // 货币 ETF
+            ("600519.SH", false),
+            ("000001.SZ", false),
         ] {
-            assert_eq!(
-                f.stamp_tax("sell", sym, Decimal::from(1_000_000)),
-                Decimal::ZERO,
-                "{sym} 应免印花税"
-            );
+            let got = is_fund_symbol(&db, sym).await;
+            assert_eq!(got, expect_fund, "{sym} instrument_type 判定");
+            let tax = fee().stamp_tax("sell", got, Decimal::from(1_000_000));
+            if expect_fund {
+                assert_eq!(tax, Decimal::ZERO, "{sym} 基金免印花税");
+            }
         }
     }
 
@@ -1180,7 +1185,7 @@ mod stamp_tax_fund_exempt_tests {
     #[test]
     fn stock_buy_still_free() {
         assert_eq!(
-            fee().stamp_tax("buy", "000001.SZ", Decimal::from(1_000_000)),
+            fee().stamp_tax("buy", false, Decimal::from(1_000_000)),
             Decimal::ZERO
         );
     }
