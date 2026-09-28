@@ -697,6 +697,13 @@ pub(crate) async fn eod_mark_all_accounts(db: &PgPool, date: NaiveDate, is_trade
                 warn!("[scheduler] EOD re-mark 失败 {}: {}", aid, e);
                 continue;
             }
+            // 融资利息计提(2026-09-28): 先计息再重算 NAV——当日净值含真实融资成本。
+            // 账号级利率三层仲裁(账户列>app_config>0.0835), 无融资余额 no-op, 幂等。
+            if let Err(e) =
+                crate::routes::trading::accrue_margin_interest_daily(db, aid, date).await
+            {
+                warn!("[scheduler] EOD 融资利息计提失败 {}: {}", aid, e);
+            }
             if let Err(e) = crate::routes::trading::update_current_nav(db, aid).await {
                 warn!("[scheduler] EOD NAV 重算失败 {}: {}", aid, e);
             }

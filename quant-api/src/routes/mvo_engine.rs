@@ -192,6 +192,9 @@ pub async fn run_daily_simulation(
         }
         // 3b. 每日盯市
         mark_to_market(db, account_id, d, price_source).await?;
+        // 3b.1 融资利息计提(2026-09-28): 与 EOD 盯市同款——回放绩效含真实融资成本
+        // (账号级利率三层仲裁, 幂等; 无杠杆/无融资日 no-op 零行为变化)
+        crate::routes::trading::accrue_margin_interest_daily(db, account_id, d).await?;
         // 3c. NAV 重算(P1-B:update_current_nav 返回 NAV,省下面的 SELECT current_nav)
         let nav_first = update_current_nav(db, account_id).await?;
         // 3c.1 每日维保检查(实盘口径):维保<平仓线触发强平,平仓后重算 NAV。

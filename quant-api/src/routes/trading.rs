@@ -919,3 +919,196 @@ mod db_second_batch {
         cleanup_account(&db, account_id).await;
     }
 }
+
+/// 融资利息每日计提（2026-09-28 任务: 杠杆账户真实成本入账）。
+///
+/// 利率三层仲裁（对齐维保线任务80 C5 先例）:
+///   paper_account.margin_interest_rate > app_config margin.interest_default_rate > 0.0835
+/// 计息 = margin_amount × 年利率 / day_basis(账户列 > app_config > 360)。
+/// 从 cash 扣减（保证金口径, 等价净值减）; margin_amount 不变（本金不动, 券商息费
+/// 不减少融资本金）。margin_interest_log 每账户每日一行幂等（当日已计直接返回）,
+/// 无融资余额/无杠杆账户为 no-op。
+pub async fn accrue_margin_interest_daily(
+    db: &PgPool,
+    account_id: &str,
+    date: chrono::NaiveDate,
+) -> Result<(), String> {
+    // 幂等: 当日已计提直接返回
+    let already: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM margin_interest_log WHERE paper_account_id = $1 AND interest_date = $2",
+    )
+    .bind(account_id)
+    .bind(date)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| format!("interest idem check: {e}"))?;
+    if already.is_some() {
+        return Ok(());
+    }
+
+    // 账户层: 融资余额 + 专属利率/基准(可空)
+    let (margin, acct_rate, acct_basis): (f64, Option<f64>, Option<i32>) = sqlx::query_as(
+        "SELECT COALESCE(margin_amount, 0)::double precision, margin_interest_rate, margin_interest_day_basis
+         FROM paper_account WHERE paper_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("interest account read: {e}"))?;
+    if margin <= 0.0 {
+        return Ok(()); // 无融资余额(含无杠杆账户): no-op
+    }
+
+    // 全局默认(app_config)兜底
+    let default_rate = crate::routes::shared::app_config_f64(db, "margin.interest_default_rate")
+        .await
+        .unwrap_or(0.0835);
+    let default_basis = crate::routes::shared::app_config_f64(db, "margin.interest_day_basis")
+        .await
+        .unwrap_or(360.0) as i32;
+    let rate = acct_rate.unwrap_or(default_rate);
+    let basis = acct_basis.unwrap_or(default_basis).max(1);
+
+    let interest = margin * rate / basis as f64;
+    if interest <= 0.0 {
+        return Ok(());
+    }
+
+    // 单事务: 扣 cash + 写日志(唯一约束二次防重)
+    let mut tx = db.begin().await.map_err(|e| format!("interest tx: {e}"))?;
+    let updated = sqlx::query(
+        "UPDATE paper_account SET cash = cash - $2, updated_at = now()
+         WHERE paper_account_id = $1 AND COALESCE(margin_amount,0) > 0",
+    )
+    .bind(account_id)
+    .bind(interest)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("interest cash deduct: {e}"))?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await.ok();
+        return Ok(()); // 并发下余额已清零: 放弃
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO margin_interest_log
+         (paper_account_id, interest_date, margin_amount, annual_rate, day_basis, interest_amount)
+         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+    )
+    .bind(account_id)
+    .bind(date)
+    .bind(margin)
+    .bind(rate)
+    .bind(basis)
+    .bind(interest)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("interest log insert: {e}"))?;
+    if inserted.rows_affected() == 0 {
+        tx.rollback().await.ok();
+        return Ok(()); // 唯一约束命中: 他路已计
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("interest commit: {e}"))?;
+    tracing::info!(account_id, interest, rate, "融资利息计提");
+    Ok(())
+}
+
+#[cfg(test)]
+mod margin_interest_tests {
+    use super::*;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    /// 计提语义: margin 100万 × 8.35% / 360 ≈ 2319.44 从 cash 扣, 本金不动, 幂等
+    #[tokio::test]
+    async fn accrue_deducts_cash_and_is_idempotent() {
+        let db = test_db().await;
+        let aid = "zzz_test_interest_acc";
+        let day = chrono::NaiveDate::from_ymd_opt(2099, 6, 15).unwrap();
+        sqlx::query("DELETE FROM margin_interest_log WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO paper_account (paper_account_id, name, base_currency, initial_capital, cash, status, account_type, margin_amount, margin_interest_rate)
+             VALUES ($1, 'zzz利息测试', 'CNY', 1000000, 50000, 'active', 'simulated', 1000000, 0.0835)
+             ON CONFLICT (paper_account_id) DO UPDATE SET cash = 50000, margin_amount = 1000000, margin_interest_rate = 0.0835",
+        ).bind(aid).execute(&db).await.unwrap();
+
+        accrue_margin_interest_daily(&db, aid, day).await.unwrap();
+        let (cash1, margin1): (f64, f64) = sqlx::query_as(
+            "SELECT cash::double precision, COALESCE(margin_amount,0)::double precision FROM paper_account WHERE paper_account_id = $1",
+        ).bind(aid).fetch_one(&db).await.unwrap();
+        let expect = 50000.0 - 1_000_000.0 * 0.0835 / 360.0;
+        assert!(
+            (cash1 - expect).abs() < 0.01,
+            "cash 应扣利息: {cash1} vs {expect}"
+        );
+        assert!((margin1 - 1_000_000.0).abs() < 0.01, "本金不动: {margin1}");
+
+        // 幂等: 二次计提不再扣
+        accrue_margin_interest_daily(&db, aid, day).await.unwrap();
+        let cash2: f64 = sqlx::query_scalar(
+            "SELECT cash::double precision FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!((cash2 - cash1).abs() < 0.001, "幂等: 二次计提不重复扣");
+
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM margin_interest_log WHERE paper_account_id = $1 AND interest_date = $2",
+        ).bind(aid).bind(day).fetch_one(&db).await.unwrap();
+        assert_eq!(n, 1, "日志恰一行");
+        sqlx::query("DELETE FROM margin_interest_log WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    /// 无融资余额账户 no-op
+    #[tokio::test]
+    async fn accrue_noop_without_margin() {
+        let db = test_db().await;
+        let aid = "zzz_test_interest_noop";
+        let day = chrono::NaiveDate::from_ymd_opt(2099, 6, 16).unwrap();
+        sqlx::query("DELETE FROM margin_interest_log WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO paper_account (paper_account_id, name, base_currency, initial_capital, cash, status, account_type, margin_amount)
+             VALUES ($1, 'zzz无杠杆', 'CNY', 1000000, 800000, 'active', 'simulated', 0)
+             ON CONFLICT (paper_account_id) DO UPDATE SET cash = 800000, margin_amount = 0",
+        ).bind(aid).execute(&db).await.unwrap();
+
+        accrue_margin_interest_daily(&db, aid, day).await.unwrap();
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM margin_interest_log WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(n, 0, "无融资余额: 零日志零扣减");
+        sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+}
