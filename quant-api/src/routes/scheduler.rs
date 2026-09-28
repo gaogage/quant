@@ -1643,10 +1643,11 @@ async fn run_tick(
                             ));
                         }
                         let msg = format!(
-                            "## ✅ 调仓执行完成  \n\n**日期**: {}  \n**总订单**: {} 笔  \n\n{}\n\n> 自动生成于 14:45 调仓",
+                            "## ✅ 调仓执行完成  \n\n**日期**: {}  \n**总订单**: {} 笔  \n\n{}\n\n> 自动生成于 {} 调仓",
                             today.format("%Y-%m-%d"),
                             new_orders,
-                            lines.join("  \n")
+                            lines.join("  \n"),
+                            chrono::Local::now().format("%H:%M")
                         );
                         send_dingtalk_alert_titled(db, "调仓执行完成", &msg).await;
 

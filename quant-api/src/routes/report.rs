@@ -743,6 +743,9 @@ struct TradeRow {
     amount: f64,
     reason: String,
     name: String,
+    /// 首笔成交时间(通知文案"调仓于 HH:MM 执行"用, 取自 paper_fill.fill_time;
+    /// 无成交时间时回退订单创建时刻——2026-09-28 用户裁决: 时刻须按实际情况展示)
+    first_fill: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// 查询某账户当日已成交订单明细（symbol/side/数量/金额/理由/名称）。
@@ -752,11 +755,21 @@ async fn fetch_today_trades(
     account_id: &str,
     date: NaiveDate,
 ) -> Result<Vec<TradeRow>, String> {
-    let rows: Vec<(String, String, f64, f64, Option<String>, Option<String>)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        f64,
+        f64,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    )> = sqlx::query_as(
         "SELECT po.symbol, po.side,
                 po.quantity::double precision,
                 po.target_value::double precision,
                 po.reason,
+                (SELECT MIN(f.fill_time) FROM paper_fill f WHERE f.planned_order_id = po.order_id),
                 COALESCE(ms.name,
                   CASE po.symbol
                     WHEN '518880.SH' THEN '黄金ETF'
@@ -782,14 +795,17 @@ async fn fetch_today_trades(
 
     Ok(rows
         .into_iter()
-        .map(|(symbol, side, quantity, amount, reason, name)| TradeRow {
-            symbol,
-            side,
-            quantity,
-            amount,
-            reason: reason.unwrap_or_default(),
-            name: name.unwrap_or_default(),
-        })
+        .map(
+            |(symbol, side, quantity, amount, reason, first_fill, name)| TradeRow {
+                symbol,
+                side,
+                quantity,
+                amount,
+                reason: reason.unwrap_or_default(),
+                name: name.unwrap_or_default(),
+                first_fill,
+            },
+        )
         .collect())
 }
 
@@ -828,6 +844,13 @@ pub async fn push_dingtalk_trade_detail_notification(
         let buys: Vec<&TradeRow> = trades.iter().filter(|t| t.side == "buy").collect();
         let sells: Vec<&TradeRow> = trades.iter().filter(|t| t.side == "sell").collect();
         let total = trades.len();
+        // 调仓执行时刻 = 全部成交的最早 fill_time(实际情况); 无 fill_time 的回退订单创建时刻
+        let first_fill_hhmm: String = trades
+            .iter()
+            .filter_map(|t| t.first_fill)
+            .min()
+            .map(|dt| dt.format("%H:%M").to_string())
+            .unwrap_or_else(|| "当日".to_string());
 
         // 统一表格：按方向分组（买入在前），每行含交易方向列，表格对齐
         let mut rows = Vec::new();
@@ -850,13 +873,14 @@ pub async fn push_dingtalk_trade_detail_notification(
              | 方向 | 标的 | 名称 | 数量 | 金额 | 理由 |\n\
              |:----:|:-----|:-----|-----:|-----:|:-----|\n\
              {}\n\n\
-             > 调仓于 14:40 执行",
+             > 调仓于 {} 执行",
             name,
             date.format("%Y-%m-%d"),
             total,
             buys.len(),
             sells.len(),
             rows.join("\n"),
+            first_fill_hhmm,
         );
 
         if let Err(e) = dingtalk::send_dingtalk_markdown(&webhook_url, "今日交易明细", &text).await
