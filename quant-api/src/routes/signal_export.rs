@@ -418,6 +418,21 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
     let dw_end = crate::routes::shared::app_config_str(db, "signal.deferred_window_end")
         .await
         .unwrap_or_else(|| "11:30".into());
+    // 追单机制配置注入(2026-09-28 任务83): DB 四键 → 信号 JSON chase 块 →
+    // PTrade 执行器 _apply_chase_config 读取。执行器侧默认值与此一致(兜底),
+    // 调参改 DB 当晚信号即生效(零上传);执行器代码逻辑变更仍须手动上传 PTrade。
+    let chase_ws = crate::routes::shared::app_config_str(db, "chase.window_start")
+        .await
+        .unwrap_or_else(|| "11:35".into());
+    let chase_we = crate::routes::shared::app_config_str(db, "chase.window_end")
+        .await
+        .unwrap_or_else(|| "14:50".into());
+    let chase_age = crate::routes::shared::app_config_f64(db, "chase.min_age_min")
+        .await
+        .unwrap_or(15.0) as i64;
+    let chase_rounds = crate::routes::shared::app_config_f64(db, "chase.max_rounds")
+        .await
+        .unwrap_or(3.0) as i64;
     let mut signal = serde_json::json!({
         "version": 1,
         "signal_id": format!("{}_{}_001", rs.strategy_id, trade_date.format("%Y%m%d")),
@@ -429,6 +444,12 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
         // 在延迟窗口只执行允许方向(高溢价→只卖, 高折价→只买)。
         "execute_window": {"start": ew_start, "end": ew_end},
         "deferred_execute_window": {"start": dw_start, "end": dw_end},
+        "chase": {
+            "window": [chase_ws.clone(), chase_we.clone()],
+            "final_min": chase_we.clone(),
+            "min_age_min": chase_age,
+            "max_rounds": chase_rounds
+        },
         "nav_estimate": (nav * 100.0).round() / 100.0,
         "target_positions": targets
             .iter()
