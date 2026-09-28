@@ -69,6 +69,10 @@ pub struct StrategyConfig {
     pub etf_momentum_window_days: i32,
     #[serde(default = "default_etf_momentum_downscale")]
     pub etf_momentum_downscale: f64,
+    // ETF 再平衡带宽(任务86 配置化,原硬编码 0.25):目标数量相对当前持仓
+    // 偏离小于此比例不调仓。策略级参数(跟踪误差/换手权衡)。
+    #[serde(default = "default_etf_rebalance_band")]
+    pub etf_rebalance_band: f64,
     // detect_regime_exposure 深熊降仓阈值/暴露(P1-2 配置化,原硬编码 -0.10/0.60)。
     // trailing-12m 收益 < deep_bear_threshold → 仓位降为 deep_bear_exposure。
     #[serde(default = "default_deep_bear_threshold")]
@@ -195,6 +199,9 @@ fn default_etf_momentum_window_days() -> i32 {
 fn default_etf_momentum_downscale() -> f64 {
     0.4
 }
+fn default_etf_rebalance_band() -> f64 {
+    0.25
+}
 fn default_deep_bear_exposure() -> f64 {
     0.60
 }
@@ -286,6 +293,7 @@ pub(crate) fn resolved_to_legacy_sc(rs: &ResolvedStrategy) -> Result<StrategyCon
         etf_momentum_filter_enabled: mvo.etf_momentum_filter_enabled,
         etf_momentum_window_days: mvo.etf_momentum_window_days,
         etf_momentum_downscale: mvo.etf_momentum_downscale,
+        etf_rebalance_band: mvo.etf_rebalance_band,
         deep_bear_threshold: mvo.deep_bear_threshold,
         deep_bear_exposure: mvo.deep_bear_exposure,
         kelly_fraction: mvo.kelly_fraction,
@@ -366,6 +374,7 @@ mod tests {
                 etf_momentum_filter_enabled: false,
                 etf_momentum_window_days: 20,
                 etf_momentum_downscale: 0.4,
+                etf_rebalance_band: 0.25,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,
@@ -619,6 +628,7 @@ mod tests {
                 etf_momentum_filter_enabled: false,
                 etf_momentum_window_days: 20,
                 etf_momentum_downscale: 0.4,
+                etf_rebalance_band: 0.25,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,

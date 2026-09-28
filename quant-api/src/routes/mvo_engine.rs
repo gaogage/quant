@@ -2215,6 +2215,7 @@ mod eleventh_batch {
             etf_momentum_filter_enabled: false,
             etf_momentum_window_days: 20,
             etf_momentum_downscale: 0.4,
+            etf_rebalance_band: 0.25,
             cash_park_symbol: "511880.SH".into(),
             cash_park_threshold: 0.01,
             stop_loss_portfolio_dd: 0.10,

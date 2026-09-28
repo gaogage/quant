@@ -359,6 +359,27 @@ pub async fn rebalance_account(
     // 预算扣减: 若有还款约束, 授信余量先冲抵还款额(卖出资金回流时优先补足)
     let mut buy_budget = acct_cash + (credit_cap - acct_margin - required_repay).max(Decimal::ZERO);
 
+    // 任务86: 最小交易额(账号级,三层仲裁: paper_account 列 > app_config > 5000 兜底;
+    // 0=关闭)。存量微调低于此值不生成单——佣金失衡阈值,与券商费率/资金规模强相关。
+    let min_trade_amount_d: Decimal = {
+        let acct_val: Option<f64> = sqlx::query_scalar(
+            "SELECT min_trade_amount FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+        let v = match acct_val {
+            Some(v) => v,
+            None => crate::routes::shared::app_config_f64(db, "rebalance.min_trade_default")
+                .await
+                .unwrap_or(5000.0),
+        };
+        Decimal::from_f64_retain(v).unwrap_or(Decimal::from_f64_retain(5000.0).unwrap())
+    };
+
     // 6. 读当前持仓(增量调仓基础)
     let current_positions: HashMap<String, (Decimal, Decimal)> = sqlx::query_as::<
         _,
@@ -391,7 +412,193 @@ pub async fn rebalance_account(
     let block_symbols: Vec<String> = positions.iter().map(|p| p.symbol.clone()).collect();
     let trade_block_map =
         crate::routes::shared::preload_trade_block_map(db, date, &block_symbols).await;
+
+    // 8. ETF 建仓(按 price_source 取价:EodClose 从 DB / Intraday 从 tushare HashMap)
+    // etf_symbols 必须与 mvo_weights 同源:只含当日已发行 ETF(compute_lw_mvo_weights 已过滤),
+    // 否则 mvo_weights.get(i+1) 索引会与全量 sc.etf_symbols 错位。
+    // P2-C:批量预加载 ETF 上市状态 + 当日收盘价(替代循环内逐个查 DB)
+    let etf_listed_map = preload_etf_listed_map(db, &sc.etf_symbols, date).await;
+    let mut listed_etf_symbols: Vec<String> = Vec::new();
+    for s in &sc.etf_symbols {
+        if etf_listed_map.get(s).copied().unwrap_or(false) {
+            listed_etf_symbols.push(s.clone());
+        }
+    }
+    let etf_allocations = build_etf_allocations(
+        &mvo_weights,
+        regime,
+        &listed_etf_symbols,
+        &sc.cash_park_symbol,
+        sc.cash_park_threshold,
+    );
+    // ETF 动量过滤(2026-09-27,默认关闭零行为变化;现金管理标的不参与)
+    let etf_allocations =
+        crate::routes::shared::apply_etf_momentum_filter(db, date, etf_allocations, &sc).await;
+    // P2-C:批量预加载 ETF 当日收盘价(EodClose 模式,替代 fetch_etf_price 逐个查)
+    let etf_eod_prices: HashMap<String, f64> = if matches!(
+        price_source,
+        PriceSource::EodClose | PriceSource::EodCloseAdj | PriceSource::EodOpen
+    ) {
+        preload_etf_eod_prices(db, &listed_etf_symbols, date, price_source).await
+    } else {
+        HashMap::new()
+    };
+    let intraday_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::Intraday) {
+        let syms: Vec<String> = etf_allocations.iter().map(|(s, _)| s.to_string()).collect();
+        fetch_intraday_etf_prices(tushare, &syms, date, db).await
+    } else {
+        HashMap::new()
+    };
+    // ETF 段同样两遍执行:先卖后买(卖出资金当轮可用于买入,与 A 股段口径一致)
+    // 溢价门禁·方向感知(2026-09-17, 与 signal_export 同源, 阈值策略层配置):
+    // 溢价 > +gate 禁买可卖(高溢价买入承受回归损失, 卖出占便宜);
+    // 折价 < -gate 禁卖可买; 区间内正常双向。堵 EodClose 模式停牌标的按昨收价
+    // 虚拟成交的模拟与现实脱节。数据缺失放行(降级取向), 见 shared/etf_premium.rs。
+    let etf_premium_map = crate::routes::shared::load_etf_premium_map(
+        db,
+        date,
+        &etf_allocations
+            .iter()
+            .map(|(s, _)| s.clone())
+            .collect::<Vec<_>>(),
+        sc.etf_premium_gate,
+    )
+    .await;
+    // 溢价存量退出 overlay(2026-09-18 回测定版, 与 signal_export 同源): 持有标的
+    // 溢价 > gate 清仓、未持有且 >= gate/2 滞回不买回、< gate/2 恢复; 折价豁免。
+    // 依赖下方 pass 0 放行 alloc=0 的清仓路径(本批修复: 原 alloc<=0 双 pass
+    // continue 使目标 0 无卖出路径, overlay 无法生效)。
+    let etf_holding: std::collections::HashSet<String> =
+        current_positions.keys().cloned().collect();
+    let etf_allocations = crate::routes::shared::apply_premium_exit_overlay(
+        &etf_allocations,
+        &etf_premium_map,
+        &etf_holding,
+        sc.etf_premium_gate,
+    );
+    // 任务86 pro-rata: 买入统一缩放系数。预算充足日恒为 1(与现状逐字节等价);
+    // 不足日在 pass 1 开始时按"剩余预算/全部买入需求"计算,A股+ETF 等比缩放
+    // (组合结构保真,替代逐笔顺序贪心的"殿后者全跳"——2026-09-28 回放 4770 条
+    // 授信不足 WARN 的根因:ETF 腿在 A 股之后系统性殿后)。
+    let mut buy_scale = Decimal::ONE;
     for pass in 0..2 {
+        if pass == 1 && buy_scale == Decimal::ONE {
+            // A 股卖出已回流(buy_budget 精确),ETF 卖出以预估计入。
+            // 预收集口径与下方执行段一致(block/min_trade/带宽过滤同款),差异仅滑点。
+            let mut total_need = Decimal::ZERO;
+            let mut etf_sell_est = Decimal::ZERO;
+            for p in &positions {
+                if p.quantity <= Decimal::ZERO || p.market_value <= Decimal::ZERO {
+                    continue;
+                }
+                let price = p.market_value / p.quantity;
+                if price <= Decimal::ZERO {
+                    continue;
+                }
+                let weight_d = if p.weight > Decimal::ZERO {
+                    p.weight
+                } else if total_stock_mv > Decimal::ZERO {
+                    p.market_value / total_stock_mv
+                        * Decimal::from_f64_retain(mvo_a_pct).unwrap_or(Decimal::ZERO)
+                } else {
+                    Decimal::ZERO
+                };
+                let target_qty = a_share_capital * weight_d * leverage_d / price;
+                let cur_qty = current_positions
+                    .get(&p.symbol)
+                    .map(|(q, _)| *q)
+                    .unwrap_or(Decimal::ZERO);
+                let delta = target_qty - cur_qty;
+                if delta == Decimal::ZERO {
+                    continue;
+                }
+                let is_buy = delta > Decimal::ZERO;
+                if let Some(block) = trade_block_map.get(&p.symbol) {
+                    let side = if is_buy { "buy" } else { "sell" };
+                    if block.blocks_side(side) {
+                        continue;
+                    }
+                }
+                if is_buy {
+                    // 存量微调豁免口径与执行段一致(新建仓/清仓不过滤)
+                    if cur_qty > Decimal::ZERO
+                        && target_qty > Decimal::ZERO
+                        && delta * price < min_trade_amount_d
+                    {
+                        continue;
+                    }
+                    let q = quant_common::trading_rules::round_down_to_lot(
+                        delta,
+                        quant_common::trading_rules::lot_size(),
+                    );
+                    if q > Decimal::ZERO {
+                        total_need += q * price;
+                    }
+                }
+            }
+            for (etf_symbol, alloc_pct) in &etf_allocations {
+                if *alloc_pct <= 0.0 {
+                    continue;
+                }
+                let price_val =
+                    if matches!(price_source, PriceSource::EodClose | PriceSource::EodOpen) {
+                        etf_eod_prices
+                            .get(etf_symbol.as_str())
+                            .copied()
+                            .unwrap_or(0.0)
+                    } else {
+                        // Intraday 预估不逐 ETF 查库(开销翻倍),用 0 跳过——
+                        // 实盘日预算通常充足(scale=1),该分支极少走到
+                        0.0
+                    };
+                if price_val <= 0.0 {
+                    continue;
+                }
+                let price = Decimal::from_f64_retain(price_val).unwrap_or(Decimal::ZERO);
+                let alloc_amount = current_nav
+                    * Decimal::from_f64_retain(*alloc_pct).unwrap_or(Decimal::ZERO)
+                    * leverage_d;
+                let target_qty = alloc_amount / price;
+                let cur_qty = current_positions
+                    .get(etf_symbol.as_str())
+                    .map(|(q, _)| *q)
+                    .unwrap_or(Decimal::ZERO);
+                let delta = target_qty - cur_qty;
+                let etf_band_d =
+                    Decimal::from_f64_retain(sc.etf_rebalance_band).unwrap_or(Decimal::new(25, 2));
+                let band = (cur_qty * etf_band_d).max(Decimal::new(1, 2));
+                if delta.abs() < band {
+                    continue;
+                }
+                if delta > Decimal::ZERO {
+                    let q = quant_common::trading_rules::round_down_to_lot(
+                        delta,
+                        quant_common::trading_rules::lot_size(),
+                    );
+                    if q > Decimal::ZERO {
+                        total_need += q * price;
+                    }
+                } else {
+                    let q = quant_common::trading_rules::round_down_to_lot(
+                        -delta,
+                        quant_common::trading_rules::lot_size(),
+                    );
+                    etf_sell_est += q * price;
+                }
+            }
+            let avail = buy_budget + etf_sell_est;
+            if total_need > avail && total_need > Decimal::ZERO {
+                buy_scale = avail / total_need;
+                tracing::info!(
+                    account_id,
+                    "[rebalance] 买入预算约束: 需求 {:.0} > 可用 {:.0}(含ETF卖出预估 {:.0}), A股+ETF 等比缩放 k={:.3}",
+                    total_need,
+                    avail,
+                    etf_sell_est,
+                    buy_scale
+                );
+            }
+        }
         for p in &positions {
             if warn_no_buy {
                 // 警戒禁买:不建仓,仅记录目标集(清仓段仍可减仓)
@@ -424,6 +631,15 @@ pub async fn rebalance_account(
             let delta = target_qty - cur_qty;
             if delta.abs() < Decimal::new(1, 2) {
                 // |delta| < 0.01,忽略
+                continue;
+            }
+            // 任务86: 存量微调不足最小交易额不生成单(佣金/整手失衡阈值,账号级)。
+            // 新建仓(cur=0)与清仓(target=0)豁免——防误杀小目标仓位信号,
+            // 与 ETF 带宽 cur=0 豁免同款防御(预收集块同口径)。
+            if cur_qty > Decimal::ZERO
+                && target_qty > Decimal::ZERO
+                && delta.abs() * price < min_trade_amount_d
+            {
                 continue;
             }
             let (side, mut qty) = if delta > Decimal::ZERO {
@@ -459,6 +675,16 @@ pub async fn rebalance_account(
             // 两遍过滤:pass 0 只执行卖出(先释放资金),pass 1 只执行买入
             if (pass == 0) != (side == "sell") {
                 continue;
+            }
+            // 任务86: 买入统一按 pro-rata scale 缩放(预算不足日等比分摊,组合结构保真)
+            if side == "buy" && buy_scale < Decimal::ONE {
+                qty = quant_common::trading_rules::round_down_to_lot(
+                    qty * buy_scale,
+                    quant_common::trading_rules::lot_size(),
+                );
+                if qty <= Decimal::ZERO {
+                    continue;
+                }
             }
             // A 股交易阻断(停牌/涨跌停)——按 side 区分(P2-A 批量预加载):
             // 涨停('U')禁买可卖、跌停('D')禁卖可买、停牌买卖都禁。方向未知(NULL)保守都禁。
@@ -646,69 +872,6 @@ pub async fn rebalance_account(
         } // end if pass == 0(清仓段)
     } // end for pass(A股两遍:先卖后买)
 
-    // 8. ETF 建仓(按 price_source 取价:EodClose 从 DB / Intraday 从 tushare HashMap)
-    // etf_symbols 必须与 mvo_weights 同源:只含当日已发行 ETF(compute_lw_mvo_weights 已过滤),
-    // 否则 mvo_weights.get(i+1) 索引会与全量 sc.etf_symbols 错位。
-    // P2-C:批量预加载 ETF 上市状态 + 当日收盘价(替代循环内逐个查 DB)
-    let etf_listed_map = preload_etf_listed_map(db, &sc.etf_symbols, date).await;
-    let mut listed_etf_symbols: Vec<String> = Vec::new();
-    for s in &sc.etf_symbols {
-        if etf_listed_map.get(s).copied().unwrap_or(false) {
-            listed_etf_symbols.push(s.clone());
-        }
-    }
-    let etf_allocations = build_etf_allocations(
-        &mvo_weights,
-        regime,
-        &listed_etf_symbols,
-        &sc.cash_park_symbol,
-        sc.cash_park_threshold,
-    );
-    // ETF 动量过滤(2026-09-27,默认关闭零行为变化;现金管理标的不参与)
-    let etf_allocations =
-        crate::routes::shared::apply_etf_momentum_filter(db, date, etf_allocations, &sc).await;
-    // P2-C:批量预加载 ETF 当日收盘价(EodClose 模式,替代 fetch_etf_price 逐个查)
-    let etf_eod_prices: HashMap<String, f64> = if matches!(
-        price_source,
-        PriceSource::EodClose | PriceSource::EodCloseAdj | PriceSource::EodOpen
-    ) {
-        preload_etf_eod_prices(db, &listed_etf_symbols, date, price_source).await
-    } else {
-        HashMap::new()
-    };
-    let intraday_prices: HashMap<String, f64> = if matches!(price_source, PriceSource::Intraday) {
-        let syms: Vec<String> = etf_allocations.iter().map(|(s, _)| s.to_string()).collect();
-        fetch_intraday_etf_prices(tushare, &syms, date, db).await
-    } else {
-        HashMap::new()
-    };
-    // ETF 段同样两遍执行:先卖后买(卖出资金当轮可用于买入,与 A 股段口径一致)
-    // 溢价门禁·方向感知(2026-09-17, 与 signal_export 同源, 阈值策略层配置):
-    // 溢价 > +gate 禁买可卖(高溢价买入承受回归损失, 卖出占便宜);
-    // 折价 < -gate 禁卖可买; 区间内正常双向。堵 EodClose 模式停牌标的按昨收价
-    // 虚拟成交的模拟与现实脱节。数据缺失放行(降级取向), 见 shared/etf_premium.rs。
-    let etf_premium_map = crate::routes::shared::load_etf_premium_map(
-        db,
-        date,
-        &etf_allocations
-            .iter()
-            .map(|(s, _)| s.clone())
-            .collect::<Vec<_>>(),
-        sc.etf_premium_gate,
-    )
-    .await;
-    // 溢价存量退出 overlay(2026-09-18 回测定版, 与 signal_export 同源): 持有标的
-    // 溢价 > gate 清仓、未持有且 >= gate/2 滞回不买回、< gate/2 恢复; 折价豁免。
-    // 依赖下方 pass 0 放行 alloc=0 的清仓路径(本批修复: 原 alloc<=0 双 pass
-    // continue 使目标 0 无卖出路径, overlay 无法生效)。
-    let etf_holding: std::collections::HashSet<String> =
-        current_positions.keys().cloned().collect();
-    let etf_allocations = crate::routes::shared::apply_premium_exit_overlay(
-        &etf_allocations,
-        &etf_premium_map,
-        &etf_holding,
-        sc.etf_premium_gate,
-    );
     for pass in 0..2 {
         for (etf_symbol, alloc_pct) in &etf_allocations {
             // pass 0=卖出, pass 1=买入; 门禁按方向单边拦截(双 pass 各查一次同方向)
@@ -776,7 +939,10 @@ pub async fn rebalance_account(
             // 等权再平衡的漂移是慢变量，无 band 时每周微小漂移都触发交易（年换手 ~4.7 倍，
             // 0.2% 滑点双边吃掉 ~0.9pp/年）。25% 是业界标准带宽（跟踪误差上限 3pp 权重）。
             // 新买入(cur=0)与清仓(target=0)不受影响。A股 sleeve 段不适用（信号驱动换仓）。
-            let band = (cur_qty * Decimal::new(25, 2)).max(Decimal::new(1, 2));
+            // 任务86: 带宽策略级配置化(原硬编码 0.25; 预收集块同口径)
+            let etf_band_d =
+                Decimal::from_f64_retain(sc.etf_rebalance_band).unwrap_or(Decimal::new(25, 2));
+            let band = (cur_qty * etf_band_d).max(Decimal::new(1, 2));
             if delta.abs() < band {
                 continue;
             }
@@ -811,6 +977,16 @@ pub async fn rebalance_account(
             // 两遍过滤:pass 0 只执行卖出(先释放资金),pass 1 只执行买入
             if (pass == 0) != (side == "sell") {
                 continue;
+            }
+            // 任务86: 买入统一按 pro-rata scale 缩放(与 A 股段同一系数,等比分摊)
+            if side == "buy" && buy_scale < Decimal::ONE {
+                qty = quant_common::trading_rules::round_down_to_lot(
+                    qty * buy_scale,
+                    quant_common::trading_rules::lot_size(),
+                );
+                if qty <= Decimal::ZERO {
+                    continue;
+                }
             }
             let mut target_value = qty * price;
             // 授信预算（与 A 股段共享同一池）：买入缩量到预算内整手，卖出回流。
@@ -1705,6 +1881,7 @@ mod tests {
     fn test_sc_slippage_pct_reads_field() {
         let sc = StrategyConfig {
             etf_premium_gate: 0.10,
+            etf_rebalance_band: 0.25,
             allocation_mode: None,
             mu_estimation: None,
             strategy_id: "test".into(),
@@ -1781,6 +1958,7 @@ mod fifth_batch {
     fn zzz_strategy_config() -> StrategyConfig {
         StrategyConfig {
             etf_premium_gate: 0.10,
+            etf_rebalance_band: 0.25,
             allocation_mode: None,
             mu_estimation: None,
             strategy_id: "zzz-test".into(),
@@ -2844,5 +3022,88 @@ mod leverage_prebalance_tests {
             .execute(&db)
             .await
             .unwrap();
+    }
+
+    /// 任务86: min_trade_amount 账号列覆盖(三层仲裁第一层)
+    #[tokio::test]
+    async fn t86_min_trade_amount_account_override() {
+        let db = test_db().await;
+        let aid = "zzz_test_t86_mta_override";
+        mk_lev_account(&db, aid, 1_000_000.0, 0.0, 0.15).await;
+        sqlx::query("UPDATE paper_account SET min_trade_amount = 3000 WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+        let v: Option<f64> = sqlx::query_scalar(
+            "SELECT min_trade_amount::float8 FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(v, Some(3000.0), "账号列应覆盖 app_config 兜底");
+        sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    /// 任务86: min_trade_amount NULL → app_config 兜底(rebalance.min_trade_default)
+    #[tokio::test]
+    async fn t86_min_trade_amount_app_config_fallback() {
+        let db = test_db().await;
+        let aid = "zzz_test_t86_mta_fallback";
+        mk_lev_account(&db, aid, 1_000_000.0, 0.0, 0.15).await;
+        let acct_val: Option<Option<f64>> = sqlx::query_scalar(
+            "SELECT min_trade_amount::float8 FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+        let acct_val = acct_val.flatten();
+        assert!(acct_val.is_none(), "新账号列应 NULL(走兜底)");
+        let fallback: f64 = sqlx::query_scalar(
+            "SELECT config_value::float8 FROM app_config WHERE config_key = 'rebalance.min_trade_default'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(fallback, 5000.0, "app_config 兜底默认 5000");
+        sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    /// 任务86: etf_rebalance_band 策略列默认 0.25(延续原硬编码值,零行为变化)
+    #[tokio::test]
+    async fn t86_etf_rebalance_band_default() {
+        let db = test_db().await;
+        let v: Option<f64> = sqlx::query_scalar(
+            "SELECT etf_rebalance_band::float8 FROM strategy_config WHERE status = 'active' LIMIT 1",
+        )
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+        assert!(
+            v.unwrap_or(0.25) == 0.25,
+            "active 策略带宽默认 0.25(原硬编码值)"
+        );
+        // 列默认值验证(新插入行走 DEFAULT)
+        let col_default: String = sqlx::query_scalar(
+            "SELECT column_default FROM information_schema.columns \
+             WHERE table_name = 'strategy_config' AND column_name = 'etf_rebalance_band'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(
+            col_default.contains("0.25"),
+            "列 DEFAULT 0.25: {col_default}"
+        );
     }
 }

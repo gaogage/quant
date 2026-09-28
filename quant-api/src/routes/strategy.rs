@@ -190,6 +190,9 @@ pub struct MvoParams {
     pub etf_momentum_filter_enabled: bool,
     pub etf_momentum_window_days: i32,
     pub etf_momentum_downscale: f64,
+    // ETF 再平衡带宽(任务86 配置化,原硬编码 0.25):目标数量相对当前持仓偏离
+    // 小于此比例不调仓。策略级——跟踪误差/换手权衡,相对量纲跨账号一致。
+    pub etf_rebalance_band: f64,
     // detect_regime_exposure 深熊降仓阈值/暴露(P1-2 配置化)。
     pub deep_bear_threshold: f64,
     pub deep_bear_exposure: f64,
@@ -299,6 +302,7 @@ struct CompositeRow {
     etf_momentum_filter_enabled: Option<bool>,
     etf_momentum_window_days: Option<i32>,
     etf_momentum_downscale: Option<f64>,
+    etf_rebalance_band: Option<f64>,
     deep_bear_threshold: Option<f64>,
     deep_bear_exposure: Option<f64>,
     dynamic_target_cap: Option<f64>,
@@ -377,6 +381,7 @@ pub async fn load_resolved_strategy(
                 cash_park_symbol, cash_park_threshold,
                 stop_loss_portfolio_dd, stop_loss_stock_dd, regime_lookback_days,
                 etf_momentum_filter_enabled, etf_momentum_window_days, etf_momentum_downscale,
+                etf_rebalance_band,
                 deep_bear_threshold, deep_bear_exposure,
                 dynamic_target_cap, dynamic_target_floor, risk_free_rate, grid_step,
                 leverage_regime_threshold, slippage_pct, mvo_objective, allocation_mode, mu_estimation,
@@ -457,6 +462,7 @@ pub async fn load_resolved_strategy(
                 etf_momentum_filter_enabled: main.etf_momentum_filter_enabled.unwrap_or(false),
                 etf_momentum_window_days: main.etf_momentum_window_days.unwrap_or(20),
                 etf_momentum_downscale: main.etf_momentum_downscale.unwrap_or(0.4),
+                etf_rebalance_band: main.etf_rebalance_band.unwrap_or(0.25),
                 deep_bear_threshold: main.deep_bear_threshold.unwrap_or(-0.10),
                 deep_bear_exposure: main.deep_bear_exposure.unwrap_or(0.60),
                 dynamic_target_cap: main.dynamic_target_cap.unwrap_or(0.30),
@@ -601,6 +607,7 @@ mod tests {
                 etf_momentum_filter_enabled: false,
                 etf_momentum_window_days: 20,
                 etf_momentum_downscale: 0.4,
+                etf_rebalance_band: 0.25,
                 deep_bear_threshold: -0.10,
                 deep_bear_exposure: 0.60,
                 dynamic_target_cap: 0.30,
