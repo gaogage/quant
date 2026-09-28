@@ -31,7 +31,7 @@ mod trade_block;
 pub(crate) use alerts::{send_dingtalk_alert, send_dingtalk_alert_titled, send_quality_alert};
 pub use app_config::{app_config_f64, app_config_str, backtest_fee_base};
 pub(crate) use config_env::{
-    backfill_window_days, curve_sync_start_lookback_days, factor_version,
+    backfill_window_days, curve_sync_start_lookback_days, eod_ml_coverage_enabled, factor_version,
     morning_curve_rebuild_lookback_days, pit_materialize_window_days, v24_curve_sync_window_days,
     wfa_params_lookback_days,
 };

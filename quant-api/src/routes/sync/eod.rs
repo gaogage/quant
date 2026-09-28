@@ -49,6 +49,7 @@ pub async fn sync_eod_data(
     eod_sync_margin_detail(db, tushare, &date_str).await;
     eod_materialize_margin_factors(db).await;
     eod_sync_mfdc_factors(db, &date_str).await;
+    eod_sync_share_float(db, tushare, &date_str).await;
     eod_spawn_forecast_increment(db, &date_str).await;
     eod_spawn_repurchase_increment(db, &date_str).await;
     eod_sync_index_and_basics(db, tushare, &date_str).await;
@@ -147,7 +148,12 @@ pub(crate) async fn eod_sync_margin_detail(db: &PgPool, tushare: &TushareClient,
     // 区间: 昨日为主(T+1 已发布), 今日兜底(防未来改 T+0 发布)。
     {
         let empty_syms: Vec<String> = vec![];
-        let prev_str = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+        // P3 修复(2026-09-28): 窗口基于业务日期 date_str 而非墙上时钟——
+        // 周日 23:52 补跑 9/24 时 Local::now()-1=9/26, 窗口 [9/26,9/24] start>end
+        // 直接报错(0928 实证)。业务日期 parse 后回退一天, 补跑/正常跑都自洽。
+        let biz_date = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d")
+            .unwrap_or_else(|_| chrono::Local::now().date_naive());
+        let prev_str = (biz_date - chrono::Duration::days(1))
             .format("%Y%m%d")
             .to_string();
         match quant_data::sync::sync_margin_detail(
@@ -164,6 +170,31 @@ pub(crate) async fn eod_sync_margin_detail(db: &PgPool, tushare: &TushareClient,
             Ok(_) => {}
             Err(e) => warn!("[scheduler] EOD 两融明细同步失败 {}: {}", date_str, e),
         }
+    }
+}
+
+/// 解禁公告每日增量（P2 根因修复 2026-09-28：原只有 9/5 手动批、无日度调度，
+/// share_float 断供 27 天）。公告稀疏——每晚拉 [T-7, T] 一周窗口幂等覆盖。
+/// 数据版本 FK 前置: 复用既有 dv-float-eod-{date} 幂等注册。
+pub(crate) async fn eod_sync_share_float(db: &PgPool, tushare: &TushareClient, date_str: &str) {
+    let biz_date = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d")
+        .unwrap_or_else(|_| chrono::Local::now().date_naive());
+    let start_str = (biz_date - chrono::Duration::days(7))
+        .format("%Y%m%d")
+        .to_string();
+    let dv_id = format!("dv-float-eod-{}", date_str);
+    match quant_data::sync::sync_share_float(db, tushare, &[], &start_str, date_str, &dv_id).await {
+        Ok(n) if n > 0 => {
+            info!(
+                "[scheduler] EOD 解禁公告同步 {} 行 ({}~{})",
+                n, start_str, date_str
+            )
+        }
+        Ok(_) => {}
+        Err(e) => warn!(
+            "[scheduler] EOD 解禁公告同步失败 {}~{}: {}",
+            start_str, date_str, e
+        ),
     }
 }
 
@@ -246,63 +277,91 @@ pub(crate) async fn eod_sync_mfdc_factors(db: &PgPool, date_str: &str) {
         // 主 token 无该接口权限；失败仅告警不阻塞 EOD）
         if let Ok(tok) = std::env::var("TUSHARE_TOKEN_ALT") {
             if !tok.trim().is_empty() {
-                let body = serde_json::json!({
-                    "api_name": "moneyflow_dc", "token": tok.trim(),
-                    "params": {"trade_date": date_str},
-                    "fields": "ts_code,trade_date,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_sm_amount"
-                });
-                match reqwest::Client::new()
-                    .post("http://api.tushare.pro")
-                    .json(&body)
-                    .timeout(std::time::Duration::from_secs(60))
-                    .send()
-                    .await
-                {
-                    Ok(resp) => {
-                        if let Ok(parsed) = resp.json::<serde_json::Value>().await {
-                            if parsed["code"].as_i64() == Some(0) {
-                                if let Some(items) = parsed["data"]["items"].as_array() {
-                                    let mut n = 0usize;
-                                    for it in items {
-                                        let g = |k: &str| it.get(k).and_then(|v| v.as_f64());
-                                        let s = |k: &str| it.get(k).and_then(|v| v.as_str());
-                                        let (Some(tc), Some(td)) = (s("ts_code"), s("trade_date"))
-                                        else {
-                                            continue;
-                                        };
-                                        let r = sqlx::query(
-                                                "INSERT INTO market_stock_moneyflow_dc_raw
-                                                 (ts_code, trade_date, net_amount, net_amount_rate, buy_elg_amount, buy_elg_amount_rate,
-                                                  buy_lg_amount, buy_lg_amount_rate, buy_md_amount, buy_sm_amount, available_at)
-                                                 VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $2::date + 1)
-                                                 ON CONFLICT DO NOTHING",
-                                            )
-                                            .bind(tc).bind(td)
-                                            .bind(g("net_amount")).bind(g("net_amount_rate"))
-                                            .bind(g("buy_elg_amount")).bind(g("buy_elg_amount_rate"))
-                                            .bind(g("buy_lg_amount")).bind(g("buy_lg_amount_rate"))
-                                            .bind(g("buy_md_amount")).bind(g("buy_sm_amount"))
-                                            .execute(db).await;
-                                        if r.map(|x| x.rows_affected()).unwrap_or(0) > 0 {
-                                            n += 1;
+                // P2 根因修复(2026-09-28): DC 源 T+1 发布——原只拉 trade_date=当日, 每晚
+                // items 恒空→0 行静默(n=0 无日志), 断供 13 天无告警(0916 起实证)。
+                // 改 [T-1, T] 双窗口拉取(对齐 margin_detail 2026-09-16 同款修复先例),
+                // 昨日为主(T+1 已发布)、今日兜底(防未来改 T+0); n=0 打 warn 消静默;
+                // 单行 INSERT 错误计数不吞(n_err)。
+                let biz_date = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d")
+                    .unwrap_or_else(|_| chrono::Local::now().date_naive());
+                let prev_str = (biz_date - chrono::Duration::days(1))
+                    .format("%Y%m%d")
+                    .to_string();
+                for pull_date in [prev_str.as_str(), date_str] {
+                    let body = serde_json::json!({
+                        "api_name": "moneyflow_dc", "token": tok.trim(),
+                        "params": {"trade_date": pull_date},
+                        "fields": "ts_code,trade_date,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_sm_amount"
+                    });
+                    match reqwest::Client::new()
+                        .post("http://api.tushare.pro")
+                        .json(&body)
+                        .timeout(std::time::Duration::from_secs(60))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => {
+                            if let Ok(parsed) = resp.json::<serde_json::Value>().await {
+                                if parsed["code"].as_i64() == Some(0) {
+                                    if let Some(items) = parsed["data"]["items"].as_array() {
+                                        let mut n = 0usize;
+                                        let mut n_err = 0usize;
+                                        for it in items {
+                                            let g = |k: &str| it.get(k).and_then(|v| v.as_f64());
+                                            let s = |k: &str| it.get(k).and_then(|v| v.as_str());
+                                            let (Some(tc), Some(td)) =
+                                                (s("ts_code"), s("trade_date"))
+                                            else {
+                                                continue;
+                                            };
+                                            let r = sqlx::query(
+                                            "INSERT INTO market_stock_moneyflow_dc_raw
+                                             (ts_code, trade_date, net_amount, net_amount_rate, buy_elg_amount, buy_elg_amount_rate,
+                                              buy_lg_amount, buy_lg_amount_rate, buy_md_amount, buy_sm_amount, available_at)
+                                             VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $2::date + 1)
+                                             ON CONFLICT DO NOTHING",
+                                        )
+                                        .bind(tc).bind(td)
+                                        .bind(g("net_amount")).bind(g("net_amount_rate"))
+                                        .bind(g("buy_elg_amount")).bind(g("buy_elg_amount_rate"))
+                                        .bind(g("buy_lg_amount")).bind(g("buy_lg_amount_rate"))
+                                        .bind(g("buy_md_amount")).bind(g("buy_sm_amount"))
+                                        .execute(db).await;
+                                            match r {
+                                                Ok(x) if x.rows_affected() > 0 => n += 1,
+                                                Ok(_) => {}
+                                                Err(e) => {
+                                                    n_err += 1;
+                                                    if n_err == 1 {
+                                                        warn!("[scheduler] EOD 东财资金流 INSERT 失败(首条): {}", e);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if n > 0 {
+                                            info!(
+                                                "[scheduler] EOD 东财资金流同步 {} 行 ({})",
+                                                n, pull_date
+                                            );
+                                        } else if n_err == 0 {
+                                            warn!(
+                                        "[scheduler] EOD 东财资金流 0 行(数据未发布或窗口错, {})",
+                                        pull_date
+                                    );
                                         }
                                     }
-                                    if n > 0 {
-                                        info!(
-                                            "[scheduler] EOD 东财资金流同步 {} 行 ({})",
-                                            n, date_str
-                                        );
-                                    }
+                                } else {
+                                    warn!(
+                                        "[scheduler] EOD 东财资金流拉取失败 code={:?} ({})",
+                                        parsed["code"], pull_date
+                                    );
                                 }
-                            } else {
-                                warn!(
-                                    "[scheduler] EOD 东财资金流拉取失败 code={:?}",
-                                    parsed["code"]
-                                );
                             }
                         }
+                        Err(e) => {
+                            warn!("[scheduler] EOD 东财资金流请求失败 ({}): {}", pull_date, e)
+                        }
                     }
-                    Err(e) => warn!("[scheduler] EOD 东财资金流请求失败: {}", e),
                 }
             }
         }
@@ -754,6 +813,12 @@ pub(crate) async fn eod_ml_and_quality(
     sc: Option<StrategyConfig>,
 ) {
     // ── ML预测数据检查+补齐 ──
+    // P2(2026-09-28 用户裁决停用): ML 预测链停摆 105 天(6/15 起), 每晚补齐失败
+    // 双告警噪音。env EOD_ML_COVERAGE=1 可重开(默认禁用)。
+    if !crate::routes::shared::eod_ml_coverage_enabled() {
+        info!("[scheduler] ML 预测覆盖检查已停用(EOD_ML_COVERAGE 未开启, 2026-09-28 用户裁决)");
+        return;
+    }
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     let pred_ok = match sc.as_ref() {
         Some(sc) => ensure_prediction_coverage(db, tushare, date, sc).await,

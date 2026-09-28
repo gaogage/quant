@@ -63,3 +63,10 @@ pub(crate) fn backfill_window_days() -> chrono::Duration {
             .unwrap_or(14),
     )
 }
+
+/// EOD ML 预测覆盖检查开关（2026-09-28 用户裁决停用消噪音；env 置 1 重开）。
+pub(crate) fn eod_ml_coverage_enabled() -> bool {
+    std::env::var("EOD_ML_COVERAGE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}

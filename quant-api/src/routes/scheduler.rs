@@ -1714,13 +1714,19 @@ async fn run_tick(
                     warn!("[scheduler] 日终数据同步失败: {}", e);
                 }
             } else {
-                // 补跑日期 = <=今天 的最近交易日（凌晨唤醒时 today 已跨日，直接用
-                // today 会错跑新日期；非交易日唤醒则补最近交易日的 EOD，幂等重算）
-                let missed: Option<(NaiveDate,)> = sqlx::query_as(
+                // 补跑日期 = 最近交易日。按时段区分比较符（2026-09-28 P1 修复）：
+                // - 凌晨(0:00-7:00)唤醒: today 是交易日但尚未收盘——必须 < today,
+                //   否则周一 00:00 会把今天选为补跑日、跑未来日的 EOD,盯市门禁
+                //   检查"当日"NAV 必然缺失→每周一凌晨误报一次(0928 实证);
+                // - 晚间(≥21:40)唤醒: 当天已收盘,<= today 正确(补当天错过的 EOD)。
+                //   非交易日唤醒两分支都落到最近已收盘交易日,幂等重算无害。
+                let cmp = if hour < 7 { "<" } else { "<=" };
+                let missed: Option<(NaiveDate,)> = sqlx::query_as(&format!(
                     "SELECT trade_date FROM market_trade_calendar
-                     WHERE exchange = 'SSE' AND is_open = true AND trade_date <= $1
+                     WHERE exchange = 'SSE' AND is_open = true AND trade_date {} $1
                      ORDER BY trade_date DESC LIMIT 1",
-                )
+                    cmp
+                ))
                 .bind(today)
                 .fetch_optional(db)
                 .await
@@ -3945,6 +3951,16 @@ mod sixth_batch {
         .ok()
         .flatten();
         let date = mfv_max.expect("v24 combo 应有物化数据");
+        // 时间脆弱性修复(2026-09-28): 早间物化可能写入当日幻影 trade_date(如周一 9:00
+        // 物化 9/28), 而当日日线要到当晚 EOD 才同步——threshold=date-2 会把日线判不新鲜,
+        // 周一白天跑必失败。date 收敛到 min(mfv, 日线最新), 与时间无关。
+        let daily_max: Option<NaiveDate> =
+            sqlx::query_scalar("SELECT MAX(trade_date) FROM market_stock_daily_bar")
+                .fetch_one(&db)
+                .await
+                .ok()
+                .flatten();
+        let date = daily_max.map_or(date, |d| date.min(d));
         assert!(
             verify_training_dependencies(&db, date, "full_pit_icir_indneutral_val_v1").await,
             "日线/复权/因子三依赖均新鲜时应通过(date={date})"
