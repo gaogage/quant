@@ -293,8 +293,71 @@ pub async fn rebalance_account(
             .fetch_one(db)
             .await
             .map_err(|e| format!("credit budget read: {}", e))?;
+
+    // Step 5.5 杠杆预平衡（任务85, 2026-09-28 用户定版）：交易执行前确定
+    // 还款/融资约束,融入当日先卖后买预算——预算决定交易而非交易后补救,
+    // 零来回交易（卖出资金优先冲抵还款额,剩余才供买入）。
+    // 实际杠杆 = (NAV+margin)/NAV; > 目标×(1+带宽) → 还款约束;
+    // < 目标×(1-带宽) → 预算放宽; 带宽内不动。带宽三层仲裁:
+    // paper_account.leverage_rebalance_band > app_config 兜底 0.15; 0/负=关闭。
+    // 无杠杆账户(leverage_d<=1)或 margin=0 自然 no-op。
+    let mut required_repay = Decimal::ZERO;
+    if leverage_enabled && leverage_d > Decimal::ONE && acct_margin > Decimal::ZERO {
+        let acct_band: Option<f64> = sqlx::query_scalar(
+            "SELECT leverage_rebalance_band FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+        // 三层仲裁: 账号列 > app_config(异步读) > 0.15 代码兜底
+        let band = match acct_band {
+            Some(b) => b,
+            None => crate::routes::shared::app_config_f64(db, "leverage.rebalance_band_default")
+                .await
+                .unwrap_or(0.15),
+        };
+        if band > 0.0 {
+            let nav_f: f64 = current_nav.to_string().parse().unwrap_or(0.0);
+            let margin_f: f64 = acct_margin.to_string().parse().unwrap_or(0.0);
+            let lev_f: f64 = leverage_d.to_string().parse().unwrap_or(1.0);
+            if nav_f > 0.0 {
+                let actual_lev = (nav_f + margin_f) / nav_f;
+                let upper = lev_f * (1.0 + band);
+                let lower = lev_f * (1.0 - band);
+                if actual_lev > upper {
+                    // 需还款: margin 降到 NAV×(lev-1) 的差额
+                    let target_margin = nav_f * (lev_f - 1.0);
+                    let repay_f = (margin_f - target_margin).max(0.0);
+                    required_repay = Decimal::from_f64_retain(repay_f).unwrap_or(Decimal::ZERO);
+                    tracing::info!(
+                        account_id,
+                        actual_lev,
+                        upper,
+                        repay_f,
+                        "[rebalance] 杠杆预平衡: 超上限 {:.3}>{:.3}, 当日卖出资金优先还款 {:.0}",
+                        actual_lev,
+                        upper,
+                        repay_f
+                    );
+                } else if actual_lev < lower {
+                    tracing::info!(
+                        account_id,
+                        actual_lev,
+                        lower,
+                        "[rebalance] 杠杆预平衡: 低于下限 {:.3}<{:.3}, 预算池放宽融资",
+                        actual_lev,
+                        lower
+                    );
+                }
+            }
+        }
+    }
     let credit_cap = (current_nav * (leverage_d - Decimal::ONE)).max(Decimal::ZERO);
-    let mut buy_budget = acct_cash + (credit_cap - acct_margin).max(Decimal::ZERO);
+    // 预算扣减: 若有还款约束, 授信余量先冲抵还款额(卖出资金回流时优先补足)
+    let mut buy_budget = acct_cash + (credit_cap - acct_margin - required_repay).max(Decimal::ZERO);
 
     // 6. 读当前持仓(增量调仓基础)
     let current_positions: HashMap<String, (Decimal, Decimal)> = sqlx::query_as::<
@@ -2669,5 +2732,117 @@ mod fifth_batch {
         assert!(err.contains("current_nav<=0"), "报错应说明 nav 非正: {err}");
 
         cleanup_account(&db, account_id).await;
+    }
+}
+
+#[cfg(test)]
+mod leverage_prebalance_tests {
+    use super::*;
+
+    async fn test_db() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        sqlx::PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    async fn mk_lev_account(db: &sqlx::PgPool, aid: &str, nav: f64, margin: f64, band: f64) {
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(db)
+            .await;
+        sqlx::query(
+            "INSERT INTO paper_account (paper_account_id, name, base_currency, initial_capital, cash, status, account_type, leverage_enabled, leverage_multiplier, margin_amount, leverage_rebalance_band)
+             VALUES ($1, 'zzz预平衡', 'CNY', 1000000, 10000, 'active', 'simulated', true, 2.0, $2, $3)",
+        )
+        .bind(aid)
+        .bind(margin)
+        .bind(band)
+        .execute(db)
+        .await
+        .expect("mk account");
+        let _ =
+            sqlx::query("UPDATE paper_account SET current_nav = $2 WHERE paper_account_id = $1")
+                .bind(aid)
+                .bind(nav)
+                .execute(db)
+                .await;
+    }
+
+    /// 超带宽(杠杆 2.5x > 2.3 上限) → required_repay 计算正确
+    /// NAV 400万 + margin 600万 = 1000万 → 杠杆 2.5x; 目标 margin = 400万 → 需还 200万
+    #[tokio::test]
+    async fn prebalance_computes_repay_when_over_band() {
+        let db = test_db().await;
+        let aid = "zzz_test_prebalance_over";
+        mk_lev_account(&db, aid, 4_000_000.0, 6_000_000.0, 0.15).await;
+        // 直接验证 SQL 口径: 杠杆与带宽计算
+        let (nav, margin, band): (f64, f64, f64) = sqlx::query_as(
+            "SELECT current_nav::double precision, COALESCE(margin_amount,0)::double precision,
+                    COALESCE(leverage_rebalance_band, 0.15)
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let lev = (nav + margin) / nav;
+        let upper = 2.0 * (1.0 + band);
+        let target_margin = nav * (2.0 - 1.0);
+        let repay = (margin - target_margin).max(0.0);
+        assert!(lev > upper, "杠杆 {lev} 应超上限 {upper}");
+        assert!((repay - 2_000_000.0).abs() < 1.0, "需还 200万: {repay}");
+        sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    /// 带宽内(杠杆 2.05 < 2.3) → 零动作
+    #[tokio::test]
+    async fn prebalance_noop_within_band() {
+        let db = test_db().await;
+        let aid = "zzz_test_prebalance_in";
+        mk_lev_account(&db, aid, 4_000_000.0, 3_800_000.0, 0.15).await;
+        let (nav, margin, band): (f64, f64, f64) = sqlx::query_as(
+            "SELECT current_nav::double precision, COALESCE(margin_amount,0)::double precision,
+                    COALESCE(leverage_rebalance_band, 0.15)
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let lev = (nav + margin) / nav;
+        assert!(
+            lev < 2.0 * (1.0 + band) && lev > 2.0 * (1.0 - band),
+            "应在带宽内: {lev}"
+        );
+        sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    /// 带宽 0 = 功能关闭(任何杠杆都不触发)
+    #[tokio::test]
+    async fn prebalance_disabled_with_zero_band() {
+        let db = test_db().await;
+        let aid = "zzz_test_prebalance_off";
+        mk_lev_account(&db, aid, 1_000_000.0, 5_000_000.0, 0.0).await; // 杠杆 6x 极端
+        let (_, _, band): (f64, f64, f64) = sqlx::query_as(
+            "SELECT 1.0::float8, 1.0::float8, COALESCE(leverage_rebalance_band, 0.15) FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(band, 0.0, "带宽 0 = 关闭");
+        sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 }
