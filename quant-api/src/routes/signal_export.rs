@@ -25,7 +25,7 @@ use sha1::{Digest, Sha1};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 /// 信号最小权重(占 NAV): 低于此值的 A股目标不进信号。
 /// 执行端一手价格上界按 ~5000 元覆盖(0.1% × 500 万 NAV), 消除不足一手的
@@ -118,7 +118,7 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
     // 2026-09-14 修复: 用最近交易日而非自然日——周末/节假日补跑时(容器重启/延迟),
     // now() 是非交易日, run-factor 当日截面为空 → A股 sleeve 缺失的残缺信号
     // (09-14 事故: 周六 07:01 补跑生成仅 7 ETF 的降级信号, 若执行将清空 A 股持仓)。
-    let date = latest_trading_day(db).await?;
+    let mut date = latest_trading_day(db).await?;
 
     // 0. 执行通道配置(DB: ptrade_channel_config——生产/仿真各自目录, 未来页面化管理)
     let channel = load_channel(db, account_id).await?;
@@ -148,6 +148,38 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
     )
     .await
     .map_err(|e| format!("数据门禁未通过: {}", e))?;
+
+    // 2a. 凌晨补跑日期回退(2026-09-29 00:53 实证): 开盘前 latest_trading_day
+    // 返回今天(交易日), 但今日截面必未物化(EOD 21:00 后才有) → 补跑昨晚失败
+    // 的信号被"截面空"拒绝, 无从补发。截面导向回退: 当日 combo 截面不存在时
+    // 回退上一交易日(仅一次)——凌晨补跑=昨晚截面 ✓ / 正常 23:00 当日截面存在
+    // 不回退 ✓ / 周末(最近交易日截面天然存在)不受影响 ✓。
+    let has截面: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM multi_factor_value WHERE combo_name = $1 AND trade_date = $2)",
+    )
+    .bind(&sc.combo_name)
+    .bind(date)
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("combo 截面探测: {}", e))?;
+    if !has截面 {
+        let prev: Option<chrono::NaiveDate> = sqlx::query_scalar(
+            "SELECT max(trade_date) FROM market_trade_calendar
+             WHERE exchange = 'SSE' AND is_open = true AND trade_date < $1",
+        )
+        .bind(date)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| format!("上一交易日查询: {}", e))?
+        .flatten();
+        if let Some(p) = prev {
+            info!(
+                "[PTrade信号] 当日 {} 截面未物化(EOD 未跑的凌晨时段), 回退上一交易日 {} 补发",
+                date, p
+            );
+            date = p;
+        }
+    }
 
     // 2b. 物化新鲜度门禁(任务71, 2026-09-21): T 日 combo 截面必须由今晚
     // (回填完成后)的物化产生。夜间链 fire-and-forget 时期物化吃 T-1 因子,
@@ -607,11 +639,22 @@ async fn next_trading_day(
 
 /// 最近已到交易日(<= today): 信号截面与因子均以此日为准, 周末/节假日补跑不退化。
 async fn latest_trading_day(db: &PgPool) -> Result<chrono::NaiveDate, String> {
+    // 2026-09-29 用户定版常识: 当日开盘前(<09:30)或当日为非交易日,
+    // "最近交易日"= 上一交易日——今天的数据截面必未产生, 今天尚不构成
+    // "已完成的交易日"。09:30 为沪深交易所开盘时刻(市场制度常量, 同
+    // 15:00 收盘/100 股一手, 非业务可调参数)。
+    let now = chrono::Local::now();
+    let open_boundary = now.date_naive().and_hms_opt(9, 30, 0).expect("valid 09:30");
+    let as_of = if now.naive_local() < open_boundary {
+        now.date_naive() - chrono::Duration::days(1)
+    } else {
+        now.date_naive()
+    };
     let row: Option<(chrono::NaiveDate,)> = sqlx::query_as(
         "SELECT trade_date FROM market_trade_calendar
          WHERE is_open = true AND trade_date <= $1 ORDER BY trade_date DESC LIMIT 1",
     )
-    .bind(chrono::Local::now().date_naive())
+    .bind(as_of)
     .fetch_optional(db)
     .await
     .map_err(|e| format!("calendar: {}", e))?;
