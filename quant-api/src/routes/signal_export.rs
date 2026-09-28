@@ -247,7 +247,10 @@ async fn export_signal_for_account(db: &PgPool, account_id: &str) -> Result<Stri
         // 夜链产物校验不通过则落入原口径（由其给出具体拒绝理由）
     }
     if !skip_freshness_gate {
-        let day_start_utc = today_local
+        // 2026-09-29 凌晨补跑修正: 回填任务窗口基于截面日 date 而非自然日
+        // today_local——凌晨(date=上一交易日)查"今天"的回填任务必为空而被拒。
+        // 截面新鲜度的对照物是截面日当晚的回填链, 与导出时刻的日历日无关。
+        let day_start_utc = date
             .and_hms_opt(0, 0, 0)
             .and_then(|nd| {
                 use chrono::TimeZone;
