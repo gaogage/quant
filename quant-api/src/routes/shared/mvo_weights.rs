@@ -709,7 +709,7 @@ mod etf_momentum_filter_tests {
     async fn test_db() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     fn sc_with(enabled: bool) -> StrategyConfig {

@@ -2078,7 +2078,7 @@ mod fifth_batch {
     async fn test_db() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     /// 精确清理 zzz 账户全部关联行（含强平/成交流水与快照）。
@@ -2928,7 +2928,7 @@ mod leverage_prebalance_tests {
     async fn test_db() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     async fn mk_lev_account(db: &sqlx::PgPool, aid: &str, nav: f64, margin: f64, band: f64) {

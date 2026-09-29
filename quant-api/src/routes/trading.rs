@@ -603,7 +603,7 @@ mod db_second_batch {
     async fn test_db() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     /// 造 zzz 模拟账户：cash=100000 / margin=0 / reserve=5000，先清残留保证幂等。
@@ -1042,7 +1042,7 @@ mod margin_interest_tests {
     async fn test_db() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     /// 计提语义: margin 100万 × 8.35% / 360 ≈ 2319.44 从 cash 扣, 本金不动, 幂等

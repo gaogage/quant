@@ -4791,7 +4791,7 @@ mod fourth_batch {
         dotenv::dotenv().ok();
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        let db = quant_common::test_db::connect_test_pool(&url).await;
         crate::AppState {
             start_time: Utc::now(),
             db,
@@ -5816,7 +5816,7 @@ mod tenth_batch {
         dotenv::dotenv().ok();
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     /// 完整 AppState（审计 build 函数需要；同 fourth_batch::test_app_state）。
@@ -5824,7 +5824,7 @@ mod tenth_batch {
         dotenv::dotenv().ok();
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        let db = quant_common::test_db::connect_test_pool(&url).await;
         crate::AppState {
             start_time: Utc::now(),
             db,

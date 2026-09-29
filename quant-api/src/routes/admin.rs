@@ -1634,7 +1634,7 @@ mod tests {
     async fn test_db() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     // ── 纯函数 ──
@@ -1810,7 +1810,7 @@ mod db_tests {
         let _ = dotenv::dotenv();
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        let db = quant_common::test_db::connect_test_pool(&url).await;
         let tushare = quant_data::tushare::client::TushareClient::from_env()
             .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
         Arc::new(AppState {

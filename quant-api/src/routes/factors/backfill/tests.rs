@@ -204,7 +204,7 @@ mod second_batch {
     async fn test_db() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     /// 构造直调用 AppState（拒绝分支不触 Tushare/库，客户端仅初始化不发请求）。

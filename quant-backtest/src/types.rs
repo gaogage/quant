@@ -304,7 +304,7 @@ mod tests {
     async fn try_from_raw_accepts_registered_rejects_unknown_dv_id() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        let db = sqlx::PgPool::connect(&url).await.expect("DB 连接成功");
+        let db = quant_common::test_db::connect_test_pool(&url).await;
 
         // 取一条真实存在的 data_version_id
         let real_dv_id: String = sqlx::query_scalar(

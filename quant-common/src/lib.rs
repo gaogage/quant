@@ -4,6 +4,7 @@ use thiserror::Error;
 pub mod config_env;
 pub mod identifiers;
 pub mod mvo;
+pub mod test_db;
 pub mod time_utils;
 pub mod trading_rules;
 

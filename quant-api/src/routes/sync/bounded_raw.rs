@@ -586,7 +586,7 @@ mod sixth_batch {
         dotenv::dotenv().ok();
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        let db = quant_common::test_db::connect_test_pool(&url).await;
         crate::AppState {
             start_time: chrono::Utc::now(),
             db,

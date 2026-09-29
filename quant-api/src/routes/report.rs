@@ -949,7 +949,7 @@ mod daily_report_tests {
     async fn test_db() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     /// 动态找一个「active 账户 + 有成交」的日期（数据只增不减，断言稳健）。
@@ -1076,7 +1076,7 @@ mod fifth_batch {
     async fn test_db() -> sqlx::PgPool {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        sqlx::PgPool::connect(&url).await.expect("test db connect")
+        quant_common::test_db::connect_test_pool(&url).await
     }
 
     async fn cleanup_account(db: &sqlx::PgPool, account_id: &str) {
