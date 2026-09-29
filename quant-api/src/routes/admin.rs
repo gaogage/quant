@@ -1789,3 +1789,931 @@ mod tests {
         );
     }
 }
+
+// ── 连库测试（覆盖率补测第三批）────────────────────────────
+//
+// 模式沿用 accounts.rs db_tests 先例：test_state() 连真实本机 PG，handler 直调
+// 跳过 axum HTTP 层；zzz_test_ 前缀独占键自造数据，测试尾精确键 DELETE 清理。
+// 覆盖原则：
+// - 列表/触发/参数校验/权限拒绝路径直测（管理端点主体）；
+// - repair_sync 的真实同步分支（tushare 外呼 + localhost 回测触发）与
+//   trigger_performance_report / trigger_trade_detail_notification / rebuild_full_universe /
+//   manual_rebalance 的成功路径会产生真实外发或真实写库，只经 403 组合测试覆盖
+//   require_admin 分支，不让测试真实外发。
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use serde_json::Value;
+
+    async fn test_state() -> Arc<AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    /// handler 直调后解包响应体为 serde_json::Value（accounts.rs db_tests 先例）。
+    async fn resp_json(resp: impl IntoResponse) -> Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    fn ctx(role: &str) -> UserContext {
+        UserContext {
+            user_id: "zzz_test_admin_ctx".to_string(),
+            username: "zzz_test".to_string(),
+            role: role.to_string(),
+        }
+    }
+
+    /// 清残留并插入 zzz 用户（role=user/status=active，hash 用固定占位值供变更断言）。
+    async fn mk_user(db: &sqlx::PgPool, uid: &str, username: &str) {
+        let _ = sqlx::query("DELETE FROM quant_user WHERE user_id = $1")
+            .bind(uid)
+            .execute(db)
+            .await;
+        sqlx::query(
+            "INSERT INTO quant_user
+               (user_id, username, password_hash, display_name, email, role, status, created_by)
+             VALUES ($1, $2, 'zzz_test_old_hash', 'zzz测试显示名', 'zzz@test.local', 'user', 'active', $3)",
+        )
+        .bind(uid)
+        .bind(username)
+        .bind("zzz_test_admin_ctx")
+        .execute(db)
+        .await
+        .expect("insert zzz quant_user");
+    }
+
+    async fn cleanup_user(db: &sqlx::PgPool, uid: &str) {
+        let _ = sqlx::query("DELETE FROM quant_user WHERE user_id = $1")
+            .bind(uid)
+            .execute(db)
+            .await;
+    }
+
+    /// 清残留并插入 zzz 定时任务（run_count=5，next_run_at 默认 NULL）。
+    async fn mk_task(db: &sqlx::PgPool, name: &str) {
+        let _ = sqlx::query("DELETE FROM scheduled_task_config WHERE task_name = $1")
+            .bind(name)
+            .execute(db)
+            .await;
+        sqlx::query(
+            // params 是 jsonb 字面量，字符串内的双引号属 JSON 语法必需
+            "INSERT INTO scheduled_task_config (task_name, task_type, schedule_cron, params, run_count)
+             VALUES ($1, 'zzz_test_type', '0 0 3 * * ?', '{\"zzz\":\"a\"}'::jsonb, 5)",
+        )
+        .bind(name)
+        .execute(db)
+        .await
+        .expect("insert zzz scheduled_task_config");
+    }
+
+    async fn cleanup_task(db: &sqlx::PgPool, name: &str) {
+        let _ = sqlx::query("DELETE FROM scheduled_task_config WHERE task_name = $1")
+            .bind(name)
+            .execute(db)
+            .await;
+    }
+
+    // ── require_admin：全部 16 个 pub handler 的权限拒绝分支 ──
+
+    #[tokio::test]
+    async fn admin_endpoints_reject_non_admin_role() {
+        let state = test_state().await;
+        let user = ctx("user");
+        let cases: Vec<Value> = vec![
+            resp_json(list_users(State(state.clone()), user.clone()).await).await,
+            resp_json(
+                create_user(
+                    State(state.clone()),
+                    user.clone(),
+                    Json(CreateUserRequest {
+                        username: "zzz_test_x".into(),
+                        password: "pass".into(),
+                        display_name: None,
+                        email: None,
+                        role: None,
+                    }),
+                )
+                .await,
+            )
+            .await,
+            resp_json(
+                update_user(
+                    State(state.clone()),
+                    user.clone(),
+                    Path("zzz_test_x".to_string()),
+                    Json(UpdateUserRequest {
+                        display_name: None,
+                        email: None,
+                        role: None,
+                        status: None,
+                    }),
+                )
+                .await,
+            )
+            .await,
+            resp_json(
+                reset_user_password(
+                    State(state.clone()),
+                    user.clone(),
+                    Path("zzz_test_x".to_string()),
+                    Json(ResetPasswordRequest {
+                        new_password: "abcd1234".into(),
+                    }),
+                )
+                .await,
+            )
+            .await,
+            resp_json(
+                delete_user(
+                    State(state.clone()),
+                    user.clone(),
+                    Path("zzz_test_x".to_string()),
+                )
+                .await,
+            )
+            .await,
+            resp_json(list_tasks(State(state.clone()), user.clone()).await).await,
+            resp_json(
+                update_task(
+                    State(state.clone()),
+                    user.clone(),
+                    Path("zzz_test_x".to_string()),
+                    Json(UpdateTaskRequest {
+                        enabled: None,
+                        schedule_cron: None,
+                        params: None,
+                    }),
+                )
+                .await,
+            )
+            .await,
+            resp_json(
+                run_task(
+                    State(state.clone()),
+                    user.clone(),
+                    Path("zzz_test_no_such_task".to_string()),
+                )
+                .await,
+            )
+            .await,
+            resp_json(
+                trigger_performance_report(
+                    State(state.clone()),
+                    user.clone(),
+                    Json(PerformanceReportRequest { date: None }),
+                )
+                .await,
+            )
+            .await,
+            resp_json(
+                trigger_trade_detail_notification(
+                    State(state.clone()),
+                    user.clone(),
+                    Json(PerformanceReportRequest { date: None }),
+                )
+                .await,
+            )
+            .await,
+            resp_json(sync_status(State(state.clone()), user.clone()).await).await,
+            resp_json(check_task_deps(State(state.clone()), user.clone()).await).await,
+            resp_json(
+                repair_sync(
+                    State(state.clone()),
+                    user.clone(),
+                    Json(RepairRequest {
+                        name: "CSI300".into(),
+                        strategy_id: None,
+                        start_date: None,
+                        end_date: None,
+                    }),
+                )
+                .await,
+            )
+            .await,
+            resp_json(
+                rebuild_full_universe(
+                    State(state.clone()),
+                    user.clone(),
+                    Json(RebuildFullUniverseRequest {
+                        start_date: None,
+                        end_date: None,
+                        cleanup_old: false,
+                    }),
+                )
+                .await,
+            )
+            .await,
+            resp_json(
+                manual_rebalance(
+                    State(state.clone()),
+                    user.clone(),
+                    Json(ManualRebalanceRequest {
+                        date: None,
+                        skip_data_gate: false,
+                    }),
+                )
+                .await,
+            )
+            .await,
+            resp_json(factor_health(State(state.clone()), user.clone()).await).await,
+        ];
+        for (i, body) in cases.iter().enumerate() {
+            assert_eq!(body["code"], 403, "第 {i} 个端点应 403: {body}");
+            assert!(
+                body["message"].as_str().unwrap_or("").contains("Admin"),
+                "{body}"
+            );
+        }
+    }
+
+    // ── User Management ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_users_admin_includes_zzz_row() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let uid = "zzz_test_admin_u_list";
+        mk_user(&db, uid, "zzz_test_admin_un_list").await;
+
+        let body = resp_json(list_users(State(state.clone()), ctx("admin")).await).await;
+        assert_eq!(body["code"], 0, "{body}");
+        let row = body["data"]
+            .as_array()
+            .expect("data 为数组")
+            .iter()
+            .find(|r| r["user_id"] == uid)
+            .unwrap_or_else(|| panic!("列表中未找到 {uid}: {body}"));
+        assert_eq!(row["username"], "zzz_test_admin_un_list");
+        assert_eq!(row["display_name"], "zzz测试显示名");
+        assert_eq!(row["email"], "zzz@test.local");
+        assert_eq!(row["role"], "user");
+        assert_eq!(row["status"], "active");
+
+        cleanup_user(&db, uid).await;
+    }
+
+    #[tokio::test]
+    async fn create_user_success_persists_row() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let username = "zzz_test_admin_un_create";
+        let _ = sqlx::query("DELETE FROM quant_user WHERE username = $1")
+            .bind(username)
+            .execute(&db)
+            .await;
+
+        let body = resp_json(
+            create_user(
+                State(state.clone()),
+                ctx("admin"),
+                Json(CreateUserRequest {
+                    username: username.into(),
+                    password: "zzz_pass_123".into(),
+                    display_name: Some("zzz新建用户".into()),
+                    email: Some("zzz_create@test.local".into()),
+                    role: Some("user".into()),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+        let uid = body["data"]["user_id"]
+            .as_str()
+            .expect("返回 user_id")
+            .to_string();
+        assert!(!uid.is_empty());
+
+        let row: (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        ) = sqlx::query_as(
+            "SELECT username, password_hash, display_name, email, role, status
+             FROM quant_user WHERE user_id = $1",
+        )
+        .bind(&uid)
+        .fetch_one(&db)
+        .await
+        .expect("zzz 用户应已落库");
+        assert_eq!(row.0, username);
+        assert!(row.1.starts_with("$2"), "bcrypt hash: {}", row.1);
+        assert_eq!(row.2.as_deref(), Some("zzz新建用户"));
+        assert_eq!(row.3.as_deref(), Some("zzz_create@test.local"));
+        assert_eq!(row.4, "user");
+        assert_eq!(row.5, "active");
+
+        cleanup_user(&db, &uid).await;
+    }
+
+    #[tokio::test]
+    async fn create_user_duplicate_username_fails() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let username = "zzz_test_admin_un_dup";
+        let _ = sqlx::query("DELETE FROM quant_user WHERE username = $1")
+            .bind(username)
+            .execute(&db)
+            .await;
+        let req = CreateUserRequest {
+            username: username.into(),
+            password: "zzz_pass_123".into(),
+            display_name: None,
+            email: None,
+            role: None,
+        };
+        let first =
+            resp_json(create_user(State(state.clone()), ctx("admin"), Json(req)).await).await;
+        assert_eq!(first["code"], 0, "{first}");
+        let second = resp_json(
+            create_user(
+                State(state.clone()),
+                ctx("admin"),
+                Json(CreateUserRequest {
+                    username: username.into(),
+                    password: "zzz_pass_456".into(),
+                    display_name: None,
+                    email: None,
+                    role: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(second["code"], 1, "{second}");
+        assert!(
+            second["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("创建失败"),
+            "{second}"
+        );
+
+        let _ = sqlx::query("DELETE FROM quant_user WHERE username = $1")
+            .bind(username)
+            .execute(&db)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn update_user_applies_partial_updates() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let uid = "zzz_test_admin_u_upd";
+        mk_user(&db, uid, "zzz_test_admin_un_upd").await;
+
+        let body = resp_json(
+            update_user(
+                State(state.clone()),
+                ctx("admin"),
+                Path(uid.to_string()),
+                Json(UpdateUserRequest {
+                    display_name: Some("zzz新显示名".into()),
+                    // email 传 None → COALESCE 保留原值
+                    email: None,
+                    role: Some("admin".into()),
+                    status: Some("inactive".into()),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+
+        let row: (Option<String>, Option<String>, String, String, Option<String>) = sqlx::query_as(
+            "SELECT display_name, email, role, status, updated_by FROM quant_user WHERE user_id = $1",
+        )
+        .bind(uid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("zzz新显示名"));
+        assert_eq!(
+            row.1.as_deref(),
+            Some("zzz@test.local"),
+            "None 字段应保留原值"
+        );
+        assert_eq!(row.2, "admin");
+        assert_eq!(row.3, "inactive");
+        assert_eq!(row.4.as_deref(), Some("zzz_test_admin_ctx"));
+
+        cleanup_user(&db, uid).await;
+    }
+
+    #[tokio::test]
+    async fn update_user_unknown_id_is_idempotent_code0() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let body = resp_json(
+            update_user(
+                State(state.clone()),
+                ctx("admin"),
+                Path("zzz_test_no_such_user".to_string()),
+                Json(UpdateUserRequest {
+                    display_name: Some("zzz幽灵".into()),
+                    email: None,
+                    role: None,
+                    status: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM quant_user WHERE user_id = 'zzz_test_no_such_user'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(n, 0, "未知 user_id 不应产生新行");
+    }
+
+    #[tokio::test]
+    async fn reset_user_password_validates_input() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let uid = "zzz_test_admin_u_rst";
+        mk_user(&db, uid, "zzz_test_admin_un_rst").await;
+
+        // 短密码拒绝且不动 DB
+        let short = resp_json(
+            reset_user_password(
+                State(state.clone()),
+                ctx("admin"),
+                Path(uid.to_string()),
+                Json(ResetPasswordRequest {
+                    new_password: "abc".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(short["code"], 1, "{short}");
+        assert!(
+            short["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("密码至少4位"),
+            "{short}"
+        );
+        let hash: String =
+            sqlx::query_scalar("SELECT password_hash FROM quant_user WHERE user_id = $1")
+                .bind(uid)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(hash, "zzz_test_old_hash", "短密码分支不应写库");
+
+        // 未知用户
+        let unknown = resp_json(
+            reset_user_password(
+                State(state.clone()),
+                ctx("admin"),
+                Path("zzz_test_no_such_user".to_string()),
+                Json(ResetPasswordRequest {
+                    new_password: "abcd1234".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(unknown["code"], 1, "{unknown}");
+        assert!(
+            unknown["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("用户不存在"),
+            "{unknown}"
+        );
+
+        cleanup_user(&db, uid).await;
+    }
+
+    #[tokio::test]
+    async fn reset_user_password_updates_hash_and_clears_sessions() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let uid = "zzz_test_admin_u_rst2";
+        mk_user(&db, uid, "zzz_test_admin_un_rst2").await;
+        for i in 0..2 {
+            sqlx::query(
+                "INSERT INTO user_session (session_id, user_id, refresh_token, expires_at)
+                 VALUES ($1, $2, 'zzz_test_rt', NOW() + INTERVAL '1 day')",
+            )
+            .bind(format!("zzz_test_sess_{i}_{uid}"))
+            .bind(uid)
+            .execute(&db)
+            .await
+            .expect("insert zzz user_session");
+        }
+
+        let body = resp_json(
+            reset_user_password(
+                State(state.clone()),
+                ctx("admin"),
+                Path(uid.to_string()),
+                Json(ResetPasswordRequest {
+                    new_password: "zzz_new_pass_9".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+
+        let hash: String =
+            sqlx::query_scalar("SELECT password_hash FROM quant_user WHERE user_id = $1")
+                .bind(uid)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(hash.starts_with("$2"), "重置后应为 bcrypt hash: {hash}");
+        assert_ne!(hash, "zzz_test_old_hash");
+        let sessions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_session WHERE user_id = $1")
+                .bind(uid)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(sessions, 0, "重置密码应清除全部会话");
+
+        cleanup_user(&db, uid).await;
+    }
+
+    #[tokio::test]
+    async fn delete_user_removes_zzz_row() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let uid = "zzz_test_admin_u_del";
+        mk_user(&db, uid, "zzz_test_admin_un_del").await;
+
+        let body =
+            resp_json(delete_user(State(state.clone()), ctx("admin"), Path(uid.to_string())).await)
+                .await;
+        assert_eq!(body["code"], 0, "{body}");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quant_user WHERE user_id = $1")
+            .bind(uid)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "zzz 用户应已删除");
+
+        cleanup_user(&db, uid).await;
+    }
+
+    #[tokio::test]
+    async fn delete_user_refuses_builtin_admin() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        // 库存超级管理员 username='admin'（user_id 同名），受删除保护
+        let admin_uid: String =
+            sqlx::query_scalar("SELECT user_id FROM quant_user WHERE username = 'admin'")
+                .fetch_one(&db)
+                .await
+                .expect("库存应有 username='admin' 超管");
+
+        let body = resp_json(
+            delete_user(State(state.clone()), ctx("admin"), Path(admin_uid.clone())).await,
+        )
+        .await;
+        assert_eq!(body["code"], 1, "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("不能删除超级管理员"),
+            "{body}"
+        );
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quant_user WHERE user_id = $1")
+            .bind(&admin_uid)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "超管应仍在");
+    }
+
+    // ── Scheduled Task Management ────────────────────────────
+
+    #[tokio::test]
+    async fn list_tasks_includes_zzz_task() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let name = "zzz_test_admin_task1";
+        mk_task(&db, name).await;
+
+        let body = resp_json(list_tasks(State(state.clone()), ctx("admin")).await).await;
+        assert_eq!(body["code"], 0, "{body}");
+        let row = body["data"]
+            .as_array()
+            .expect("data 为数组")
+            .iter()
+            .find(|r| r["task_name"] == name)
+            .unwrap_or_else(|| panic!("任务列表未找到 {name}: {body}"));
+        assert_eq!(row["task_type"], "zzz_test_type");
+        assert_eq!(row["enabled"], true);
+        assert_eq!(row["schedule_cron"], "0 0 3 * * ?");
+        assert_eq!(row["params"]["zzz"], "a");
+        assert_eq!(row["run_count"], 5);
+        assert!(row["last_run_at"].is_null(), "造数时未跑过: {row}");
+
+        cleanup_task(&db, name).await;
+    }
+
+    #[tokio::test]
+    async fn update_task_modifies_zzz_task() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let name = "zzz_test_admin_task2";
+        mk_task(&db, name).await;
+
+        let body = resp_json(
+            update_task(
+                State(state.clone()),
+                ctx("admin"),
+                Path(name.to_string()),
+                Json(UpdateTaskRequest {
+                    enabled: Some(false),
+                    schedule_cron: Some("0 0 5 * * ?".into()),
+                    params: Some(serde_json::json!({"zzz": "b"})),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+
+        let row: (bool, String, serde_json::Value, Option<String>) = sqlx::query_as(
+            "SELECT enabled, schedule_cron, params, updated_by FROM scheduled_task_config WHERE task_name = $1",
+        )
+        .bind(name)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(!row.0, "enabled 应已关");
+        assert_eq!(row.1, "0 0 5 * * ?");
+        assert_eq!(row.2["zzz"], "b");
+        assert_eq!(row.3.as_deref(), Some("zzz_test_admin_ctx"));
+
+        cleanup_task(&db, name).await;
+    }
+
+    #[tokio::test]
+    async fn run_task_sets_next_run_at_on_zzz_task() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let name = "zzz_test_admin_task3";
+        mk_task(&db, name).await;
+        let before: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT next_run_at FROM scheduled_task_config WHERE task_name = $1",
+        )
+        .bind(name)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(before.is_none(), "造数时 next_run_at 应为 NULL");
+
+        let body =
+            resp_json(run_task(State(state.clone()), ctx("admin"), Path(name.to_string())).await)
+                .await;
+        assert_eq!(body["code"], 0, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains(name),
+            "{body}"
+        );
+
+        let after: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT next_run_at FROM scheduled_task_config WHERE task_name = $1",
+        )
+        .bind(name)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(after.is_some(), "触发后 next_run_at 应非空");
+
+        cleanup_task(&db, name).await;
+    }
+
+    /// 触发语义行为锁定：不存在的任务名 UPDATE 0 行，仍返回 code 0（非 404）。
+    #[tokio::test]
+    async fn run_task_unknown_name_still_returns_code0() {
+        let state = test_state().await;
+        let name = "zzz_test_no_such_task";
+        let body =
+            resp_json(run_task(State(state.clone()), ctx("admin"), Path(name.to_string())).await)
+                .await;
+        assert_eq!(body["code"], 0, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains(name),
+            "{body}"
+        );
+    }
+
+    // ── 只读看板端点 ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn check_task_deps_returns_code0_array() {
+        let state = test_state().await;
+        let body = resp_json(check_task_deps(State(state.clone()), ctx("admin")).await).await;
+        assert_eq!(body["code"], 0, "{body}");
+        assert!(body["data"].is_array(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn sync_status_returns_expected_checklist_items() {
+        let state = test_state().await;
+        let body = resp_json(sync_status(State(state.clone()), ctx("admin")).await).await;
+        assert_eq!(body["code"], 0, "{body}");
+        let items = body["data"].as_array().expect("data 为数组");
+        let names: Vec<&str> = items.iter().filter_map(|r| r["name"].as_str()).collect();
+        for expected in [
+            "A股日线",
+            "ETF日线(MVO)",
+            "停牌",
+            "A股复权因子",
+            "ETF复权因子(MVO)",
+            "因子(full PIT)",
+            "CSI300",
+            "涨跌停",
+            "权益曲线",
+            "股票基础信息",
+            "ST/名称历史",
+            "ML预测",
+        ] {
+            assert!(
+                names.iter().any(|n| *n == expected),
+                "看板缺检查项 {expected}: {names:?}"
+            );
+        }
+        for item in items {
+            assert!(item["healthy"].is_boolean(), "healthy 应为 bool: {item}");
+        }
+    }
+
+    #[tokio::test]
+    async fn factor_health_returns_factor_rows() {
+        let state = test_state().await;
+        let body = resp_json(factor_health(State(state.clone()), ctx("admin")).await).await;
+        assert_eq!(body["code"], 0, "{body}");
+        assert!(
+            !body["data"]["check_date"].as_str().unwrap_or("").is_empty(),
+            "{body}"
+        );
+        let factors = body["data"]["factors"].as_array().expect("factors 为数组");
+        assert_eq!(factors.len(), 14, "v24 白名单 14 因子: {body}");
+        for f in factors {
+            assert!(!f["factor_code"].as_str().unwrap_or("").is_empty(), "{f}");
+            assert!(f["is_stale"].is_boolean(), "{f}");
+        }
+    }
+
+    // ── repair_sync 参数校验（不触发真实同步/HTTP）────────────
+
+    #[tokio::test]
+    async fn repair_sync_validates_request_params() {
+        let state = test_state().await;
+        let admin = ctx("admin");
+
+        // 缺 strategy_id：在数据项匹配前拒绝
+        let no_sid = resp_json(
+            repair_sync(
+                State(state.clone()),
+                admin.clone(),
+                Json(RepairRequest {
+                    name: "CSI300".into(),
+                    strategy_id: None,
+                    start_date: None,
+                    end_date: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(no_sid["code"], 1, "{no_sid}");
+        assert!(
+            no_sid["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("必传 strategy_id"),
+            "{no_sid}"
+        );
+
+        // 非法日期格式（斜杠）
+        let bad_date = resp_json(
+            repair_sync(
+                State(state.clone()),
+                admin.clone(),
+                Json(RepairRequest {
+                    name: "CSI300".into(),
+                    strategy_id: Some("zzz_test_sid".into()),
+                    start_date: Some("2027/01/01".into()),
+                    end_date: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(bad_date["code"], 1, "{bad_date}");
+        assert!(
+            bad_date["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("日期格式无效"),
+            "{bad_date}"
+        );
+
+        // start 晚于 end
+        let inverted = resp_json(
+            repair_sync(
+                State(state.clone()),
+                admin,
+                Json(RepairRequest {
+                    name: "CSI300".into(),
+                    strategy_id: Some("zzz_test_sid".into()),
+                    start_date: Some("20270201".into()),
+                    end_date: Some("20270101".into()),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(inverted["code"], 1, "{inverted}");
+        assert!(
+            inverted["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("start_date 不能晚于 end_date"),
+            "{inverted}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_sync_unknown_name_rejected() {
+        let state = test_state().await;
+        let body = resp_json(
+            repair_sync(
+                State(state.clone()),
+                ctx("admin"),
+                Json(RepairRequest {
+                    name: "zzz不存在数据项".into(),
+                    strategy_id: Some("zzz_test_sid".into()),
+                    start_date: None,
+                    end_date: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 1, "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("未知数据项"),
+            "{body}"
+        );
+    }
+
+    // ── manual_rebalance：非交易日前置拒绝（不进入调仓链路）────
+
+    #[tokio::test]
+    async fn manual_rebalance_rejects_non_trading_day() {
+        let state = test_state().await;
+        // 2027-01-01 元旦休市（日历无该行时 is_trading_day 亦返回 false），提前拒绝
+        let body = resp_json(
+            manual_rebalance(
+                State(state.clone()),
+                ctx("admin"),
+                Json(ManualRebalanceRequest {
+                    date: Some("20270101".into()),
+                    skip_data_gate: true,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 1, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("非交易日"),
+            "{body}"
+        );
+    }
+}

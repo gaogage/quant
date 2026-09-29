@@ -4783,3 +4783,980 @@ mod ninth_batch {
         assert_rejected(&v, "combo_name must be <= 128 chars", "supply_float_shock");
     }
 }
+
+// ─── 第十批测试：34 个 backfill handler 成功路径（任务注册）+ 拒绝分支抽样 ───
+//
+// 覆盖目标：handler 模板体的主路径——into_plan 成功 → INSERT data_sync_task(status='running')
+// → tokio::spawn 后台重回填 → 立即返回 code 0/task_id。34 份模板体由此全部点亮。
+//
+// 安全边界：
+// - 请求统一用 2027 未来冷门窗口（start=end=2027-01-05）——库中无该窗口行情，后台回填
+//   0 行无害；不等待后台自然完成，由测试统一轮询 settle 后清理。
+// - 后台 run_* 会无条件 upsert multi_factor_weight / factor_definition（部分族），version
+//   统一注入测试特征值 "9.9.9"（实证库中两表该版本 0 行），清理按此键兜底。
+// - 写路径清理表：data_sync_task / experiment_run（按本批精确 task_id）、
+//   multi_factor_weight / factor_definition（version='9.9.9'）。
+// - experiment_run 有真实历史行（related_entity_type='data_sync_task'），清理严格限定
+//   related_entity_id = 本批 task_id，禁止宽删。
+// - task_id 前缀实证为 `fs-`（background_factor_task_id: fs-%Y%m%d-%H%M%S%3f-uuid8）。
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use axum::Json;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use crate::phase7_alpha_admission::{
+        ANALYST_REVISION_COVERAGE_GATE_ID, EQUITY_PLEDGE_COVERAGE_GATE_ID,
+        FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID, INDUSTRY_MEMBERSHIP_MARKET_SCOPE_GATE_ID,
+        INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE, MARGIN_DETAIL_COVERAGE_GATE_ID,
+        SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID,
+    };
+
+    /// 未来冷门窗口：无任何行情数据 → 后台回填 0 行。
+    const COLD_WINDOW: &str = "2027-01-05";
+    /// 测试特征版本号：multi_factor_weight / factor_definition 清理键。
+    const TEST_VERSION: &str = "9.9.9";
+    /// 后台 settle 轮询上限（秒）。2027 空窗口任务秒级完成，180s 仅兜底防卡。
+    const SETTLE_TIMEOUT_SECS: u64 = 180;
+
+    /// 34 个 handler 签名各不相同（Request 类型不同），统一装进 FnOnce 闭包循环直调。
+    type CaseFn = Box<
+        dyn FnOnce(Arc<crate::AppState>) -> Pin<Box<dyn Future<Output = serde_json::Value> + Send>>
+            + Send,
+    >;
+
+    /// 生成 (名称, 直调闭包)：state 进闭包，请求随闭包 move。
+    macro_rules! bg_case {
+        ($name:literal, $handler:path, $req:expr) => {
+            (
+                            $name,
+                            Box::new(
+                                move |state: Arc<crate::AppState>| -> Pin<
+                                    Box<dyn Future<Output = serde_json::Value> + Send>,
+                                > {
+                                    Box::pin(async move {
+                                        resp_json($handler(State(state), Json($req)).await).await
+                                    })
+                                },
+                            ) as CaseFn,
+                        )
+        };
+    }
+
+    /// 普通 5 字段请求体（2027 冷门窗口 + zzz 前缀 combo）。
+    macro_rules! plain_req {
+        ($combo:literal) => {{
+            let (start, end) = cold_window();
+            (
+                start,
+                end,
+                Some(TEST_VERSION.to_string()),
+                Some(format!("zzz_test_api_bf_dbt_{}", $combo)),
+                None::<u64>,
+            )
+        }};
+    }
+
+    fn cold_window() -> (Option<String>, Option<String>) {
+        (Some(COLD_WINDOW.into()), Some(COLD_WINDOW.into()))
+    }
+
+    /// admission 门控族的合法 gate/universe 组合（各 gate 常量实证见 phase7_alpha_admission）。
+    fn gated(gate: &str) -> (Option<String>, Option<String>) {
+        (
+            Some(gate.to_string()),
+            Some(INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE.to_string()),
+        )
+    }
+
+    async fn test_state() -> Arc<crate::AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(crate::AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    /// handler 返回的 Json 响应体解析为 serde_json::Value（ninth_batch 先例）。
+    async fn resp_json(resp: impl IntoResponse) -> serde_json::Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    /// 幂等清理测试特征版本行（前置防上次残留，后置清本次写入）。
+    /// 实证：multi_factor_weight / factor_definition 中 version='9.9.9' 业务为 0 行。
+    async fn purge_test_version_rows(db: &sqlx::PgPool) {
+        let _ = sqlx::query("DELETE FROM multi_factor_weight WHERE version = $1")
+            .bind(TEST_VERSION)
+            .execute(db)
+            .await
+            .expect("purge multi_factor_weight");
+        let _ = sqlx::query("DELETE FROM factor_definition WHERE version = $1")
+            .bind(TEST_VERSION)
+            .execute(db)
+            .await
+            .expect("purge factor_definition");
+    }
+
+    /// 轮询等待全部后台任务离开 running（行已删/终态均视为 settled）。
+    async fn wait_bg_settled(db: &sqlx::PgPool, task_ids: &[String]) {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SETTLE_TIMEOUT_SECS);
+        'outer: loop {
+            for task_id in task_ids {
+                let status: Option<String> =
+                    sqlx::query_scalar("SELECT status FROM data_sync_task WHERE task_id = $1")
+                        .bind(task_id)
+                        .fetch_optional(db)
+                        .await
+                        .expect("poll task status");
+                if status.as_deref() == Some("running") {
+                    if std::time::Instant::now() >= deadline {
+                        break 'outer; // 兜底放行：强删清理，后台 UPDATE 已删行是 no-op
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    continue 'outer;
+                }
+            }
+            break; // 全部非 running
+        }
+        // UPDATE data_sync_task 与 persist_factor_backfill_experiment_run 之间留缓冲，
+        // 防 experiment_run 行迟到漏清。
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    }
+
+    /// 按本批精确 task_id 清理两表（experiment_run 严禁宽删——有真实历史行）。
+    async fn cleanup_task_rows(db: &sqlx::PgPool, task_ids: &[String]) {
+        for task_id in task_ids {
+            let _ = sqlx::query(
+                "DELETE FROM experiment_run
+                  WHERE related_entity_type = 'data_sync_task' AND related_entity_id = $1",
+            )
+            .bind(task_id)
+            .execute(db)
+            .await
+            .expect("cleanup experiment_run");
+            let _ = sqlx::query("DELETE FROM data_sync_task WHERE task_id = $1")
+                .bind(task_id)
+                .execute(db)
+                .await
+                .expect("cleanup data_sync_task");
+        }
+    }
+
+    // ── 测试 A：34 个 handler 全量成功路径——任务注册 + 立即返回 ──
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn task_creation_all_34_handlers() {
+        let state = test_state().await;
+        purge_test_version_rows(&state.db).await;
+
+        let mut cases: Vec<(&'static str, CaseFn)> = Vec::with_capacity(34);
+        // 1-3：量价 + P42b 两族
+        {
+            let (start, end, version, combo, timeout) = plain_req!("price_volume");
+            cases.push(bg_case!(
+                "price_volume",
+                backfill_phase7_price_volume_background,
+                Phase7PriceVolumeBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("p42b_mom_rev");
+            cases.push(bg_case!(
+                "p42b_large_cap_momentum_reversal",
+                backfill_p42b_large_cap_momentum_reversal_background,
+                P42bLargeCapMomentumReversalBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("p42b_defensive");
+            cases.push(bg_case!(
+                "p42b_defensive_low_vol_quality",
+                backfill_p42b_defensive_low_vol_quality_background,
+                P42bDefensiveLowVolQualityBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        // 4-25：普通 5 字段族（22 个）
+        {
+            let (start, end, version, combo, timeout) = plain_req!("fin_quality");
+            cases.push(bg_case!(
+                "financial_quality",
+                backfill_phase7_financial_quality_background,
+                Phase7FinancialQualityBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("fin_quality_change");
+            cases.push(bg_case!(
+                "financial_quality_change",
+                backfill_phase7_financial_quality_change_background,
+                Phase7FinancialQualityChangeBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("earnings_recovery");
+            cases.push(bg_case!(
+                "earnings_recovery_persistence",
+                backfill_phase7_earnings_recovery_persistence_background,
+                Phase7EarningsRecoveryPersistenceBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("ind_residual");
+            cases.push(bg_case!(
+                "industry_residual_quality",
+                backfill_phase7_industry_residual_quality_background,
+                Phase7IndustryResidualQualityBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("rel_strength");
+            cases.push(bg_case!(
+                "relative_strength",
+                backfill_phase7_relative_strength_background,
+                Phase7RelativeStrengthBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("quality_rel_strength");
+            cases.push(bg_case!(
+                "quality_relative_strength",
+                backfill_phase7_quality_relative_strength_background,
+                Phase7QualityRelativeStrengthBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("growth_recovery");
+            cases.push(bg_case!(
+                "growth_recovery",
+                backfill_phase7_growth_recovery_background,
+                Phase7GrowthRecoveryBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("valuation");
+            cases.push(bg_case!(
+                "valuation",
+                backfill_phase7_valuation_background,
+                Phase7ValuationBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("moneyflow");
+            cases.push(bg_case!(
+                "moneyflow",
+                backfill_phase7_moneyflow_background,
+                Phase7MoneyflowBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("moneyflow_congestion");
+            cases.push(bg_case!(
+                "moneyflow_congestion",
+                backfill_phase7_moneyflow_congestion_background,
+                Phase7MoneyflowCongestionBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("cashflow_quality");
+            cases.push(bg_case!(
+                "cashflow_quality",
+                backfill_phase7_cashflow_quality_background,
+                Phase7CashflowQualityBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("dividend_quality");
+            cases.push(bg_case!(
+                "dividend_quality",
+                backfill_phase7_dividend_quality_background,
+                Phase7DividendQualityBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("event_alpha");
+            cases.push(bg_case!(
+                "event_alpha",
+                backfill_phase7_event_alpha_background,
+                Phase7EventAlphaBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("event_surprise");
+            cases.push(bg_case!(
+                "event_surprise",
+                backfill_phase7_event_surprise_background,
+                Phase7EventSurpriseBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("forecast_revision");
+            cases.push(bg_case!(
+                "forecast_revision_surprise",
+                backfill_phase7_forecast_revision_surprise_background,
+                Phase7ForecastRevisionSurpriseBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("repurchase");
+            cases.push(bg_case!(
+                "repurchase_supply_shock",
+                backfill_phase7_repurchase_supply_shock_background,
+                Phase7RepurchaseSupplyShockBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("block_trade");
+            cases.push(bg_case!(
+                "block_trade_supply_demand",
+                backfill_phase7_block_trade_supply_demand_background,
+                Phase7BlockTradeSupplyDemandBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("limit_pressure");
+            cases.push(bg_case!(
+                "limit_pressure",
+                backfill_phase7_limit_pressure_background,
+                Phase7LimitPressureBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("unlock_pressure");
+            cases.push(bg_case!(
+                "unlock_supply_pressure",
+                backfill_phase7_unlock_supply_pressure_background,
+                Phase7UnlockSupplyPressureBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("float_shock");
+            cases.push(bg_case!(
+                "supply_float_shock",
+                backfill_phase7_supply_float_shock_background,
+                Phase7SupplyFloatShockBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("liquidity_quality");
+            cases.push(bg_case!(
+                "liquidity_quality",
+                backfill_phase7_liquidity_quality_background,
+                Phase7LiquidityQualityBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        {
+            let (start, end, version, combo, timeout) = plain_req!("market_residual_risk");
+            cases.push(bg_case!(
+                "market_residual_risk",
+                backfill_phase7_market_residual_risk_background,
+                Phase7MarketResidualRiskBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        // 26-28：admission 门控族（合法 gate + universe_profile 放行）
+        {
+            let (start, end) = cold_window();
+            let (gate, universe) = gated(INDUSTRY_MEMBERSHIP_MARKET_SCOPE_GATE_ID);
+            cases.push(bg_case!(
+                "industry_prosperity",
+                backfill_phase7_industry_prosperity_background,
+                Phase7IndustryProsperityBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version: Some(TEST_VERSION.to_string()),
+                    combo_name: Some("zzz_test_api_bf_dbt_indpros".into()),
+                    alpha_admission_gate_id: gate,
+                    universe_profile: universe,
+                    statement_timeout_ms: None,
+                }
+            ));
+        }
+        {
+            let (start, end) = cold_window();
+            let (gate, universe) = gated(FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID);
+            cases.push(bg_case!(
+                "futures_price_chain",
+                backfill_phase7_futures_price_chain_background,
+                Phase7FuturesPriceChainBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version: Some(TEST_VERSION.to_string()),
+                    combo_name: Some("zzz_test_api_bf_dbt_fpc".into()),
+                    alpha_admission_gate_id: gate,
+                    universe_profile: universe,
+                    statement_timeout_ms: None,
+                }
+            ));
+        }
+        {
+            let (start, end) = cold_window();
+            let (gate, universe) = gated(EQUITY_PLEDGE_COVERAGE_GATE_ID);
+            cases.push(bg_case!(
+                "equity_pledge_pressure",
+                backfill_phase7_equity_pledge_pressure_background,
+                Phase7EquityPledgePressureBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version: Some(TEST_VERSION.to_string()),
+                    combo_name: Some("zzz_test_api_bf_dbt_pledge".into()),
+                    alpha_admission_gate_id: gate,
+                    universe_profile: universe,
+                    statement_timeout_ms: None,
+                }
+            ));
+        }
+        // 29：事件窗口族（普通 5 字段）
+        {
+            let (start, end, version, combo, timeout) = plain_req!("event_window");
+            cases.push(bg_case!(
+                "event_window_alpha",
+                backfill_phase7_event_window_alpha_background,
+                Phase7EventWindowAlphaBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version,
+                    combo_name: combo,
+                    statement_timeout_ms: timeout,
+                }
+            ));
+        }
+        // 30-32：admission 门控族（续）
+        {
+            let (start, end) = cold_window();
+            let (gate, universe) = gated(SHAREHOLDER_STRUCTURE_LOW_FANOUT_STRICT_GATE_ID);
+            cases.push(bg_case!(
+                "shareholder_structure",
+                backfill_phase7_shareholder_structure_background,
+                Phase7ShareholderStructureBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version: Some(TEST_VERSION.to_string()),
+                    combo_name: Some("zzz_test_api_bf_dbt_shareholder".into()),
+                    alpha_admission_gate_id: gate,
+                    universe_profile: universe,
+                    statement_timeout_ms: None,
+                }
+            ));
+        }
+        {
+            let (start, end) = cold_window();
+            let (gate, universe) = gated(MARGIN_DETAIL_COVERAGE_GATE_ID);
+            cases.push(bg_case!(
+                "margin_detail",
+                backfill_phase7_margin_detail_background,
+                Phase7MarginDetailBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version: Some(TEST_VERSION.to_string()),
+                    combo_name: Some("zzz_test_api_bf_dbt_margin".into()),
+                    alpha_admission_gate_id: gate,
+                    universe_profile: universe,
+                    statement_timeout_ms: None,
+                }
+            ));
+        }
+        {
+            let (start, end) = cold_window();
+            let (gate, universe) = gated(ANALYST_REVISION_COVERAGE_GATE_ID);
+            cases.push(bg_case!(
+                "analyst_revision",
+                backfill_phase7_analyst_revision_background,
+                Phase7AnalystRevisionBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version: Some(TEST_VERSION.to_string()),
+                    combo_name: Some("zzz_test_api_bf_dbt_analyst".into()),
+                    alpha_admission_gate_id: gate,
+                    universe_profile: universe,
+                    statement_timeout_ms: None,
+                }
+            ));
+        }
+        // 33：alpha_blend（sources ≥2、正权重、和=1.0）
+        {
+            let (start, end) = cold_window();
+            cases.push(bg_case!(
+                "alpha_blend",
+                backfill_phase7_alpha_blend_background,
+                Phase7AlphaBlendBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version: Some(TEST_VERSION.to_string()),
+                    combo_name: Some("zzz_test_api_bf_dbt_blend".into()),
+                    statement_timeout_ms: None,
+                    allow_signed_weights: false,
+                    sources: vec![
+                        Phase7AlphaBlendSourceRequest {
+                            combo_name: "zzz_test_api_bf_dbt_src_a".into(),
+                            version: None,
+                            weight: 0.6,
+                        },
+                        Phase7AlphaBlendSourceRequest {
+                            combo_name: "zzz_test_api_bf_dbt_src_b".into(),
+                            version: None,
+                            weight: 0.4,
+                        },
+                    ],
+                }
+            ));
+        }
+        // 34：alpha_blend_profiles（选单 profile "balanced"，避免全量 34 profile 串行拖慢）
+        {
+            let (start, end) = cold_window();
+            cases.push(bg_case!(
+                "alpha_blend_profiles",
+                backfill_phase7_alpha_blend_profiles_background,
+                Phase7AlphaBlendProfilesBackfillRequest {
+                    start_date: start,
+                    end_date: end,
+                    version: Some(TEST_VERSION.to_string()),
+                    profile_names: Some(vec!["balanced".into()]),
+                    statement_timeout_ms: None,
+                }
+            ));
+        }
+
+        assert_eq!(cases.len(), 34, "34 个 handler 全量覆盖");
+
+        // 顺序直调：handler 立即返回，后台任务在 runtime 并行跑。
+        let mut task_ids: Vec<String> = Vec::with_capacity(cases.len());
+        for (name, case) in cases {
+            let value = case(state.clone()).await;
+            assert_eq!(value["code"], 0, "[{name}] 成功路径应返回 code 0: {value}");
+            let task_id = value["data"]["task_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                task_id.starts_with("fs-"),
+                "[{name}] task_id 应为 fs- 前缀（background_factor_task_id 实证格式）: {task_id}"
+            );
+            let resp_task_type = value["data"]["task_type"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            // 全量测试并行时 34 个后台回填会瞬时打满连接池——PoolTimedOut 重试
+            let row: Option<(String, String)> = {
+                let mut last_err = None;
+                let mut got = None;
+                for _ in 0..5 {
+                    match sqlx::query_as::<_, (String, String)>(
+                        "SELECT task_id, task_type FROM data_sync_task WHERE task_id = $1",
+                    )
+                    .bind(&task_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    {
+                        Ok(r) => {
+                            got = Some(r);
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = Some(e);
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                }
+                got.unwrap_or_else(|| panic!("query task row: {}", last_err.unwrap()))
+            };
+            let (row_task_id, row_task_type) = row
+                .unwrap_or_else(|| panic!("[{name}] data_sync_task 应已有 task_id={task_id} 行"));
+            assert_eq!(row_task_id, task_id, "[{name}] 行 task_id 应精确匹配");
+            assert_eq!(
+                row_task_type, resp_task_type,
+                "[{name}] 行 task_type 应与响应一致"
+            );
+            // status 不断言具体值：后台随时可能将 'running' 推进为 completed/failed（均合法）。
+            task_ids.push(task_id);
+        }
+        assert_eq!(task_ids.len(), 34);
+
+        // 等待后台 settle（2027 空窗口秒级）后统一清理，防 experiment_run 迟到残留。
+        wait_bg_settled(&state.db, &task_ids).await;
+        cleanup_task_rows(&state.db, &task_ids).await;
+        purge_test_version_rows(&state.db).await;
+
+        for task_id in &task_ids {
+            let leftover: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM data_sync_task WHERE task_id = $1")
+                    .bind(task_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("count leftover");
+            assert_eq!(leftover, 0, "task_id={task_id} 清理后不应残留");
+        }
+    }
+
+    // ── 测试 B：拒绝分支抽样——into_plan 校验失败在写库/spawn 之前短路返回 code 1 ──
+
+    #[tokio::test]
+    async fn bad_plan_error_paths() {
+        let state = test_state().await;
+
+        // 1. 普通族日期倒挂：start > end
+        let v = resp_json(
+            backfill_phase7_price_volume_background(
+                State(state.clone()),
+                Json(Phase7PriceVolumeBackfillRequest {
+                    start_date: Some("2027-01-06".into()),
+                    end_date: Some("2027-01-05".into()),
+                    version: None,
+                    combo_name: None,
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "price_volume 倒挂应 code 1: {v}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("start_date must be <= end_date"),
+            "price_volume 倒挂 message: {v}"
+        );
+
+        // 2. P42b handler 日期倒挂（P42b 拒绝此前仅纯函数覆盖，handler 级直调补齐）
+        let v = resp_json(
+            backfill_p42b_large_cap_momentum_reversal_background(
+                State(state.clone()),
+                Json(P42bLargeCapMomentumReversalBackfillRequest {
+                    start_date: Some("2027-01-06".into()),
+                    end_date: Some("2027-01-05".into()),
+                    version: None,
+                    combo_name: None,
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "p42b 倒挂应 code 1: {v}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("start_date must be <= end_date"),
+            "p42b 倒挂 message: {v}"
+        );
+
+        // 3. admission 门控族：合法 gate/universe 放行后走到日期倒挂分支（组合覆盖）
+        let v = resp_json(
+            backfill_phase7_industry_prosperity_background(
+                State(state.clone()),
+                Json(Phase7IndustryProsperityBackfillRequest {
+                    start_date: Some("2027-01-06".into()),
+                    end_date: Some("2027-01-05".into()),
+                    version: None,
+                    combo_name: None,
+                    alpha_admission_gate_id: Some(
+                        INDUSTRY_MEMBERSHIP_MARKET_SCOPE_GATE_ID.to_string(),
+                    ),
+                    universe_profile: Some(
+                        INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE.to_string(),
+                    ),
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "industry_prosperity 倒挂应 code 1: {v}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("start_date must be <= end_date"),
+            "industry_prosperity 倒挂 message: {v}"
+        );
+
+        // 4. admission 门控族：合法 gate + 非法日期格式
+        let v = resp_json(
+            backfill_phase7_futures_price_chain_background(
+                State(state.clone()),
+                Json(Phase7FuturesPriceChainBackfillRequest {
+                    start_date: Some("2027/01/05".into()),
+                    end_date: None,
+                    version: None,
+                    combo_name: None,
+                    alpha_admission_gate_id: Some(FUTURES_PRICE_CHAIN_COVERAGE_GATE_ID.to_string()),
+                    universe_profile: Some(
+                        INDUSTRY_PROSPERITY_REQUIRED_UNIVERSE_PROFILE.to_string(),
+                    ),
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "futures_price_chain 格式错应 code 1: {v}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("start_date must use YYYY-MM-DD or YYYYMMDD"),
+            "futures_price_chain 格式错 message: {v}"
+        );
+
+        // 5. alpha_blend：sources 不足 2 个
+        let v = resp_json(
+            backfill_phase7_alpha_blend_background(
+                State(state.clone()),
+                Json(Phase7AlphaBlendBackfillRequest {
+                    start_date: Some(COLD_WINDOW.into()),
+                    end_date: Some(COLD_WINDOW.into()),
+                    version: None,
+                    combo_name: None,
+                    statement_timeout_ms: None,
+                    allow_signed_weights: false,
+                    sources: vec![Phase7AlphaBlendSourceRequest {
+                        combo_name: "zzz_test_api_bf_dbt_src_a".into(),
+                        version: None,
+                        weight: 1.0,
+                    }],
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "alpha_blend 单 source 应 code 1: {v}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("sources must include at least 2 combo sources"),
+            "alpha_blend 单 source message: {v}"
+        );
+
+        // 6. alpha_blend：正权重但和 ≠ 1.0
+        let v = resp_json(
+            backfill_phase7_alpha_blend_background(
+                State(state.clone()),
+                Json(Phase7AlphaBlendBackfillRequest {
+                    start_date: Some(COLD_WINDOW.into()),
+                    end_date: Some(COLD_WINDOW.into()),
+                    version: None,
+                    combo_name: None,
+                    statement_timeout_ms: None,
+                    allow_signed_weights: false,
+                    sources: vec![
+                        Phase7AlphaBlendSourceRequest {
+                            combo_name: "zzz_test_api_bf_dbt_src_a".into(),
+                            version: None,
+                            weight: 0.5,
+                        },
+                        Phase7AlphaBlendSourceRequest {
+                            combo_name: "zzz_test_api_bf_dbt_src_b".into(),
+                            version: None,
+                            weight: 0.4,
+                        },
+                    ],
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "alpha_blend 权重和≠1 应 code 1: {v}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("source weights must sum to 1.0"),
+            "alpha_blend 权重和 message: {v}"
+        );
+
+        // 7. admission 门控族：缺 gate/universe → admission 拒绝（安全分支）
+        let v = resp_json(
+            backfill_phase7_analyst_revision_background(
+                State(state),
+                Json(Phase7AnalystRevisionBackfillRequest {
+                    start_date: None,
+                    end_date: None,
+                    version: None,
+                    combo_name: None,
+                    alpha_admission_gate_id: None,
+                    universe_profile: None,
+                    statement_timeout_ms: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["code"], 1, "analyst_revision 缺 gate 应 code 1: {v}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("requires alpha_admission_gate_id="),
+            "analyst_revision 缺 gate message: {v}"
+        );
+    }
+}

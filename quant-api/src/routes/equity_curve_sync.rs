@@ -937,3 +937,477 @@ mod tests {
         ensure_composite_curve_table(&db).await.expect("second ok");
     }
 }
+
+// ── 连库测试（覆盖率补测第三批）────────────────────────────
+//
+// 模式沿用 accounts.rs db_tests 先例：真实本机 PG + zzz_test_ 前缀独占键 +
+// 测试尾精确键 DELETE 清理。
+//
+// 同步链路（sync_strategy_equity_curve / sync_active_strategies_equity_curves）
+// 会向 localhost:{PORT} 发 run-factor 回测请求——本机 8080 实际被 OrbStack 反代
+// 占用（打到未知服务，响应不可控），测试统一把 PORT 注入死端口 1，让请求走
+// "连接拒绝"失败分支：返回 status=failed 且不 UPDATE strategy_config（零污染），
+// 全程不真跑回测。PortGuard 模式与 scheduler.rs twelfth_batch 同源：注入窗口
+// 持锁串行、Drop 时恢复原值，防污染并行测试。
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+
+    async fn test_db() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    // PORT 环境变量是进程级的：注入窗口必须互斥（模块内串行），退出前恢复。
+    static PORT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// PORT 注入守卫：Drop 时恢复原值（原值缺省则移除）。
+    struct PortGuard(Option<String>);
+
+    impl PortGuard {
+        fn set(value: &str) -> Self {
+            let old = std::env::var("PORT").ok();
+            std::env::set_var("PORT", value);
+            PortGuard(old)
+        }
+    }
+
+    impl Drop for PortGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("PORT", v),
+                None => std::env::remove_var("PORT"),
+            }
+        }
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("合法日期")
+    }
+
+    /// 造 zzz composite 主行 + a_share 子行（共用 combo 与曲线 task_id）。
+    /// signal_source='factor' 跳过预测集查询分支；equity_curve_task_id 显式
+    /// 非空（load_strategy_config 反序列化为 String，NULL 会 panic）。
+    async fn mk_zzz_strategy(db: &PgPool, sid: &str, combo: &str, task_id: &str) {
+        cleanup_strategy_tree(db, sid).await;
+        sqlx::query(
+            "INSERT INTO strategy_config
+               (strategy_id, name, status, strategy_type, signal_source, combo_name,
+                equity_curve_task_id, etf_symbols, default_weights)
+             VALUES ($1, 'zzz测试策略', 'active', 'composite', 'factor', $2, $3, '[]'::jsonb, '[1.0]'::jsonb)",
+        )
+        .bind(sid)
+        .bind(combo)
+        .bind(task_id)
+        .execute(db)
+        .await
+        .expect("insert zzz composite 行");
+        sqlx::query(
+            "INSERT INTO strategy_config
+               (strategy_id, name, status, parent_strategy_id, asset_class, signal_source,
+                combo_name, equity_curve_task_id, etf_symbols, default_weights)
+             VALUES ($1, 'zzz测试A股', 'active', $2, 'a_share', 'factor', $3, $4, '[]'::jsonb, '[]'::jsonb)",
+        )
+        .bind(format!("{sid}-a"))
+        .bind(sid)
+        .bind(combo)
+        .bind(task_id)
+        .execute(db)
+        .await
+        .expect("insert zzz a_share 子行");
+
+        // serde default 不吃显式 null: jsonb_build_object 裸列的 NULL 会让
+        // StrategyConfig 反序列化炸(invalid type: null)。补中性默认(与真实行同量级)。
+        sqlx::query(
+            "UPDATE strategy_config SET
+                kelly_fraction = COALESCE(kelly_fraction, 0.25),
+                score_candidate_pool_size = COALESCE(score_candidate_pool_size, 200),
+                prediction_blend_weight = COALESCE(prediction_blend_weight, 0.0),
+                dynamic_target_cap = COALESCE(dynamic_target_cap, 0.30),
+                dynamic_target_floor = COALESCE(dynamic_target_floor, 0.12),
+                leverage_regime_threshold = COALESCE(leverage_regime_threshold, 0.9),
+                slippage_pct = COALESCE(slippage_pct, 0.002),
+                deep_bear_threshold = COALESCE(deep_bear_threshold, -0.10),
+                deep_bear_exposure = COALESCE(deep_bear_exposure, 0.60),
+                ga_generations = COALESCE(ga_generations, 20),
+                ga_population = COALESCE(ga_population, 50),
+                min_stock = COALESCE(min_stock, 5),
+                max_single = COALESCE(max_single, 0.1),
+                max_single_bull = COALESCE(max_single_bull, 0.15),
+                regime_bull_min_stock = COALESCE(regime_bull_min_stock, 6),
+                regime_bear_min_stock = COALESCE(regime_bear_min_stock, 3),
+                momentum_blend_ratio = COALESCE(momentum_blend_ratio, 0.5),
+                vol_target = COALESCE(vol_target, 0.15),
+                leverage_cap = COALESCE(leverage_cap, 2.0),
+                top_n = COALESCE(top_n, 30),
+                combo_horizon = COALESCE(combo_horizon, 20),
+                regime_bear_return_threshold = COALESCE(regime_bear_return_threshold, -0.03),
+                score_direction = COALESCE(score_direction, 'desc'),
+                mvo_objective = COALESCE(mvo_objective, 'minvariance'),
+                candidate_tier = COALESCE(candidate_tier, '')
+             WHERE strategy_id = $1 OR parent_strategy_id = $1",
+        )
+        .bind(sid)
+        .execute(db)
+        .await
+        .expect("补 zzz 策略行数值默认");
+    }
+
+    async fn cleanup_strategy_tree(db: &PgPool, sid: &str) {
+        let _ = sqlx::query(
+            "DELETE FROM strategy_config WHERE strategy_id = $1 OR parent_strategy_id = $1",
+        )
+        .bind(sid)
+        .execute(db)
+        .await;
+    }
+
+    /// 造 zzz 模拟账号（挂指定策略；user_id 留空，无 FK 依赖）。
+    async fn mk_zzz_account(db: &PgPool, aid: &str, sid: &str, status: &str) {
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(db)
+            .await;
+        sqlx::query(
+            "INSERT INTO paper_account
+               (paper_account_id, name, initial_capital, cash, status, strategy_version_id)
+             VALUES ($1, $2, 100000, 100000, $3, $4)",
+        )
+        .bind(aid)
+        .bind(format!("zzz_{aid}"))
+        .bind(status)
+        .bind(sid)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_account");
+    }
+
+    async fn cleanup_account(db: &PgPool, aid: &str) {
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(db)
+            .await;
+    }
+
+    /// 造 zzz 回测任务 + 2 个交易日曲线（2027 冷门日期，portfolio_value 100→110）。
+    async fn mk_zzz_curve(db: &PgPool, task_id: &str) {
+        // FK 前置: backtest_task.data_version_id 引用 data_version(幂等)
+        sqlx::query(
+            "INSERT INTO data_version
+                (data_version_id, name, source, start_date, end_date, tables, snapshot_hash)
+             VALUES ('zzz_test_dv', 'zzz测试', 'manual', '2027-01-01', '2027-01-05',
+                     '{}', 'zzz') ON CONFLICT (data_version_id) DO NOTHING",
+        )
+        .execute(db)
+        .await
+        .expect("insert zzz data_version");
+        sqlx::query(
+            "INSERT INTO backtest_task
+               (task_id, strategy_version_id, data_version_id, benchmark_symbol, symbols,
+                start_date, end_date, initial_capital, rebalance_frequency,
+                cost_model, slippage_model, execution_rules, parameters, status)
+             VALUES ($1, 'factor-combo-v1', 'zzz_test_dv', '000300.SH', '{}'::text[],
+                '2027-01-04', '2027-01-05', 1000000, '10',
+                '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 'completed')",
+        )
+        .bind(task_id)
+        .execute(db)
+        .await
+        .expect("insert zzz backtest_task");
+        sqlx::query(
+            "INSERT INTO backtest_equity_curve (task_id, trade_date, portfolio_value, cash)
+             VALUES ($1, '2027-01-04', 100.0, 0), ($1, '2027-01-05', 110.0, 0)",
+        )
+        .bind(task_id)
+        .execute(db)
+        .await
+        .expect("insert zzz backtest_equity_curve");
+    }
+
+    /// 删 backtest_task 即级联清曲线（FK ON DELETE CASCADE）。
+    async fn cleanup_curve(db: &PgPool, task_id: &str) {
+        let _ = sqlx::query("DELETE FROM backtest_task WHERE task_id = $1")
+            .bind(task_id)
+            .execute(db)
+            .await;
+    }
+
+    async fn cleanup_composite(db: &PgPool, sid: &str) {
+        let _ = sqlx::query("DELETE FROM backtest_composite_equity_curve WHERE strategy_id = $1")
+            .bind(sid)
+            .execute(db)
+            .await;
+    }
+
+    // ── sync_strategy_equity_curve：run-factor 不可达失败分支 ──
+
+    #[tokio::test]
+    async fn sync_strategy_equity_curve_dead_api_port_returns_failed() {
+        let db = test_db().await;
+        let sid = "zzz_test_eqcs_main";
+        let combo = "zzz_test_combo_missing";
+        let task_before = "zzz_test_task_old";
+        mk_zzz_strategy(&db, sid, combo, task_before).await;
+
+        let _guard = PORT_ENV_LOCK.lock().await;
+        let _port = PortGuard::set("1");
+        let r = sync_strategy_equity_curve(&db, sid, date(2027, 1, 5), date(2027, 1, 9), false)
+            .await
+            .expect("失败路径返回 Ok(SyncResult)");
+        assert_eq!(r.status, "failed");
+        assert!(r.task_id.is_none(), "失败不应携带 task_id: {r:?}");
+        let err = r.error.as_deref().unwrap_or("");
+        assert!(err.contains("run-factor"), "error 应指向 run-factor: {err}");
+        assert_eq!(r.strategy_id, sid);
+
+        // 失败路径不得触碰 equity_curve_task_id（UPDATE 只在拿到 task_id 后执行）
+        let now: String = sqlx::query_scalar(
+            "SELECT equity_curve_task_id FROM strategy_config WHERE strategy_id = $1",
+        )
+        .bind(sid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(now, task_before, "失败后 task_id 应保持原值");
+
+        cleanup_strategy_tree(&db, sid).await;
+    }
+
+    // ── sync_active_strategies_equity_curves：遍历含 zzz 且单点失败不阻断 ──
+
+    #[tokio::test]
+    async fn sync_active_strategies_equity_curves_includes_zzz_failure() {
+        let db = test_db().await;
+        let sid = "zzz_test_eqcs_all";
+        let aid = "zzz_test_eqcs_acc";
+        mk_zzz_strategy(&db, sid, "zzz_test_combo_all", "zzz_test_task_all").await;
+        mk_zzz_account(&db, aid, sid, "active").await;
+
+        let _guard = PORT_ENV_LOCK.lock().await;
+        let _port = PortGuard::set("1");
+        let results = sync_active_strategies_equity_curves(&db).await;
+
+        let zzz = results
+            .iter()
+            .find(|r| r.strategy_id == sid)
+            .unwrap_or_else(|| panic!("结果应含 zzz 策略 {sid}: {results:?}"));
+        assert_eq!(zzz.status, "failed");
+        assert!(zzz.task_id.is_none(), "{zzz:?}");
+        assert!(zzz.error.is_some(), "{zzz:?}");
+        // 真实活跃策略（v24 系）同样走失败分支但不阻断遍历——只断言数组非空
+        assert!(!results.is_empty());
+
+        cleanup_account(&db, aid).await;
+        cleanup_strategy_tree(&db, sid).await;
+    }
+
+    // ── handle_equity_curve_sync：参数校验 + 失败结果包装 ──
+
+    #[tokio::test]
+    async fn handle_equity_curve_sync_rejects_invalid_dates() {
+        // 斜杠格式拒绝
+        let bad = handle_equity_curve_sync(
+            Path("zzz_test_eqcs_h1".to_string()),
+            Json(EquityCurveSyncRequest {
+                start_date: Some("2027/01/05".into()),
+                end_date: Some("20270109".into()),
+                background: None,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(bad["code"], 1, "{bad}");
+        assert!(
+            bad["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("日期格式错误"),
+            "{bad}"
+        );
+
+        // start > end 拒绝
+        let inverted = handle_equity_curve_sync(
+            Path("zzz_test_eqcs_h2".to_string()),
+            Json(EquityCurveSyncRequest {
+                start_date: Some("20270109".into()),
+                end_date: Some("20270105".into()),
+                background: None,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(inverted["code"], 1, "{inverted}");
+        assert!(
+            inverted["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("start_date > end_date"),
+            "{inverted}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_equity_curve_sync_zzz_strategy_wraps_failed_result() {
+        let db = test_db().await;
+        let sid = "zzz_test_eqcs_h3";
+        mk_zzz_strategy(&db, sid, "zzz_test_combo_h3", "zzz_test_task_h3").await;
+
+        let _guard = PORT_ENV_LOCK.lock().await;
+        let _port = PortGuard::set("1");
+        let body = handle_equity_curve_sync(
+            Path(sid.to_string()),
+            Json(EquityCurveSyncRequest {
+                start_date: Some("20270105".into()),
+                end_date: Some("20270109".into()),
+                background: Some(false),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(body["code"], 0, "{body}");
+        assert_eq!(body["data"]["strategy_id"], sid, "{body}");
+        assert_eq!(body["data"]["status"], "failed", "{body}");
+        assert!(body["data"]["task_id"].is_null(), "{body}");
+
+        cleanup_strategy_tree(&db, sid).await;
+    }
+
+    // ── 审计 / 合成 handler：未知策略错误路径 ──
+
+    #[tokio::test]
+    async fn handle_equity_curve_readiness_audit_unknown_strategy_code1() {
+        let body =
+            handle_equity_curve_readiness_audit(Path("zzz_test_no_such_strategy".to_string()))
+                .await
+                .0;
+        assert_eq!(body["code"], 1, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("not found"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_composite_equity_curve_sync_unknown_strategy_code1() {
+        let body =
+            handle_composite_equity_curve_sync(Path("zzz_test_no_such_strategy".to_string()))
+                .await
+                .0;
+        assert_eq!(body["code"], 1, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("not found"),
+            "{body}"
+        );
+    }
+
+    // ── sync_composite_equity_curve：纯 A 股权重合成成功路径 + 幂等 ──
+
+    /// default_weights=[1.0] 且 etf_symbols=[] → 走新语义（长度=etf+1）：
+    /// w_a_norm=1、ETF 零贡献 → composite 曲线应逐日等于 a_share 曲线。
+    #[tokio::test]
+    async fn sync_composite_equity_curve_zzz_a_share_only_weights() {
+        let db = test_db().await;
+        let sid = "zzz_test_eqcs_comp";
+        let task_id = "zzz_test_task_comp";
+        mk_zzz_strategy(&db, sid, "zzz_test_combo_comp", task_id).await;
+        mk_zzz_curve(&db, task_id).await;
+        cleanup_composite(&db, sid).await;
+
+        let n = sync_composite_equity_curve(&db, sid)
+            .await
+            .expect("合成成功");
+        assert_eq!(n, 2, "2 个交易日应落 2 行: {n}");
+
+        let rows: Vec<(
+            NaiveDate,
+            rust_decimal::Decimal,
+            rust_decimal::Decimal,
+            rust_decimal::Decimal,
+        )> = sqlx::query_as(
+            "SELECT trade_date, portfolio_value, a_share_value, etf_value
+                 FROM backtest_composite_equity_curve WHERE strategy_id = $1 ORDER BY trade_date",
+        )
+        .bind(sid)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, date(2027, 1, 4));
+        assert_eq!(rows[1].0, date(2027, 1, 5));
+        // composite = a_share（ETF 权重归零）
+        assert_eq!(rows[0].1, rust_decimal::Decimal::from(100i64), "{rows:?}");
+        assert_eq!(rows[1].1, rust_decimal::Decimal::from(110i64), "{rows:?}");
+        assert_eq!(rows[0].2, rust_decimal::Decimal::from(100i64), "{rows:?}");
+        assert_eq!(rows[1].2, rust_decimal::Decimal::from(110i64), "{rows:?}");
+        // etf_value = etf_nav(恒 1.0) × A 股首日值
+        assert_eq!(rows[0].3, rust_decimal::Decimal::from(100i64), "{rows:?}");
+        assert_eq!(rows[1].3, rust_decimal::Decimal::from(100i64), "{rows:?}");
+
+        // 幂等重跑：ON CONFLICT DO UPDATE，行数不膨胀
+        let n2 = sync_composite_equity_curve(&db, sid)
+            .await
+            .expect("重跑成功");
+        assert_eq!(n2, 2, "{n2}");
+        let cnt: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM backtest_composite_equity_curve WHERE strategy_id = $1",
+        )
+        .bind(sid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(cnt, 2, "重跑不应增加行数");
+
+        cleanup_composite(&db, sid).await;
+        cleanup_strategy_tree(&db, sid).await;
+        cleanup_curve(&db, task_id).await;
+    }
+
+    // ── detect_combo_sharing：同 combo 的 zzz 双策略精确分组 ──
+
+    #[tokio::test]
+    async fn detect_combo_sharing_zzz_same_combo_groups_both_strategies() {
+        let db = test_db().await;
+        let sid_a = "zzz_test_eqcs_grp_a";
+        let sid_b = "zzz_test_eqcs_grp_b";
+        mk_zzz_strategy(&db, sid_a, "zzz_test_shared_combo", "zzz_test_task_ga").await;
+        mk_zzz_strategy(&db, sid_b, "zzz_test_shared_combo", "zzz_test_task_gb").await;
+
+        let mut from_a = detect_combo_sharing(&db, sid_a).await;
+        from_a.sort();
+        assert_eq!(from_a, vec![sid_a.to_string(), sid_b.to_string()]);
+
+        let mut from_b = detect_combo_sharing(&db, sid_b).await;
+        from_b.sort();
+        assert_eq!(from_b, vec![sid_a.to_string(), sid_b.to_string()]);
+
+        cleanup_strategy_tree(&db, sid_a).await;
+        cleanup_strategy_tree(&db, sid_b).await;
+    }
+
+    // ── collect_active_strategies：账号状态过滤 ──
+
+    #[tokio::test]
+    async fn collect_active_strategies_filters_by_account_status() {
+        let db = test_db().await;
+        let sid_on = "zzz_test_eqcs_on";
+        let sid_off = "zzz_test_eqcs_off";
+        let aid_on = "zzz_test_eqcs_acc_on";
+        let aid_off = "zzz_test_eqcs_acc_off";
+        mk_zzz_account(&db, aid_on, sid_on, "active").await;
+        mk_zzz_account(&db, aid_off, sid_off, "inactive").await;
+
+        let got = collect_active_strategies(&db).await;
+        assert!(
+            got.iter().any(|s| s == sid_on),
+            "active 账号策略应被收集: {got:?}"
+        );
+        assert!(
+            got.iter().all(|s| s != sid_off),
+            "inactive 账号策略不应被收集: {got:?}"
+        );
+
+        cleanup_account(&db, aid_on).await;
+        cleanup_account(&db, aid_off).await;
+    }
+}
