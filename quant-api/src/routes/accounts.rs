@@ -1295,3 +1295,1640 @@ pub async fn push_account_dingtalk(
             .into_response(),
     }
 }
+
+// ── 连库测试（覆盖率补测第一批）────────────────────────────
+//
+// 模式沿用 users.rs third_batch / rebalance.rs fifth_batch 先例：
+// - test_state() 连真实本机 PG（postgres://gaocheng@localhost/quant），handler 直调
+//   跳过 axum HTTP 层；Tushare 客户端经 dotenv 加载 quant/.env（cwd=quant-api 时 ../.env 命中）。
+// - zzz_test_ 前缀独占键自造数据；paper_account 子表（snapshot/position/order→fill）
+//   均为 FK ON DELETE CASCADE，测试尾删主表行即全清。
+// - UserContext 不落库可任意构造；paper_account.user_id 有 FK→quant_user，
+//   造数挂 owner 用实存用户（OWNER=gaocheng / OTHER=admin）。
+// - 推送测试只走 403/404/不可达 webhook 分支——../.env 配有 DINGTALK_CLIENT_ID，
+//   fallback 会构造真实钉钉 URL，禁止让测试走到真实外发。
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use serde_json::Value;
+
+    /// 实存 quant_user(gaocheng, role=admin)——造数 owner。
+    const OWNER: &str = "47c7a8cd1595499da8724a7be70226e8";
+    /// 实存 quant_user(admin)——"他人账号" owner。
+    const OTHER: &str = "admin";
+
+    async fn test_state() -> Arc<AppState> {
+        let _ = dotenv::from_filename("../.env");
+        let _ = dotenv::dotenv();
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        let db = sqlx::PgPool::connect(&url).await.expect("test db connect");
+        let tushare = quant_data::tushare::client::TushareClient::from_env()
+            .expect("Tushare client init (需 TUSHARE_TOKEN: source ../.env)");
+        Arc::new(AppState {
+            start_time: chrono::Utc::now(),
+            db,
+            tushare,
+            sync_tasks: crate::sync_task_registry::new_registry(),
+        })
+    }
+
+    /// handler 直调后解包响应体为 serde_json::Value（users.rs third_batch 先例）。
+    async fn resp_json(resp: impl IntoResponse) -> Value {
+        let body = resp.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&bytes).expect("json response body")
+    }
+
+    fn ctx(id: &str, role: &str) -> UserContext {
+        UserContext {
+            user_id: id.to_string(),
+            username: "zzz_test".to_string(),
+            role: role.to_string(),
+        }
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).expect("合法日期")
+    }
+
+    fn days(i: usize) -> chrono::Duration {
+        chrono::Duration::days(i as i64)
+    }
+
+    fn utc_at(y: i32, m: u32, d: u32, h: u32) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc
+            .with_ymd_and_hms(y, m, d, h, 0, 0)
+            .single()
+            .expect("合法时刻")
+    }
+
+    /// 清残留并插入 zzz 账号（owner=OWNER, active/simulated/factor, 初始资金 10 万）。
+    async fn mk_account(db: &sqlx::PgPool, aid: &str) {
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(db)
+            .await;
+        sqlx::query(
+            "INSERT INTO paper_account
+               (paper_account_id, name, initial_capital, cash, status, account_type, signal_source, user_id)
+             VALUES ($1, $2, 100000, 100000, 'active', 'simulated', 'factor', $3)",
+        )
+        .bind(aid)
+        .bind(format!("zzz_{aid}"))
+        .bind(OWNER)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_account");
+    }
+
+    /// NAV 快照（daily_return/cumulative_return/max_drawdown 以小数入库存口径）。
+    async fn mk_nav(
+        db: &sqlx::PgPool,
+        aid: &str,
+        d: chrono::NaiveDate,
+        nav: f64,
+        dr: f64,
+        cr: f64,
+        mdd: f64,
+    ) {
+        sqlx::query(
+            "INSERT INTO paper_nav_snapshot
+               (nav_snapshot_id, paper_account_id, snapshot_date, nav, cash, market_value,
+                daily_return, cumulative_return, max_drawdown)
+             VALUES ($1, $2, $3, $4, 0, $4, $5, $6, $7)",
+        )
+        .bind(format!("zzz_snap_{}_{}", aid, d.format("%Y%m%d")))
+        .bind(aid)
+        .bind(d)
+        .bind(nav)
+        .bind(dr)
+        .bind(cr)
+        .bind(mdd)
+        .execute(db)
+        .await
+        .expect("insert zzz nav snapshot");
+    }
+
+    async fn mk_position(db: &sqlx::PgPool, aid: &str, symbol: &str, qty: f64, price: f64) {
+        sqlx::query(
+            "INSERT INTO paper_position
+               (paper_position_id, paper_account_id, symbol, quantity, avg_cost, market_price, market_value)
+             VALUES ($1, $2, $3, $4, $5, $5, $6)",
+        )
+        .bind(format!("zzz_pos_{}_{}", aid, symbol))
+        .bind(aid)
+        .bind(symbol)
+        .bind(qty)
+        .bind(price)
+        .bind(qty * price)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_position");
+    }
+
+    /// 订单（target_value 供调仓历史聚合；created_at 统一 04:00 UTC，任何时区 DATE() 同日）。
+    async fn mk_order(
+        db: &sqlx::PgPool,
+        oid: &str,
+        aid: &str,
+        symbol: &str,
+        side: &str,
+        status: &str,
+        created: chrono::DateTime<chrono::Utc>,
+        target_value: f64,
+    ) {
+        sqlx::query(
+            "INSERT INTO paper_order
+               (order_id, paper_account_id, symbol, side, order_type, quantity, status, created_at, target_value)
+             VALUES ($1, $2, $3, $4, 'limit', 100, $5, $6, $7)",
+        )
+        .bind(oid)
+        .bind(aid)
+        .bind(symbol)
+        .bind(side)
+        .bind(status)
+        .bind(created)
+        .bind(target_value)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_order");
+    }
+
+    async fn mk_fill(
+        db: &sqlx::PgPool,
+        fid: &str,
+        oid: &str,
+        aid: &str,
+        symbol: &str,
+        side: &str,
+        time: chrono::DateTime<chrono::Utc>,
+        price: f64,
+    ) {
+        sqlx::query(
+            "INSERT INTO paper_fill
+               (fill_id, order_id, paper_account_id, symbol, fill_time, side, quantity, price, amount, planned_order_id)
+             VALUES ($1, $2, $3, $4, $5, $6, 100, $7, $8, $2)",
+        )
+        .bind(fid)
+        .bind(oid)
+        .bind(aid)
+        .bind(symbol)
+        .bind(time)
+        .bind(side)
+        .bind(price)
+        .bind(100.0 * price)
+        .execute(db)
+        .await
+        .expect("insert zzz paper_fill");
+    }
+
+    /// 证券主档（无 FK 依赖，symbol 用 zzz 前缀防撞真实数据）。
+    async fn mk_stock(db: &sqlx::PgPool, symbol: &str, name: &str) {
+        let _ = sqlx::query("DELETE FROM market_stock WHERE symbol = $1")
+            .bind(symbol)
+            .execute(db)
+            .await;
+        sqlx::query(
+            "INSERT INTO market_stock (symbol, name, exchange, list_status) VALUES ($1, $2, 'SSE', 'L')",
+        )
+        .bind(symbol)
+        .bind(name)
+        .execute(db)
+        .await
+        .expect("insert zzz market_stock");
+    }
+
+    /// 活跃策略配置（leverage_cap 供列表 JOIN；strategy_id 由调用方给 zzz 键）。
+    async fn mk_strategy_config(db: &sqlx::PgPool, sid: &str, leverage_cap: f64) {
+        let _ = sqlx::query("DELETE FROM strategy_config WHERE strategy_id = $1")
+            .bind(sid)
+            .execute(db)
+            .await;
+        sqlx::query(
+            "INSERT INTO strategy_config (strategy_id, name, status, leverage_cap) VALUES ($1, 'zzz策略', 'active', $2)",
+        )
+        .bind(sid)
+        .bind(leverage_cap)
+        .execute(db)
+        .await
+        .expect("insert zzz strategy_config");
+    }
+
+    async fn cleanup_account(db: &sqlx::PgPool, aid: &str) {
+        let _ = sqlx::query("DELETE FROM paper_account WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(db)
+            .await;
+    }
+
+    async fn cleanup_strategy_config(db: &sqlx::PgPool, sid: &str) {
+        let _ = sqlx::query("DELETE FROM strategy_config WHERE strategy_id = $1")
+            .bind(sid)
+            .execute(db)
+            .await;
+    }
+
+    async fn cleanup_mvo_curve(db: &sqlx::PgPool, sid: &str) {
+        let _ =
+            sqlx::query("DELETE FROM backtest_mvo_equity_curve WHERE strategy_id = $1 AND trade_date >= '2027-01-01'")
+                .bind(sid)
+                .execute(db)
+                .await;
+    }
+
+    async fn cleanup_benchmark_bars(db: &sqlx::PgPool) {
+        let _ = sqlx::query(
+            "DELETE FROM market_index_daily_bar WHERE symbol = '000300.SH' AND trade_date >= '2027-01-01'",
+        )
+        .execute(db)
+        .await;
+    }
+
+    /// 列表断言辅助：从 data 数组中取指定账号行。
+    fn row_of<'a>(data: &'a Value, aid: &str) -> &'a Value {
+        data.as_array()
+            .expect("data 为数组")
+            .iter()
+            .find(|r| r["account_id"] == aid)
+            .unwrap_or_else(|| panic!("列表中未找到 {aid}: {data}"))
+    }
+
+    // ── list_accounts ──────────────────────────────────────
+
+    /// 非 admin 只见自己的 + 无主 active 账号，他人的不可见
+    #[tokio::test]
+    async fn list_accounts_scopes_non_admin_to_own_and_public() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let own = "zzz_test_acc_list_own";
+        let other = "zzz_test_acc_list_other";
+        let public = "zzz_test_acc_list_public";
+        mk_account(&db, own).await;
+        mk_account(&db, other).await;
+        sqlx::query("UPDATE paper_account SET user_id = $2 WHERE paper_account_id = $1")
+            .bind(other)
+            .bind(OTHER)
+            .execute(&db)
+            .await
+            .unwrap();
+        mk_account(&db, public).await;
+        sqlx::query("UPDATE paper_account SET user_id = NULL WHERE paper_account_id = $1")
+            .bind(public)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let body = resp_json(
+            list_accounts(
+                State(state.clone()),
+                ctx(OWNER, "user"),
+                Query(AccountFilter::default()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+        let data = &body["data"];
+        assert!(row_of(data, own)["account_id"] == own, "{data}");
+        assert!(row_of(data, public)["account_id"] == public, "{data}");
+        assert!(
+            data.as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["account_id"] != other),
+            "他人账号不应可见: {data}"
+        );
+
+        cleanup_account(&db, own).await;
+        cleanup_account(&db, other).await;
+        cleanup_account(&db, public).await;
+    }
+
+    /// admin 无权限过滤，全部可见（含挂他人 user_id 的账号）
+    #[tokio::test]
+    async fn list_accounts_admin_sees_all() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let other = "zzz_test_acc_list_adm";
+        mk_account(&db, other).await;
+        sqlx::query("UPDATE paper_account SET user_id = $2 WHERE paper_account_id = $1")
+            .bind(other)
+            .bind(OTHER)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let body = resp_json(
+            list_accounts(
+                State(state.clone()),
+                ctx(OWNER, "admin"),
+                Query(AccountFilter::default()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+        // 挂他人 user_id 的账号对 admin 可见
+        let row = row_of(&body["data"], other);
+        assert_eq!(row["owner"], OTHER, "{row}");
+
+        cleanup_account(&db, other).await;
+    }
+
+    /// 名称模糊过滤（zzz 独占名精确圈定）
+    #[tokio::test]
+    async fn list_accounts_filters_by_name() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let hit = "zzz_test_acc_name_hit";
+        let miss = "zzz_test_acc_name_miss";
+        mk_account(&db, hit).await;
+        mk_account(&db, miss).await;
+        sqlx::query("UPDATE paper_account SET name = 'zzz独占命中名' WHERE paper_account_id = $1")
+            .bind(hit)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let body = resp_json(
+            list_accounts(
+                State(state.clone()),
+                ctx(OWNER, "admin"),
+                Query(AccountFilter {
+                    name: Some("zzz独占命中名".into()),
+                    ..AccountFilter::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+        let arr = body["data"].as_array().expect("data 为数组");
+        assert!(arr.len() >= 1, "{body}");
+        assert!(arr.iter().all(|r| r["name"] == "zzz独占命中名"), "{body}");
+
+        cleanup_account(&db, hit).await;
+        cleanup_account(&db, miss).await;
+    }
+
+    /// 杠杆开关 + 信号源 + 状态过滤组合
+    #[tokio::test]
+    async fn list_accounts_filters_leverage_signal_status() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let lev = "zzz_test_acc_flt_lev";
+        let pred = "zzz_test_acc_flt_pred";
+        let stopped = "zzz_test_acc_flt_stop";
+        mk_account(&db, lev).await;
+        sqlx::query(
+            "UPDATE paper_account SET leverage_enabled = true, leverage_multiplier = 2.0 WHERE paper_account_id = $1",
+        )
+        .bind(lev)
+        .execute(&db)
+        .await
+        .unwrap();
+        mk_account(&db, pred).await;
+        sqlx::query(
+            "UPDATE paper_account SET signal_source = 'prediction' WHERE paper_account_id = $1",
+        )
+        .bind(pred)
+        .execute(&db)
+        .await
+        .unwrap();
+        mk_account(&db, stopped).await;
+        sqlx::query("UPDATE paper_account SET status = 'inactive' WHERE paper_account_id = $1")
+            .bind(stopped)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let query = |filter: AccountFilter| {
+            let state = state.clone();
+            async move {
+                resp_json(list_accounts(State(state), ctx(OWNER, "admin"), Query(filter)).await)
+                    .await
+            }
+        };
+
+        // leverage=enabled 只回杠杆账号
+        let body = query(AccountFilter {
+            leverage: Some("enabled".into()),
+            ..AccountFilter::default()
+        })
+        .await;
+        let arr = body["data"].as_array().unwrap();
+        assert!(arr.iter().any(|r| r["account_id"] == lev), "{body}");
+        assert!(arr.iter().all(|r| r["leverage_enabled"] == true), "{body}");
+
+        // signal_source=prediction 只回预测账号
+        let body = query(AccountFilter {
+            signal_source: Some("prediction".into()),
+            ..AccountFilter::default()
+        })
+        .await;
+        let arr = body["data"].as_array().unwrap();
+        assert!(arr.iter().any(|r| r["account_id"] == pred), "{body}");
+        // 真实库可能有无主 prediction 账号被合法圈入,断言限定 zzz 造数行集合
+        // (list 序列化不含 signal_source 字段,以结果集合验证过滤生效)
+        let zzz_ids: Vec<&str> = arr
+            .iter()
+            .filter_map(|r| r["account_id"].as_str())
+            .filter(|id| id.starts_with("zzz_test_"))
+            .collect();
+        assert!(zzz_ids.contains(&&*pred), "{body}");
+        assert!(zzz_ids.iter().all(|id| !id.contains("factor")), "{body}");
+
+        // status=inactive 只回停用账号
+        let body = query(AccountFilter {
+            status: Some("inactive".into()),
+            ..AccountFilter::default()
+        })
+        .await;
+        let arr = body["data"].as_array().unwrap();
+        assert!(arr.iter().any(|r| r["account_id"] == stopped), "{body}");
+        assert!(arr.iter().all(|r| r["status"] == "inactive"), "{body}");
+
+        // lev_mult 范围:2.0~2.5 含杠杆账号、排除 1.0
+        let body = query(AccountFilter {
+            lev_mult_min: Some(2.0),
+            lev_mult_max: Some(2.5),
+            ..AccountFilter::default()
+        })
+        .await;
+        let arr = body["data"].as_array().unwrap();
+        assert!(arr.iter().any(|r| r["account_id"] == lev), "{body}");
+        assert!(arr.iter().all(|r| r["account_id"] != pred), "{body}");
+
+        cleanup_account(&db, lev).await;
+        cleanup_account(&db, pred).await;
+        cleanup_account(&db, stopped).await;
+    }
+
+    /// 列表行内嵌 NAV 实时绩效：3 天快照 → 累计 21% / 胜率 100% / trading_days=2
+    #[tokio::test]
+    async fn list_accounts_embeds_nav_perf() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_perf";
+        mk_account(&db, aid).await;
+        let base = date(2027, 5, 3);
+        for (i, nav) in [100000.0, 110000.0, 121000.0].into_iter().enumerate() {
+            mk_nav(&db, aid, base + days(i), nav, 0.1, 0.0, 0.0).await;
+        }
+
+        let body = resp_json(
+            list_accounts(
+                State(state.clone()),
+                ctx(OWNER, "admin"),
+                Query(AccountFilter::default()),
+            )
+            .await,
+        )
+        .await;
+        let row = row_of(&body["data"], aid);
+        assert_eq!(row["cumulative_return_pct"], 21.0, "{row}");
+        assert!(
+            row["annual_return_pct"].as_f64().unwrap_or(0.0) > 0.0,
+            "年化应为正: {row}"
+        );
+        assert_eq!(row["max_drawdown"], 0.0, "单调上涨无回撤: {row}");
+        assert_eq!(row["owner"], OWNER, "{row}");
+        assert_eq!(row["initial_capital"], 100000.0, "{row}");
+
+        cleanup_account(&db, aid).await;
+    }
+
+    /// strategy_config(active) JOIN 带出 leverage_cap
+    #[tokio::test]
+    async fn list_accounts_joins_leverage_cap() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_cap";
+        let sid = "zzz_test_acc_cap_sc";
+        mk_account(&db, aid).await;
+        sqlx::query(
+            "UPDATE paper_account SET strategy_version_id = $2 WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .bind(sid)
+        .execute(&db)
+        .await
+        .unwrap();
+        mk_strategy_config(&db, sid, 1.6).await;
+
+        let body = resp_json(
+            list_accounts(
+                State(state.clone()),
+                ctx(OWNER, "admin"),
+                Query(AccountFilter::default()),
+            )
+            .await,
+        )
+        .await;
+        let row = row_of(&body["data"], aid);
+        assert_eq!(row["leverage_cap"], 1.6, "{row}");
+
+        cleanup_account(&db, aid).await;
+        cleanup_strategy_config(&db, sid).await;
+    }
+
+    // ── account_detail ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn account_detail_404_for_missing_id() {
+        let state = test_state().await;
+        let body = resp_json(
+            account_detail(
+                State(state.clone()),
+                ctx(OWNER, "admin"),
+                Path("zzz_test_acc_missing".into()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 404, "{body}");
+        assert_eq!(body["message"], "账号不存在");
+    }
+
+    /// 非 owner 访问他人账号 → 403（check_account_access 三端点共用规则）
+    #[tokio::test]
+    async fn account_detail_403_for_non_owner() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_403";
+        mk_account(&db, aid).await;
+        let body = resp_json(
+            account_detail(
+                State(state.clone()),
+                ctx("zzz_stranger", "user"),
+                Path(aid.into()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 403, "{body}");
+        assert_eq!(body["message"], "无权访问");
+        cleanup_account(&db, aid).await;
+    }
+
+    /// 详情完整载荷：基本信息 + NAV 绩效 + 持持(带证券名) + 成交记录 + 资产分布
+    #[tokio::test]
+    async fn account_detail_returns_full_payload() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_detail";
+        mk_account(&db, aid).await;
+        sqlx::query(
+            "UPDATE paper_account SET current_nav = 121000, max_drawdown_pct = 0.05, cash = 5000 WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .execute(&db)
+        .await
+        .unwrap();
+        let base = date(2027, 5, 3);
+        for (i, nav) in [100000.0, 110000.0, 121000.0].into_iter().enumerate() {
+            mk_nav(&db, aid, base + days(i), nav, 0.1, 0.21, 0.0).await;
+        }
+        mk_stock(&db, "zzz600.SH", "zzz测试股").await;
+        mk_stock(&db, "zzz999.SH", "zzz二号股").await;
+        mk_position(&db, aid, "zzz600.SH", 1000.0, 50.0).await;
+        mk_position(&db, aid, "zzz999.SH", 200.0, 10.0).await;
+        let t = utc_at(2027, 5, 5, 4);
+        mk_order(
+            &db,
+            "zzz_ord_d1",
+            aid,
+            "zzz600.SH",
+            "buy",
+            "filled",
+            t,
+            50000.0,
+        )
+        .await;
+        mk_fill(
+            &db,
+            "zzz_fill_d1",
+            "zzz_ord_d1",
+            aid,
+            "zzz600.SH",
+            "buy",
+            t,
+            50.0,
+        )
+        .await;
+
+        let body = resp_json(
+            account_detail(State(state.clone()), ctx(OWNER, "user"), Path(aid.into())).await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+        let d = &body["data"];
+        assert_eq!(d["account_id"], aid, "{d}");
+        assert_eq!(d["name"], format!("zzz_{aid}"), "{d}");
+        assert_eq!(d["current_nav"], 121000.0, "{d}");
+        assert_eq!(d["cash"], 5000.0, "{d}");
+        assert_eq!(d["signal_source"], "factor", "{d}");
+        assert_eq!(d["owner"], OWNER, "{d}");
+        assert!(
+            d["created_at"].as_str().is_some(),
+            "created_at 已格式化: {d}"
+        );
+
+        let m = &d["metrics"];
+        assert_eq!(m["cumulative_return_pct"], 21.0, "{m}");
+        assert_eq!(m["nav_history_days"], 2, "{m}");
+        assert_eq!(m["win_rate_pct"], 100.0, "{m}");
+        assert_eq!(m["max_drawdown_pct"], 0.0, "NAV 序列优先于账号字段: {m}");
+
+        // 持仓按市值降序（zzz999 2000 < zzz600 50000），证券名经 market_stock JOIN 带出
+        let positions = d["positions"].as_array().expect("positions");
+        assert_eq!(positions.len(), 2, "{d}");
+        assert_eq!(positions[0]["symbol"], "zzz600.SH", "{positions:?}");
+        assert_eq!(positions[0]["name"], "zzz测试股", "{positions:?}");
+        assert_eq!(positions[1]["name"], "zzz二号股", "{positions:?}");
+
+        // 资产分布：两持仓均分类 A 股 → 单类 100%
+        let alloc = d["asset_allocation"].as_array().expect("asset_allocation");
+        assert_eq!(alloc.len(), 1, "{alloc:?}");
+        assert_eq!(alloc[0]["name"], "A股", "{alloc:?}");
+        assert!(
+            (alloc[0]["pct"].as_f64().unwrap() - 100.0).abs() < 0.01,
+            "{alloc:?}"
+        );
+
+        // 交易记录含成交价（NUMERIC 经 serde 为字符串形态，parse 后近似比较）
+        let trades = d["trades"].as_array().expect("trades");
+        assert_eq!(trades.len(), 1, "{d}");
+        assert_eq!(trades[0]["order_id"], "zzz_ord_d1", "{trades:?}");
+        let fp = trades[0]["fill_price"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!((fp - 50.0).abs() < 1e-6, "{trades:?}");
+        assert_eq!(trades[0]["name"], "zzz测试股", "{trades:?}");
+
+        cleanup_account(&db, aid).await;
+        let _ = sqlx::query("DELETE FROM market_stock WHERE symbol IN ('zzz600.SH', 'zzz999.SH')")
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    // ── nav_history ────────────────────────────────────────
+
+    /// start/end 裁剪 + relative_return 以区间首日归零
+    #[tokio::test]
+    async fn nav_history_range_and_relative_return() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_navrng";
+        mk_account(&db, aid).await;
+        let base = date(2027, 5, 3);
+        let navs = [100000.0, 102000.0, 104040.0, 106121.0];
+        for (i, nav) in navs.into_iter().enumerate() {
+            mk_nav(&db, aid, base + days(i), nav, 0.02, 0.06, 0.0).await;
+        }
+
+        let body = resp_json(
+            nav_history(
+                State(state.clone()),
+                ctx(OWNER, "user"),
+                Path(aid.into()),
+                Query(NavHistoryParams {
+                    start_date: Some("2027-05-04".into()),
+                    end_date: Some("2027-05-05".into()),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+        let hist = body["data"]["nav_history"].as_array().expect("nav_history");
+        assert_eq!(hist.len(), 2, "日期裁剪应留中间两天: {hist:?}");
+        assert_eq!(hist[0]["date"], "2027-05-04", "{hist:?}");
+        // 首日归零、次日 = 104040/102000-1 = 2%
+        assert_eq!(hist[0]["relative_return"], 0.0, "{hist:?}");
+        assert_eq!(hist[1]["relative_return"], 2.0, "{hist:?}");
+        assert_eq!(hist[0]["daily_return"], 2.0, "dr=0.02 转百分数: {hist:?}");
+        assert_eq!(
+            hist[0]["cumulative_return"], 6.0,
+            "cr=0.06 转百分数: {hist:?}"
+        );
+        // 无回测数据时为 Null(benchmark 不判——与并行基准测试的 000300.SH 造数竞态)
+        assert!(body["data"]["backtest_comparison"].is_null(), "{body}");
+
+        cleanup_account(&db, aid).await;
+    }
+
+    /// 基准曲线（000300.SH 归一化累计收益），2027 冷门日期避免撞真实数据
+    #[tokio::test]
+    async fn nav_history_benchmark_curve() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_bench";
+        cleanup_benchmark_bars(&db).await;
+        mk_account(&db, aid).await;
+        let base = date(2027, 5, 3);
+        for (i, nav) in [100000.0, 102000.0, 104040.0].into_iter().enumerate() {
+            mk_nav(&db, aid, base + days(i), nav, 0.02, 0.04, 0.0).await;
+        }
+        for (i, close) in [4000.0, 4040.0, 4080.4].into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO market_index_daily_bar (symbol, trade_date, close, source) VALUES ('000300.SH', $1, $2, 'zzz_test')",
+            )
+            .bind(base + days(i))
+            .bind(close)
+            .execute(&db)
+            .await
+            .expect("insert zzz benchmark bar");
+        }
+
+        let body = resp_json(
+            nav_history(
+                State(state.clone()),
+                ctx(OWNER, "user"),
+                Path(aid.into()),
+                Query(NavHistoryParams {
+                    start_date: None,
+                    end_date: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let bench = &body["data"]["benchmark"];
+        assert_eq!(bench["symbol"], "000300.SH", "{bench}");
+        assert_eq!(bench["name"], "沪深300", "{bench}");
+        let curve = bench["curve"].as_array().expect("curve");
+        assert_eq!(curve.len(), 3, "{bench}");
+        assert_eq!(curve[0]["cumulative_return"], 0.0, "{bench}");
+        assert_eq!(curve[1]["cumulative_return"], 1.0, "{bench}");
+        assert_eq!(curve[2]["cumulative_return"], 2.01, "{bench}");
+
+        cleanup_account(&db, aid).await;
+        cleanup_benchmark_bars(&db).await;
+    }
+
+    /// 回测对比：精确同杠杆 MVO 曲线直接用（amplify=1.0）
+    #[tokio::test]
+    async fn nav_history_backtest_comparison_exact_leverage() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_btex";
+        let sid = "zzz_test_acc_btex_sc";
+        cleanup_mvo_curve(&db, sid).await;
+        mk_account(&db, aid).await;
+        sqlx::query(
+            "UPDATE paper_account SET strategy_version_id = $2, leverage_multiplier = 2.0 WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .bind(sid)
+        .execute(&db)
+        .await
+        .unwrap();
+        mk_strategy_config(&db, sid, 2.3).await;
+        let base = date(2027, 5, 3);
+        for (i, nav) in [100000.0, 102000.0].into_iter().enumerate() {
+            mk_nav(&db, aid, base + days(i), nav, 0.02, 0.02, 0.0).await;
+        }
+        for (i, pv) in [100.0, 110.0].into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO backtest_mvo_equity_curve (strategy_id, trade_date, portfolio_value, leverage_multiplier) VALUES ($1, $2, $3, 2.0)",
+            )
+            .bind(sid)
+            .bind(base + days(i))
+            .bind(pv)
+            .execute(&db)
+            .await
+            .expect("insert zzz mvo curve");
+        }
+
+        let body = resp_json(
+            nav_history(
+                State(state.clone()),
+                ctx(OWNER, "user"),
+                Path(aid.into()),
+                Query(NavHistoryParams {
+                    start_date: None,
+                    end_date: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let cmp = body["data"]["backtest_comparison"]
+            .as_array()
+            .expect("对比曲线");
+        assert_eq!(cmp.len(), 2, "{body}");
+        assert_eq!(cmp[0]["cumulative_return"], 0.0, "{cmp:?}");
+        assert_eq!(
+            cmp[1]["cumulative_return"], 10.0,
+            "精确杠杆匹配不放大: {cmp:?}"
+        );
+
+        cleanup_account(&db, aid).await;
+        cleanup_strategy_config(&db, sid).await;
+        cleanup_mvo_curve(&db, sid).await;
+    }
+
+    /// 回测对比：无同杠杆曲线时回退 1.0 杠杆 × leverage_multiplier 线性放大
+    #[tokio::test]
+    async fn nav_history_backtest_comparison_amplified_fallback() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_btfb";
+        let sid = "zzz_test_acc_btfb_sc";
+        cleanup_mvo_curve(&db, sid).await;
+        mk_account(&db, aid).await;
+        sqlx::query(
+            "UPDATE paper_account SET strategy_version_id = $2, leverage_multiplier = 2.0 WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .bind(sid)
+        .execute(&db)
+        .await
+        .unwrap();
+        mk_strategy_config(&db, sid, 2.3).await;
+        let base = date(2027, 5, 3);
+        for (i, nav) in [100000.0, 102000.0].into_iter().enumerate() {
+            mk_nav(&db, aid, base + days(i), nav, 0.02, 0.02, 0.0).await;
+        }
+        // 只有 1.0 杠杆曲线（10% 涨幅）→ amplify=2.0 → 20%
+        for (i, pv) in [100.0, 110.0].into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO backtest_mvo_equity_curve (strategy_id, trade_date, portfolio_value, leverage_multiplier) VALUES ($1, $2, $3, 1.0)",
+            )
+            .bind(sid)
+            .bind(base + days(i))
+            .bind(pv)
+            .execute(&db)
+            .await
+            .expect("insert zzz mvo curve");
+        }
+
+        let body = resp_json(
+            nav_history(
+                State(state.clone()),
+                ctx(OWNER, "user"),
+                Path(aid.into()),
+                Query(NavHistoryParams {
+                    start_date: None,
+                    end_date: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        let cmp = body["data"]["backtest_comparison"]
+            .as_array()
+            .expect("对比曲线");
+        assert_eq!(cmp.len(), 2, "{body}");
+        assert_eq!(
+            cmp[1]["cumulative_return"], 20.0,
+            "1.0 曲线应×2 放大: {cmp:?}"
+        );
+
+        cleanup_account(&db, aid).await;
+        cleanup_strategy_config(&db, sid).await;
+        cleanup_mvo_curve(&db, sid).await;
+    }
+
+    // ── rebalance_history ──────────────────────────────────
+
+    /// 按日分组聚合 filled 订单（buy/sell 计数与金额），pending 不计入
+    #[tokio::test]
+    async fn rebalance_history_groups_filled_orders_by_date() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_reb";
+        mk_account(&db, aid).await;
+        let t = utc_at(2026, 1, 5, 4); // Asia/Shanghai 12:00 同日，DATE() 稳定
+        mk_order(
+            &db,
+            "zzz_ord_rb1",
+            aid,
+            "zzz600.SH",
+            "buy",
+            "filled",
+            t,
+            10000.0,
+        )
+        .await;
+        mk_order(
+            &db,
+            "zzz_ord_rb2",
+            aid,
+            "zzz600.SH",
+            "sell",
+            "filled",
+            t,
+            8000.0,
+        )
+        .await;
+        mk_order(
+            &db,
+            "zzz_ord_rb3",
+            aid,
+            "zzz600.SH",
+            "buy",
+            "pending",
+            t,
+            9999.0,
+        )
+        .await;
+        mk_fill(
+            &db,
+            "zzz_fill_rb1",
+            "zzz_ord_rb1",
+            aid,
+            "zzz600.SH",
+            "buy",
+            t,
+            10.5,
+        )
+        .await;
+        mk_fill(
+            &db,
+            "zzz_fill_rb2",
+            "zzz_ord_rb2",
+            aid,
+            "zzz600.SH",
+            "sell",
+            t,
+            9.8,
+        )
+        .await;
+
+        let body = resp_json(
+            rebalance_history(State(state.clone()), ctx(OWNER, "user"), Path(aid.into())).await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+        let hist = body["data"]["rebalance_history"]
+            .as_array()
+            .expect("history");
+        // 只有一组（2026-01-05），pending 不产生分组
+        assert_eq!(hist.len(), 1, "{hist:?}");
+        let day = &hist[0];
+        assert_eq!(day["date"], "2026-01-05", "{day}");
+        assert_eq!(day["buy_count"], 1, "{day}");
+        assert_eq!(day["sell_count"], 1, "{day}");
+        assert_eq!(day["total_count"], 2, "{day}");
+        assert_eq!(day["buy_amount"], 10000.0, "{day}");
+        assert_eq!(day["sell_amount"], 8000.0, "{day}");
+        assert_eq!(day["turnover"], 18000.0, "{day}");
+        let trades = day["trades"].as_array().expect("trades");
+        assert_eq!(trades.len(), 2, "{day}");
+        let prices: Vec<f64> = trades
+            .iter()
+            .filter_map(|x| x["fill_price"].as_str())
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        assert!(
+            prices.contains(&10.5) && prices.contains(&9.8),
+            "{trades:?}"
+        );
+
+        cleanup_account(&db, aid).await;
+    }
+
+    // ── create_account ─────────────────────────────────────
+
+    /// 最小请求：全默认值落库（simulated/100万/factor/fixed/1.0/挂当前用户）
+    #[tokio::test]
+    async fn create_account_with_defaults() {
+        let state = test_state().await;
+        let req = CreateAccountRequest {
+            strategy_id: "zzz_test_strat".into(),
+            account_type: None,
+            name: "zzz创建默认".into(),
+            initial_capital: None,
+            leverage_enabled: None,
+            leverage_mode: None,
+            leverage_multiplier: None,
+            signal_source: None,
+        };
+        let body =
+            resp_json(create_account(State(state.clone()), ctx(OWNER, "user"), Json(req)).await)
+                .await;
+        assert_eq!(body["code"], 0, "{body}");
+        let aid = body["data"]["account_id"]
+            .as_str()
+            .expect("account_id")
+            .to_string();
+        assert!(aid.starts_with("pa-"), "pa- 前缀: {aid}");
+
+        let (name, atype, cap, cash, lev_en, lev_mode, lev_mult, ss, uid, sv, status): (
+            String, String, f64, f64, bool, String, f64, String, Option<String>, Option<String>, String,
+        ) = sqlx::query_as(
+            "SELECT name, account_type, initial_capital::float8, cash::float8, leverage_enabled,
+                    leverage_mode, leverage_multiplier, signal_source, user_id, strategy_version_id, status
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(&aid)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(name, "zzz创建默认");
+        assert_eq!(atype, "simulated");
+        assert!(
+            (cap - 1_000_000.0).abs() < 1e-6,
+            "默认初始资金 100 万: {cap}"
+        );
+        assert!((cash - cap).abs() < 1e-6, "cash=initial_capital: {cash}");
+        assert!(!lev_en);
+        assert_eq!(lev_mode, "fixed");
+        assert!((lev_mult - 1.0).abs() < 1e-9);
+        assert_eq!(ss, "factor");
+        assert_eq!(uid.as_deref(), Some(OWNER));
+        assert!(sv.is_none(), "req.strategy_id 不落库(现行行为)");
+        assert_eq!(status, "active");
+
+        cleanup_account(&state.db, &aid).await;
+    }
+
+    /// 显式参数全量落库
+    #[tokio::test]
+    async fn create_account_with_full_params() {
+        let state = test_state().await;
+        let req = CreateAccountRequest {
+            strategy_id: "zzz_test_strat".into(),
+            account_type: Some("real".into()),
+            name: "zzz创建全参".into(),
+            initial_capital: Some(500000.0),
+            leverage_enabled: Some(true),
+            leverage_mode: Some("dynamic".into()),
+            leverage_multiplier: Some(2.0),
+            signal_source: Some("prediction".into()),
+        };
+        let body =
+            resp_json(create_account(State(state.clone()), ctx(OWNER, "user"), Json(req)).await)
+                .await;
+        assert_eq!(body["code"], 0, "{body}");
+        let aid = body["data"]["account_id"]
+            .as_str()
+            .expect("account_id")
+            .to_string();
+
+        let (atype, cap, lev_en, lev_mode, lev_mult, ss): (
+            String, f64, bool, String, f64, String,
+        ) = sqlx::query_as(
+            "SELECT account_type, initial_capital::float8, leverage_enabled, leverage_mode, leverage_multiplier, signal_source
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(&aid)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(atype, "real");
+        assert!((cap - 500000.0).abs() < 1e-6);
+        assert!(lev_en);
+        assert_eq!(lev_mode, "dynamic");
+        assert!((lev_mult - 2.0).abs() < 1e-9);
+        assert_eq!(ss, "prediction");
+
+        cleanup_account(&state.db, &aid).await;
+    }
+
+    /// 超长名称触发 DB 列宽拒绝 → code=1 创建失败
+    #[tokio::test]
+    async fn create_account_rejects_oversized_name() {
+        let state = test_state().await;
+        let req = CreateAccountRequest {
+            strategy_id: "zzz_test_strat".into(),
+            account_type: None,
+            name: "z".repeat(130), // name varchar(128)
+            initial_capital: None,
+            leverage_enabled: None,
+            leverage_mode: None,
+            leverage_multiplier: None,
+            signal_source: None,
+        };
+        let body =
+            resp_json(create_account(State(state.clone()), ctx(OWNER, "user"), Json(req)).await)
+                .await;
+        assert_eq!(body["code"], 1, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("创建失败"),
+            "{body}"
+        );
+    }
+
+    // ── update_account ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_account_changes_fields() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_upd";
+        mk_account(&db, aid).await;
+        let req = UpdateAccountRequest {
+            name: Some("zzz改名后".into()),
+            initial_capital: None,
+            leverage_enabled: Some(true),
+            leverage_mode: None,
+            leverage_multiplier: Some(2.5),
+            signal_source: Some("prediction".into()),
+            status: Some("inactive".into()),
+            dingtalk_webhook_url: None,
+            margin_amount: Some(1000.0),
+            cash: Some(99000.0),
+            reserve_amount: None,
+            strategy_version_id: Some("zzz_test_sv_upd".into()),
+        };
+        let body = resp_json(
+            update_account(
+                State(state.clone()),
+                ctx(OWNER, "user"),
+                Path(aid.into()),
+                Json(req),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+
+        let (name, lev_en, lev_mult, ss, status, margin, cash, sv): (
+            String,
+            bool,
+            f64,
+            String,
+            String,
+            f64,
+            f64,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT name, leverage_enabled, leverage_multiplier, signal_source, status,
+                    margin_amount::float8, cash::float8, strategy_version_id
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(name, "zzz改名后");
+        assert!(lev_en);
+        assert!((lev_mult - 2.5).abs() < 1e-9);
+        assert_eq!(ss, "prediction");
+        assert_eq!(status, "inactive");
+        assert!((margin - 1000.0).abs() < 1e-6);
+        assert!((cash - 99000.0).abs() < 1e-6);
+        assert_eq!(sv.as_deref(), Some("zzz_test_sv_upd"));
+
+        cleanup_account(&db, aid).await;
+    }
+
+    #[tokio::test]
+    async fn update_account_403_for_non_owner() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_upd403";
+        mk_account(&db, aid).await;
+        let req = UpdateAccountRequest {
+            name: Some("zzz越权".into()),
+            initial_capital: None,
+            leverage_enabled: None,
+            leverage_mode: None,
+            leverage_multiplier: None,
+            signal_source: None,
+            status: None,
+            dingtalk_webhook_url: None,
+            margin_amount: None,
+            cash: None,
+            reserve_amount: None,
+            strategy_version_id: None,
+        };
+        let body = resp_json(
+            update_account(
+                State(state.clone()),
+                ctx("zzz_stranger", "user"),
+                Path(aid.into()),
+                Json(req),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 403, "{body}");
+        assert_eq!(body["message"], "只能修改自己的账号");
+        // 越权请求不落任何改动
+        let name: String =
+            sqlx::query_scalar("SELECT name FROM paper_account WHERE paper_account_id = $1")
+                .bind(aid)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(name, format!("zzz_{aid}"));
+        cleanup_account(&db, aid).await;
+    }
+
+    // ── delete_account ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn delete_account_soft_deletes_to_inactive() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_del";
+        mk_account(&db, aid).await;
+        let body = resp_json(
+            delete_account(State(state.clone()), ctx(OWNER, "user"), Path(aid.into())).await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+        assert_eq!(body["message"], "已停用");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM paper_account WHERE paper_account_id = $1")
+                .bind(aid)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(status, "inactive", "软删除只停用不物理删");
+        cleanup_account(&db, aid).await;
+    }
+
+    #[tokio::test]
+    async fn delete_account_403_for_non_owner() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_del403";
+        mk_account(&db, aid).await;
+        let body = resp_json(
+            delete_account(
+                State(state.clone()),
+                ctx("zzz_stranger", "user"),
+                Path(aid.into()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 403, "{body}");
+        assert_eq!(body["message"], "只能删除自己的账号");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM paper_account WHERE paper_account_id = $1")
+                .bind(aid)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(status, "active");
+        cleanup_account(&db, aid).await;
+    }
+
+    // ── reset_account ──────────────────────────────────────
+
+    /// 重置：清空关联表 + 资金四字段重置 + created_at 改起始日期
+    #[tokio::test]
+    async fn reset_account_wipes_and_reinitializes() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_reset";
+        mk_account(&db, aid).await;
+        mk_nav(&db, aid, date(2027, 5, 3), 100000.0, 0.0, 0.0, 0.0).await;
+        mk_nav(&db, aid, date(2027, 5, 4), 102000.0, 0.02, 0.02, 0.0).await;
+        mk_position(&db, aid, "zzz600.SH", 100.0, 50.0).await;
+        mk_order(
+            &db,
+            "zzz_ord_rs1",
+            aid,
+            "zzz600.SH",
+            "buy",
+            "filled",
+            utc_at(2027, 5, 4, 4),
+            5000.0,
+        )
+        .await;
+
+        let body = resp_json(
+            reset_account(
+                State(state.clone()),
+                ctx(OWNER, "user"),
+                Path(aid.into()),
+                Json(ResetAccountRequest {
+                    initial_capital: 500000.0,
+                    start_date: "2025-01-06".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 0, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("500000"),
+            "提示含起始资金: {body}"
+        );
+
+        let (snap_n, order_n, pos_n): (i64, i64, i64) = sqlx::query_as(
+            "SELECT
+               (SELECT COUNT(*) FROM paper_nav_snapshot WHERE paper_account_id = $1),
+               (SELECT COUNT(*) FROM paper_order WHERE paper_account_id = $1),
+               (SELECT COUNT(*) FROM paper_position WHERE paper_account_id = $1)",
+        )
+        .bind(aid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!((snap_n, order_n, pos_n), (0, 0, 0), "关联数据应清空");
+
+        let (cap, cash, nav, peak, margin, mdd, created): (
+            f64,
+            f64,
+            f64,
+            f64,
+            f64,
+            f64,
+            chrono::NaiveDate,
+        ) = sqlx::query_as(
+            "SELECT initial_capital::float8, cash::float8, current_nav::float8, peak_nav::float8,
+                    margin_amount::float8, max_drawdown_pct::float8, created_at::date
+             FROM paper_account WHERE paper_account_id = $1",
+        )
+        .bind(aid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!((cap - 500000.0).abs() < 1e-6, "{cap}");
+        assert!((cash - 500000.0).abs() < 1e-6, "{cash}");
+        assert!((nav - 500000.0).abs() < 1e-6, "{nav}");
+        assert!((peak - 500000.0).abs() < 1e-6, "{peak}");
+        assert!((margin - 0.0).abs() < 1e-6, "{margin}");
+        assert!((mdd - 0.0).abs() < 1e-9, "{mdd}");
+        assert_eq!(created, date(2025, 1, 6), "起始日期应写入 created_at");
+
+        cleanup_account(&db, aid).await;
+    }
+
+    #[tokio::test]
+    async fn reset_account_rejects_bad_date_format() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_rstbad";
+        mk_account(&db, aid).await;
+        let body = resp_json(
+            reset_account(
+                State(state.clone()),
+                ctx(OWNER, "user"),
+                Path(aid.into()),
+                Json(ResetAccountRequest {
+                    initial_capital: 100000.0,
+                    start_date: "2025/01/06".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 1, "{body}");
+        assert_eq!(body["message"], "日期格式错误，需要 YYYY-MM-DD");
+        cleanup_account(&db, aid).await;
+    }
+
+    #[tokio::test]
+    async fn reset_account_403_for_non_owner() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_rst403";
+        mk_account(&db, aid).await;
+        let body = resp_json(
+            reset_account(
+                State(state.clone()),
+                ctx("zzz_stranger", "user"),
+                Path(aid.into()),
+                Json(ResetAccountRequest {
+                    initial_capital: 100000.0,
+                    start_date: "2025-01-06".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 403, "{body}");
+        assert_eq!(body["message"], "只能重置自己的账号");
+        cleanup_account(&db, aid).await;
+    }
+
+    // ── push_account_dingtalk ──────────────────────────────
+    // ../.env 配有 DINGTALK_CLIENT_ID（fallback 真实 URL），成功分支会外发钉钉——
+    // 只测 403/404 与不可达 webhook 的失败分支。
+
+    #[tokio::test]
+    async fn push_dingtalk_403_for_non_owner() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_push403";
+        mk_account(&db, aid).await;
+        let body = resp_json(
+            push_account_dingtalk(
+                State(state.clone()),
+                ctx("zzz_stranger", "user"),
+                Path(aid.into()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 403, "{body}");
+        assert_eq!(body["message"], "无权操作");
+        cleanup_account(&db, aid).await;
+    }
+
+    #[tokio::test]
+    async fn push_dingtalk_404_for_missing_account() {
+        let state = test_state().await;
+        let body = resp_json(
+            push_account_dingtalk(
+                State(state.clone()),
+                ctx(OWNER, "admin"),
+                Path("zzz_test_acc_push_missing".into()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["code"], 404, "{body}");
+        assert_eq!(body["message"], "账号不存在");
+    }
+
+    /// 账号级 webhook 指向本机不可达端口 → 发送失败 → code=1（不外发真实钉钉）
+    #[tokio::test]
+    async fn push_dingtalk_reports_failure_on_unreachable_webhook() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_push_bad";
+        mk_account(&db, aid).await;
+        sqlx::query("UPDATE paper_account SET dingtalk_webhook_url = 'http://127.0.0.1:1/zzz' WHERE paper_account_id = $1")
+            .bind(aid)
+            .execute(&db)
+            .await
+            .unwrap();
+        let body = resp_json(
+            push_account_dingtalk(State(state.clone()), ctx(OWNER, "user"), Path(aid.into())).await,
+        )
+        .await;
+        assert_eq!(body["code"], 1, "{body}");
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("推送失败"),
+            "{body}"
+        );
+        cleanup_account(&db, aid).await;
+    }
+
+    // ── 私有辅助函数 ───────────────────────────────────────
+
+    /// check_account_access 四分支：admin 放行 / owner 放行 / 无主放行 / 他人 403
+    #[tokio::test]
+    async fn check_account_access_rules() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_access";
+        let orphan = "zzz_test_acc_access_null";
+        mk_account(&db, aid).await;
+        mk_account(&db, orphan).await;
+        sqlx::query("UPDATE paper_account SET user_id = NULL WHERE paper_account_id = $1")
+            .bind(orphan)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert!(
+            check_account_access(&db, &ctx(OWNER, "admin"), aid)
+                .await
+                .is_ok(),
+            "admin 直通"
+        );
+        assert!(
+            check_account_access(&db, &ctx(OWNER, "user"), aid)
+                .await
+                .is_ok(),
+            "owner 放行"
+        );
+        assert!(
+            check_account_access(&db, &ctx("zzz_stranger", "user"), orphan)
+                .await
+                .is_ok(),
+            "无主账号放行"
+        );
+        assert!(
+            check_account_access(&db, &ctx("zzz_stranger", "user"), aid)
+                .await
+                .is_err(),
+            "他人账号 403"
+        );
+
+        cleanup_account(&db, aid).await;
+        cleanup_account(&db, orphan).await;
+    }
+
+    /// compute_perf_from_nav：<2 个快照 → 空绩效（None 指标 + 0 天）
+    #[tokio::test]
+    async fn perf_from_nav_empty_below_two_snapshots() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_perf1";
+        mk_account(&db, aid).await;
+        mk_nav(&db, aid, date(2027, 5, 3), 100000.0, 0.0, 0.0, 0.0).await;
+
+        let perf = compute_perf_from_nav(&db, aid, 100000.0)
+            .await
+            .expect("Some");
+        assert_eq!(perf.trading_days, 0);
+        assert!(perf.annual_return_pct.is_none());
+        assert!(perf.cumulative_return_pct.is_none());
+        assert!(perf.yearly_returns.is_none());
+
+        cleanup_account(&db, aid).await;
+    }
+
+    /// compute_perf_from_nav：3 天单调上涨 → 累计 21% / 胜率 100% / 交易日 2
+    #[tokio::test]
+    async fn perf_from_nav_computes_metrics() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_perf3";
+        mk_account(&db, aid).await;
+        let base = date(2027, 5, 3);
+        for (i, nav) in [100000.0, 110000.0, 121000.0].into_iter().enumerate() {
+            mk_nav(&db, aid, base + days(i), nav, 0.1, 0.0, 0.0).await;
+        }
+
+        let perf = compute_perf_from_nav(&db, aid, 100000.0)
+            .await
+            .expect("Some");
+        assert_eq!(perf.trading_days, 2, "收益天数 = NAV 天数-1");
+        assert!((perf.cumulative_return_pct.unwrap() - 21.0).abs() < 1e-9);
+        assert!((perf.win_rate_pct.unwrap() - 100.0).abs() < 1e-9);
+        assert!(
+            (perf.max_drawdown_pct.unwrap() - 0.0).abs() < 1e-9,
+            "单调涨无回撤"
+        );
+        assert!(
+            (perf.volatility_pct.unwrap() - 0.0).abs() < 1e-9,
+            "恒定收益波动为 0"
+        );
+        assert!(perf.annual_return_pct.unwrap() > 0.0);
+        assert_eq!(
+            perf.yearly_returns
+                .as_ref()
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        cleanup_account(&db, aid).await;
+    }
+
+    /// compute_perf_from_nav：跨年序列 → 逐年收益分段（2025 段 -5% / 2026 段 ≈4.2%）
+    #[tokio::test]
+    async fn perf_from_nav_yearly_returns_across_years() {
+        let state = test_state().await;
+        let db = state.db.clone();
+        let aid = "zzz_test_acc_perfyr";
+        mk_account(&db, aid).await;
+        mk_nav(&db, aid, date(2025, 12, 30), 100000.0, 0.0, 0.0, 0.0).await;
+        mk_nav(&db, aid, date(2025, 12, 31), 95000.0, -0.05, -0.05, 0.05).await;
+        mk_nav(&db, aid, date(2026, 1, 2), 99000.0, 0.042105, -0.01, 0.05).await;
+
+        let perf = compute_perf_from_nav(&db, aid, 100000.0)
+            .await
+            .expect("Some");
+        let yearly = perf.yearly_returns.as_ref().unwrap().as_array().unwrap();
+        assert_eq!(yearly.len(), 2, "{yearly:?}");
+        assert_eq!(yearly[0]["year"], "2025");
+        assert_eq!(yearly[0]["return_pct"], -5.0, "{yearly:?}");
+        assert_eq!(yearly[1]["year"], "2026");
+        assert_eq!(yearly[1]["return_pct"], 4.2, "{yearly:?}");
+
+        cleanup_account(&db, aid).await;
+    }
+
+    // ── asset_allocation（纯函数）──────────────────────────
+
+    #[test]
+    fn asset_allocation_classifies_and_sorts() {
+        let positions = vec![
+            serde_json::json!({"symbol": "600000.SH", "market_value": "60000"}),
+            serde_json::json!({"symbol": "518880.SH", "market_value": "20000"}),
+            serde_json::json!({"symbol": "000000.NULL", "market_value": "0"}),
+        ];
+        let alloc = asset_allocation(&positions);
+        assert_eq!(alloc.len(), 2, "零市值类被过滤: {alloc:?}");
+        assert_eq!(alloc[0]["name"], "A股", "{alloc:?}");
+        assert_eq!(alloc[0]["market_value"], 60000.0, "{alloc:?}");
+        assert!(
+            (alloc[0]["pct"].as_f64().unwrap() - 75.0).abs() < 1e-9,
+            "{alloc:?}"
+        );
+        assert_eq!(alloc[1]["name"], "黄金ETF", "{alloc:?}");
+        assert!(
+            (alloc[1]["pct"].as_f64().unwrap() - 25.0).abs() < 1e-9,
+            "{alloc:?}"
+        );
+    }
+
+    #[test]
+    fn asset_allocation_empty_positions() {
+        assert!(asset_allocation(&[]).is_empty());
+    }
+}

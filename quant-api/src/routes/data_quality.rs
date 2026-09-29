@@ -424,3 +424,359 @@ mod tests {
         );
     }
 }
+
+// ── 连库测试（覆盖率补测第一批）────────────────────────────
+//
+// 模式沿用 rebalance.rs fifth_batch 先例：test_db() 连真实本机 PG，zzz_test_ 前缀
+// 独占键自造数据 + 测试尾精确键 DELETE 清理。
+//
+// run_data_quality_check 无返回值（gaps 只进 warn 日志），可观察副作用仅两处：
+// 1. data_quality_config.last_quality_check upsert——可断言；
+// 2. send_quality_alert 外发钉钉——本机库 0 个 active+webhook 账号，实际空操作
+//    （若未来库中配了 webhook 账号，跑本测试会照实外发，与 scheduler 日常行为一致）。
+// 内部各检查分支的判定口径用"同款 SQL 复刻"锁定（rebalance.rs fifth_batch 同款手法，
+// 防 SQL 口径漂移；不绑定真实数据状态，断言只对 zzz 造数行）。
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+
+    async fn test_db() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
+        PgPool::connect(&url).await.expect("test db connect")
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("合法日期")
+    }
+
+    /// LatestTradeDate 基准：直接返回传入值，不查日历
+    #[tokio::test]
+    async fn resolve_latest_trade_date_is_passthrough() {
+        let db = test_db().await;
+        let d = date(2026, 9, 28);
+        let out = FactorFreshnessBaseline::LatestTradeDate
+            .resolve(&db, d)
+            .await;
+        assert_eq!(out, d);
+    }
+
+    /// PreviousTradeDate 基准：取日历中 < 传入日的最近开市日（2099 冷门日期 + ZZZ
+    /// 交易所前缀防撞真实 SSE/SZSE 日历，真实日历只到 2026-12-31）
+    #[tokio::test]
+    async fn resolve_previous_trade_date_finds_prior_open_day() {
+        let db = test_db().await;
+        let _ = sqlx::query("DELETE FROM market_trade_calendar WHERE exchange = 'ZZZ'")
+            .execute(&db)
+            .await;
+        for d in [date(2099, 3, 1), date(2099, 3, 2), date(2099, 3, 3)] {
+            sqlx::query(
+                "INSERT INTO market_trade_calendar (exchange, trade_date, is_open) VALUES ('ZZZ', $1, true)",
+            )
+            .bind(d)
+            .execute(&db)
+            .await
+            .expect("insert zzz calendar");
+        }
+
+        let out = FactorFreshnessBaseline::PreviousTradeDate
+            .resolve(&db, date(2099, 3, 5))
+            .await;
+        assert_eq!(out, date(2099, 3, 3), "应取 < 03-05 的最近开市日");
+
+        let _ = sqlx::query("DELETE FROM market_trade_calendar WHERE exchange = 'ZZZ'")
+            .execute(&db)
+            .await;
+    }
+
+    /// PreviousTradeDate 基准：日历无更早开市日（真实日历最早 1990-10-12）→ 宁可
+    /// 漏报不误报，退化返回传入日
+    #[tokio::test]
+    async fn resolve_previous_trade_date_falls_back_when_no_prior_open_day() {
+        let db = test_db().await;
+        let d = date(1990, 1, 1);
+        let out = FactorFreshnessBaseline::PreviousTradeDate
+            .resolve(&db, d)
+            .await;
+        assert_eq!(out, d, "日历残缺时退化返回 latest_td");
+    }
+
+    /// 全量检查：确定性副作用 = data_quality_config.last_quality_check upsert 为今天。
+    /// 两种基准各跑一次，覆盖 resolve 两分支的真实调用路径。
+    /// gaps 内容取决于真实数据状态（不断言）；告警走 webhook 账号查询，本机库为空。
+    #[tokio::test]
+    async fn run_data_quality_check_persists_last_quality_check() {
+        let db = test_db().await;
+        run_data_quality_check(&db, FactorFreshnessBaseline::LatestTradeDate).await;
+        run_data_quality_check(&db, FactorFreshnessBaseline::PreviousTradeDate).await;
+
+        let today = chrono::Utc::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
+        let v: Option<String> = sqlx::query_scalar(
+            "SELECT config_value FROM data_quality_config WHERE config_key = 'last_quality_check'",
+        )
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+        assert_eq!(v.as_deref(), Some(today.as_str()), "检查完成应写入今天日期");
+    }
+
+    /// v24 因子滞缓分支的 SQL 口径（MAX(trade_date) per code+version 与基准比较）：
+    /// zzz 因子最新日=T-1 时判滞缓（gap=1 自然日），最新日=T 时不滞缓
+    #[tokio::test]
+    async fn v24_factor_staleness_sql_semantics() {
+        let db = test_db().await;
+        let code = "zzz_test_dq_stale";
+        let _ = sqlx::query("DELETE FROM factor_value WHERE factor_code = $1")
+            .bind(code)
+            .execute(&db)
+            .await;
+
+        let today = chrono::Utc::now().date_naive();
+        let yst = today - chrono::Duration::days(1);
+        // T-2 与 T-1 各一行
+        for d in [today - chrono::Duration::days(2), yst] {
+            sqlx::query(
+                "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value)
+                 VALUES ($1, $2, 'zzz001.SH', $3, 0.5)",
+            )
+            .bind(code)
+            .bind(factor_version())
+            .bind(d)
+            .execute(&db)
+            .await
+            .expect("insert zzz factor_value");
+        }
+
+        // 同款 SQL：SELECT MAX(trade_date) FROM factor_value WHERE factor_code=$1 AND factor_version=$2
+        let max_row: Option<(NaiveDate,)> = sqlx::query_as(
+            "SELECT MAX(trade_date) FROM factor_value WHERE factor_code = $1 AND factor_version = $2",
+        )
+        .bind(code)
+        .bind(factor_version())
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+        let factor_max = max_row.map(|(d,)| d).expect("MAX 应非空");
+        assert_eq!(factor_max, yst);
+
+        // 判定复刻：factor_max < baseline(T日) → 滞缓, gap = 自然日差
+        let baseline = today;
+        assert!(factor_max < baseline, "T-1 应判滞缓");
+        assert_eq!(
+            (baseline - factor_max).num_days(),
+            1,
+            "gap 按 natural day 计"
+        );
+
+        // 反向：补一行 T 日数据后不滞缓
+        sqlx::query(
+            "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value)
+             VALUES ($1, $2, 'zzz002.SH', $3, 0.6)",
+        )
+        .bind(code)
+        .bind(factor_version())
+        .bind(today)
+        .execute(&db)
+        .await
+        .unwrap();
+        let (m,): (NaiveDate,) = sqlx::query_as(
+            "SELECT MAX(trade_date) FROM factor_value WHERE factor_code = $1 AND factor_version = $2",
+        )
+        .bind(code)
+        .bind(factor_version())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(m >= baseline, "补到 T 日后不判滞缓");
+
+        let _ = sqlx::query("DELETE FROM factor_value WHERE factor_code = $1")
+            .bind(code)
+            .execute(&db)
+            .await;
+    }
+
+    /// 覆盖率骤降分支的 SQL 口径（同款 CTE）：最新日覆盖数 / 近 30 日单日最大覆盖数
+    /// < 0.8 判骤降。造数：T-2 日 10 标的、T-1 日 3 标的 → 30% 触发
+    #[tokio::test]
+    async fn coverage_drop_sql_semantics() {
+        let db = test_db().await;
+        let code = "zzz_test_dq_cov";
+        let _ = sqlx::query("DELETE FROM factor_value WHERE factor_code = $1")
+            .bind(code)
+            .execute(&db)
+            .await;
+
+        let today = chrono::Utc::now().date_naive();
+        let (d1, d2) = (
+            today - chrono::Duration::days(2),
+            today - chrono::Duration::days(1),
+        );
+        for i in 0..10 {
+            sqlx::query(
+                "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value)
+                 VALUES ($1, $2, $3, $4, 0.5)",
+            )
+            .bind(code)
+            .bind(factor_version())
+            .bind(format!("zzz{:03}.SH", i))
+            .bind(d1)
+            .execute(&db)
+            .await
+            .expect("insert zzz factor_value d1");
+        }
+        for i in 0..3 {
+            sqlx::query(
+                "INSERT INTO factor_value (factor_code, factor_version, symbol, trade_date, raw_value)
+                 VALUES ($1, $2, $3, $4, 0.5)",
+            )
+            .bind(code)
+            .bind(factor_version())
+            .bind(format!("zzz{:03}.SH", i))
+            .bind(d2)
+            .execute(&db)
+            .await
+            .expect("insert zzz factor_value d2");
+        }
+
+        // 同款 CTE（run_data_quality_check P2-2 原文口径）
+        let window_start = today - chrono::Duration::days(30);
+        let codes = vec![code];
+        let rows: Vec<(String, NaiveDate, i64, i64)> = sqlx::query_as(
+            "WITH per_day AS (
+                SELECT factor_code, trade_date, COUNT(DISTINCT symbol) AS day_cnt
+                FROM factor_value
+                WHERE factor_version = $3
+                  AND factor_code = ANY($1)
+                  AND trade_date >= $2
+                GROUP BY factor_code, trade_date
+             ),
+             latest AS (
+                SELECT DISTINCT ON (factor_code) factor_code, trade_date, day_cnt
+                FROM per_day ORDER BY factor_code, trade_date DESC
+             )
+             SELECT l.factor_code, l.trade_date, l.day_cnt, MAX(p.day_cnt) AS recent_max
+             FROM latest l JOIN per_day p USING (factor_code)
+             GROUP BY l.factor_code, l.trade_date, l.day_cnt",
+        )
+        .bind(&codes)
+        .bind(window_start)
+        .bind(factor_version())
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (_, latest_dt, latest_cnt, recent_max) = &rows[0];
+        assert_eq!(*latest_dt, d2, "latest 应取最新日: {rows:?}");
+        assert_eq!(*latest_cnt, 3, "{rows:?}");
+        assert_eq!(*recent_max, 10, "{rows:?}");
+        let ratio = *latest_cnt as f64 / *recent_max as f64;
+        assert!(ratio < 0.8, "30% 应触发骤降分支: {ratio}");
+
+        let _ = sqlx::query("DELETE FROM factor_value WHERE factor_code = $1")
+            .bind(code)
+            .execute(&db)
+            .await;
+    }
+
+    /// 事件驱动因子豁免清单语义：forecast_/repurchase_/block_trade_ 前缀因子
+    /// 被排除出覆盖率骤降检测（改查源表新鲜度），非事件因子保留。锁定豁免清单
+    /// 与 V24 因子集的交集不漂移（三前缀各自至少命中 1 个 v24 因子）
+    #[test]
+    fn event_driven_exemption_filter_semantics() {
+        let coverage_codes: Vec<&str> = V24_FACTOR_CODES
+            .iter()
+            .filter(|c| {
+                !EVENT_DRIVEN_FACTOR_SOURCES
+                    .iter()
+                    .any(|(prefix, _, _, _)| c.starts_with(prefix))
+            })
+            .copied()
+            .collect();
+
+        // 每个事件驱动前缀都真实命中 v24 因子（否则豁免清单失效/因子集变更）
+        for (prefix, _, _, _) in EVENT_DRIVEN_FACTOR_SOURCES {
+            let matched: Vec<&str> = V24_FACTOR_CODES
+                .iter()
+                .filter(|c| c.starts_with(prefix))
+                .copied()
+                .collect();
+            assert!(!matched.is_empty(), "前缀 {prefix} 未命中任何 v24 因子");
+            // 被豁免因子不得出现在覆盖率检测集
+            for m in matched {
+                assert!(!coverage_codes.contains(&m), "{m} 应被豁免");
+            }
+        }
+        // 豁免集 ∪ 覆盖率集 = 全集（过滤只分流不丢因子）
+        let exempt: Vec<&str> = V24_FACTOR_CODES
+            .iter()
+            .filter(|c| {
+                EVENT_DRIVEN_FACTOR_SOURCES
+                    .iter()
+                    .any(|(prefix, _, _, _)| c.starts_with(prefix))
+            })
+            .copied()
+            .collect();
+        assert_eq!(
+            coverage_codes.len() + exempt.len(),
+            V24_FACTOR_CODES.len(),
+            "豁免分流应无重叠无损"
+        );
+        // 非事件因子(如 amihud)保留在覆盖率检测集
+        assert!(coverage_codes.contains(&"amihud_20d_std"));
+    }
+
+    /// ETF 检查分支的"无数据"口径：策略配置的 ETF 在日线视图查无 MAX → 记 gap
+    /// （market_stock_daily_bar_adj 是视图不可插数，查不存在 symbol 得 NULL 即分支输入）
+    #[tokio::test]
+    async fn etf_no_data_branch_sql_semantics() {
+        let db = test_db().await;
+        let sid = "zzz_test_dq_etf_sc";
+        let _ = sqlx::query("DELETE FROM strategy_config WHERE strategy_id = $1")
+            .bind(sid)
+            .execute(&db)
+            .await;
+        sqlx::query(
+            "INSERT INTO strategy_config (strategy_id, name, status, etf_symbols, updated_at)
+             VALUES ($1, 'zzz数据质量', 'active', '[\"zzz_test_dq_etf\"]'::jsonb, NOW() + interval '1 hour')",
+        )
+        .bind(sid)
+        .execute(&db)
+        .await
+        .expect("insert zzz strategy_config");
+
+        // 复刻 etf_symbols 读取（run_data_quality_check 同款 SQL）
+        let etf_symbols: Vec<String> = sqlx::query_as::<_, (serde_json::Value,)>(
+            "SELECT etf_symbols FROM strategy_config WHERE status = 'active' ORDER BY updated_at DESC LIMIT 1",
+        )
+        .fetch_optional(&db)
+        .await
+        .unwrap()
+        .and_then(|(v,)| serde_json::from_value::<Vec<String>>(v).ok())
+        .unwrap_or_default();
+        assert!(
+            etf_symbols.iter().any(|s| s == "zzz_test_dq_etf"),
+            "最新 active 策略应含 zzz ETF: {etf_symbols:?}"
+        );
+
+        // 复刻 MAX(trade_date) 查询：无数据 symbol → NULL → 记“无数据” gap
+        let max_row: Option<(Option<NaiveDate>,)> = sqlx::query_as(
+            "SELECT MAX(trade_date) FROM market_stock_daily_bar_adj WHERE symbol = $1",
+        )
+        .bind("zzz_test_dq_etf")
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+        assert!(
+            max_row.and_then(|(d,)| d).is_none(),
+            "视图无该 symbol 数据 → 走无数据分支"
+        );
+
+        let _ = sqlx::query("DELETE FROM strategy_config WHERE strategy_id = $1")
+            .bind(sid)
+            .execute(&db)
+            .await;
+    }
+}
