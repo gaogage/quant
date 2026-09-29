@@ -1740,7 +1740,7 @@ mod db_tests {
             .filter_map(|r| r["account_id"].as_str())
             .filter(|id| id.starts_with("zzz_test_"))
             .collect();
-        assert!(zzz_ids.contains(&pred[..]), "{body}");
+        assert!(zzz_ids.contains(&pred), "{body}");
         assert!(zzz_ids.iter().all(|id| !id.contains("factor")), "{body}");
 
         // status=inactive 只回停用账号
