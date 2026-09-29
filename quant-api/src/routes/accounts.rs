@@ -1669,7 +1669,7 @@ mod db_tests {
         )
         .await;
         let arr = body["data"].as_array().expect("data 为数组");
-        assert!(arr.len() >= 1, "{body}");
+        assert!(!arr.is_empty(), "{body}");
         assert!(arr.iter().all(|r| r["name"] == "zzz独占命中名"), "{body}");
 
         cleanup_account(&db, hit).await;
@@ -1740,7 +1740,7 @@ mod db_tests {
             .filter_map(|r| r["account_id"].as_str())
             .filter(|id| id.starts_with("zzz_test_"))
             .collect();
-        assert!(zzz_ids.contains(&&*pred), "{body}");
+        assert!(zzz_ids.contains(&pred[..]), "{body}");
         assert!(zzz_ids.iter().all(|id| !id.contains("factor")), "{body}");
 
         // status=inactive 只回停用账号
