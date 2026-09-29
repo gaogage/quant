@@ -202,8 +202,10 @@ pub(crate) async fn get_latest_data_version(db: &PgPool) -> String {
 
 struct DailyState {
     date: Option<NaiveDate>,
-    traded_today: bool,     // 今日是否已完成调仓 (14:40+)
-    eod_synced_today: bool, // 今日是否已完成日终数据同步 (21:30, 任务73 前移)
+    traded_today: bool, // 今日是否已完成调仓 (14:40+)
+    // EOD 已完成到的日期(例行=当日/补跑=补跑目标日); None=未做。记"完成到哪天"而非
+    // "今天做过没有"——凌晨补昨日 EOD 不得吞掉当日补跑资格(任务91, 9/29→9/30 实证)。
+    eod_synced_for: Option<NaiveDate>,
     yesterday_synced: bool, // 昨日日线是否已完成 T+1 同步 (次日9:00)
     cleanup_done: bool,
     report_pushed: bool, // 今日是否已推送实盘绩效日报 (16:00 EOD 后)
@@ -249,6 +251,28 @@ fn is_eod_sync_window(hour: u32, minute: u32) -> bool {
     // fund_daily 21:30 就绪率较 22:00 略降的残留,由 akshare(东财)兜底与 9:00 T+1
     // 补盯市闭环承接,告警观察一周后复评。
     hour == 21 && (30..40).contains(&minute)
+}
+
+/// EOD 补跑时段判定（任务91 提取为纯函数, 原内联表达式语义不变）。
+/// 工作时间规则定版(2026-09-30 用户裁决): 补跑是"补偿执行"——允许发生在唤醒时刻
+/// (含非工作段), 但不是被定义在非工作段的定时; 调度定义(21:30 主窗口)在工作段内。
+/// 安全边界: 窗口错过后的 21:40 ~ 次日 06:59 可补(避开晨链/调仓——EOD 全链约 90
+/// 分钟, 串行 tick 下 07:00 后补跑会卡住 09:00 T+1 与 09:35 调仓; 07:00 后不补,
+/// 由 09:00 T+1 补同步兜底)。
+fn is_eod_catchup_due(hour: u32, minute: u32) -> bool {
+    hour > 21 || (hour == 21 && minute >= 40) || hour < 7
+}
+
+/// EOD 补跑目标判定(任务91 纯函数): 最近已收盘交易日尚未被 EOD 覆盖则补。
+/// 核心语义: done_for 记"已完成到哪天"而非"今天做过没有"——凌晨补昨日 EOD 置位
+/// 昨日, 当日晚间唤醒时 latest_closed=当日 ≠ done_for → 立即补当日(旧布尔标志
+/// 会被凌晨补跑吞掉当日资格, 拖到跨天重置, 9/29→9/30 日报延迟到 00:01 实证)。
+fn eod_catchup_target(
+    done_for: Option<NaiveDate>,
+    latest_closed: Option<NaiveDate>,
+) -> Option<NaiveDate> {
+    let latest = latest_closed?;
+    (done_for != Some(latest)).then_some(latest)
 }
 
 fn pre_trade_factor_combo(sc: &StrategyConfig) -> &str {
@@ -457,21 +481,41 @@ mod tests {
     #[test]
     fn eod_catchup_window_boundaries() {
         // 2026-09-24 补跑语义边界：窗口错过后 21:40~次日 06:59 可补，07:00 后不补
-        // （避开晨链/调仓；07:00 后由 09:00 T+1 兜底）
-        let past = |h: u32, m: u32| h > 21 || (h == 21 && m >= 40);
+        // （避开晨链/调仓；07:00 后由 09:00 T+1 兜底）。
+        // 2026-09-30 任务91 提取为 is_eod_catchup_due 纯函数直测(原为本地闭包重实现)。
         // 窗口刚过（21:40）→ 可补
-        assert!(past(21, 40) || (21 < 7));
-        // 深夜/凌晨 → 可补
+        assert!(is_eod_catchup_due(21, 40));
+        // 深夜/凌晨 → 可补（补偿执行, 允许发生在唤醒时刻含非工作段——工作时间
+        // 规则定版 2026-09-30: 但这不是调度定义, 定义是 21:30 主窗口, 在工作段内）
         for (h, m) in [(22, 0), (23, 59), (0, 0), (3, 30), (6, 59)] {
-            assert!(past(h, m) || (h < 7), "{h}:{m} 应在补跑时段");
+            assert!(is_eod_catchup_due(h, m), "{h}:{m} 应在补跑时段");
         }
         // 晨链时段（07:00-21:29）→ 不补
         for (h, m) in [(7, 0), (9, 0), (12, 0), (21, 29), (21, 39)] {
             assert!(
-                !(past(h, m) || (h < 7)),
+                !is_eod_catchup_due(h, m),
                 "{h}:{m} 不应补跑（等 T+1 兜底或窗口本体）"
             );
         }
+    }
+
+    #[test]
+    fn eod_catchup_flag_semantics() {
+        // 任务91: done_for 记"已完成到哪天"而非"今天做过没有"——凌晨补昨日 EOD
+        // 不吞当日补跑资格(9/29 01:40 补 9/28 烧掉布尔标志 → 9/29 晚 22:06 唤醒
+        // 补跑被吞 → 拖到 9/30 00:00 跨天重置, 日报延迟到 00:01 的旧 bug 根因)。
+        let d28 = NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
+        let d29 = NaiveDate::from_ymd_opt(2026, 9, 29).unwrap();
+
+        // 未做过 → 补最近已收盘交易日
+        assert_eq!(eod_catchup_target(None, Some(d29)), Some(d29));
+        // 凌晨补过昨日(置位 d28), 晚间唤醒 latest=d29 ≠ d28 → 立即补当日(核心场景)
+        assert_eq!(eod_catchup_target(Some(d28), Some(d29)), Some(d29));
+        // 已覆盖 → 跳过(幂等防重)
+        assert_eq!(eod_catchup_target(Some(d29), Some(d29)), None);
+        // 无日历数据 → 跳过(不猜目标日)
+        assert_eq!(eod_catchup_target(None, None), None);
+        assert_eq!(eod_catchup_target(Some(d29), None), None);
     }
 
     #[test]
@@ -1432,7 +1476,7 @@ pub fn start_scheduler(db: PgPool, tushare: TushareClient, port: u16) {
         let state = Arc::new(Mutex::new(DailyState {
             date: None,
             traded_today: false,
-            eod_synced_today: false,
+            eod_synced_for: None,
             yesterday_synced: false,
             cleanup_done: false,
             report_pushed: false,
@@ -1510,7 +1554,9 @@ async fn run_tick(
         if st.date != Some(today) {
             st.date = Some(today);
             st.traded_today = false;
-            st.eod_synced_today = false;
+            // eod_synced_for 不跨天重置(任务91): 记录的是"EOD 已完成到的日期", 昨天的
+            // 完成记录今天依然有效(9/30 00:00 tick: latest_closed=9/29 == done → 跳过)。
+            // 旧布尔跨天重置正是"凌晨补跑烧掉当日标志→拖到次日 00:00 才放行"的放大器。
             st.yesterday_synced = false;
             st.cleanup_done = false;
             st.report_pushed = false;
@@ -1688,73 +1734,87 @@ async fn run_tick(
     }
 
     // ── 21:30 (盘后数据就绪, 任务73 前移): 交易日EOD + 非交易日也执行数据同步 ──
-    // 2026-09-24 补跑语义（休眠/重启错过窗口根治）：EOD 是窗口型触发，与 cron 类
-    // 任务的 catch-up 语义不一致——实测 9/24 电脑 21:30-21:40 窗口休眠，唤醒后
-    // 21:58 的 cron 任务全部补跑成功，唯 EOD 整链缺失（adj/盯市/日报零执行，
-    // 23:00 信号导出依赖靠手动补数救回）。修复：窗口已过且当日未同步时，在
-    // 21:40 ~ 次日 07:00 安全时段内补跑（避开晨链/调仓窗口——EOD 全链约 90 分钟，
-    // 串行 tick 下 07:00 后补跑会卡住 09:00 T+1 与 09:35 调仓；07:00 后不再补，
-    // 由 09:00 T+1 补同步兜底）。eod_synced_today 幂等标志防重。
-    let past_eod_window = hour > 21 || (hour == 21 && minute >= 40);
-    let eod_catchup_due = past_eod_window || hour < 7;
-    if is_eod_sync_window(hour, minute) || eod_catchup_due {
-        let should_sync = {
-            let st = state.lock().await;
-            !st.eod_synced_today
+    // 补跑语义两阶段演进:
+    // ① 2026-09-24: EOD 是窗口型触发, 与 cron 类任务的 catch-up 语义不一致——实测
+    //    9/24 电脑 21:30-21:40 窗口休眠, 唤醒后 21:58 的 cron 任务全部补跑成功,
+    //    唯 EOD 整链缺失(adj/盯市/日报零执行)。修复: 窗口已过且未同步时在
+    //    21:40 ~ 次日 07:00 安全时段内补跑。
+    // ② 2026-09-30 任务91: eod_synced_today(bool) → eod_synced_for(Option<date>)。
+    //    旧布尔缺陷: 记"今天做过 EOD 动作"而非"最近交易日 EOD 已完成"——凌晨补
+    //    昨日 EOD 也置当日标志, 当天晚间休眠错过 21:30 后, 唤醒即补被旧标志吞掉,
+    //    拖到跨天重置(00:00)才放行, 日报延迟到 00:01 推送(9/29→9/30 实证)。新语义
+    //    与"最近已收盘交易日"比对, 唤醒即补真正生效; 置位改到成功后(失败不置位,
+    //    串行 tick 下个 tick 自然重试, 原先置位失败的当日放弃语义废除)。
+    // 工作时间规则定版(2026-09-30 用户裁决): 调度定义(21:30 主窗口)在工作段内;
+    // 补跑是补偿执行, 允许发生在唤醒时刻(含非工作段), 但不是被定义在非工作段的
+    // 定时; 07:00 后不再补(避开晨链/调仓), 由 09:00 T+1 补同步兜底。
+    let eod_target: Option<NaiveDate> = if is_eod_sync_window(hour, minute) {
+        // 例行窗口: 当日未做则做(非交易日也执行, 幂等)
+        let st = state.lock().await;
+        (st.eod_synced_for != Some(today)).then_some(today)
+    } else if is_eod_catchup_due(hour, minute) {
+        // 补跑: 最近已收盘交易日未被覆盖则补。按时段区分比较符（2026-09-28 P1 修复）：
+        // - 凌晨(0:00-7:00)唤醒: today 是交易日但尚未收盘——必须 < today, 否则周一
+        //   00:00 会把今天选为补跑日、跑未来日的 EOD, 盯市门禁检查"当日"NAV 必然
+        //   缺失→每周一凌晨误报一次(0928 实证);
+        // - 晚间(≥21:40)唤醒: 当天已收盘, <= today 正确(补当天错过的 EOD)。
+        //   非交易日唤醒两分支都落到最近已收盘交易日, 幂等重算无害。
+        let cmp = if hour < 7 { "<" } else { "<=" };
+        let latest_closed: Option<(NaiveDate,)> = sqlx::query_as(&format!(
+            "SELECT trade_date FROM market_trade_calendar
+             WHERE exchange = 'SSE' AND is_open = true AND trade_date {} $1
+             ORDER BY trade_date DESC LIMIT 1",
+            cmp
+        ))
+        .bind(today)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+        if latest_closed.is_none() {
+            info!("[scheduler] EOD 补跑跳过：无交易日历数据");
+        }
+        let st = state.lock().await;
+        eod_catchup_target(st.eod_synced_for, latest_closed.map(|(d,)| d))
+    } else {
+        None
+    };
+
+    if let Some(target) = eod_target {
+        let routine = is_eod_sync_window(hour, minute);
+        if routine {
+            info!("[scheduler] 21:30 日终数据同步...");
+        } else {
+            info!(
+                "[scheduler] EOD 补跑（唤醒即补，休眠/重启错过 21:30 窗口，{}，补跑交易日 {}）...",
+                now.format("%H:%M"),
+                target
+            );
+        }
+        let sync_result = if routine {
+            crate::routes::sync::sync_eod_data(db, tushare, target, is_trade).await
+        } else {
+            crate::routes::sync::sync_eod_data(db, tushare, target, true).await
         };
-
-        if should_sync {
-            {
+        match sync_result {
+            Ok(_) => {
                 let mut st = state.lock().await;
-                st.eod_synced_today = true;
-            }
-            if is_eod_sync_window(hour, minute) {
-                info!("[scheduler] 21:30 日终数据同步...");
-                if let Err(e) =
-                    crate::routes::sync::sync_eod_data(db, tushare, today, is_trade).await
-                {
-                    warn!("[scheduler] 日终数据同步失败: {}", e);
-                }
-            } else {
-                // 补跑日期 = 最近交易日。按时段区分比较符（2026-09-28 P1 修复）：
-                // - 凌晨(0:00-7:00)唤醒: today 是交易日但尚未收盘——必须 < today,
-                //   否则周一 00:00 会把今天选为补跑日、跑未来日的 EOD,盯市门禁
-                //   检查"当日"NAV 必然缺失→每周一凌晨误报一次(0928 实证);
-                // - 晚间(≥21:40)唤醒: 当天已收盘,<= today 正确(补当天错过的 EOD)。
-                //   非交易日唤醒两分支都落到最近已收盘交易日,幂等重算无害。
-                let cmp = if hour < 7 { "<" } else { "<=" };
-                let missed: Option<(NaiveDate,)> = sqlx::query_as(&format!(
-                    "SELECT trade_date FROM market_trade_calendar
-                     WHERE exchange = 'SSE' AND is_open = true AND trade_date {} $1
-                     ORDER BY trade_date DESC LIMIT 1",
-                    cmp
-                ))
-                .bind(today)
-                .fetch_optional(db)
-                .await
-                .ok()
-                .flatten();
-                let Some((missed_date,)) = missed else {
-                    info!("[scheduler] EOD 补跑跳过：无交易日历数据");
-                    return Ok(());
-                };
-                info!(
-                    "[scheduler] EOD 补跑（休眠/重启错过 21:30 窗口，{}，补跑交易日 {}）...",
-                    now.format("%H:%M"),
-                    missed_date
-                );
-                if let Err(e) =
-                    crate::routes::sync::sync_eod_data(db, tushare, missed_date, true).await
-                {
-                    warn!("[scheduler] EOD 补跑失败: {}", e);
+                st.eod_synced_for = Some(target);
+                // 日报推送已在 sync_eod_data 内部提前完成（composite 合成后立即推，
+                // 不等复权因子全量同步）。这里仅标记 report_pushed 状态。
+                if is_trade {
+                    st.report_pushed = true;
                 }
             }
-
-            // 日报推送已在 sync_eod_data 内部提前完成（composite 合成后立即推，
-            // 不等复权因子全量同步）。这里仅标记 report_pushed 状态。
-            if is_trade {
-                let mut st = state.lock().await;
-                st.report_pushed = true;
+            Err(e) => {
+                if routine {
+                    warn!(
+                        "[scheduler] 日终数据同步失败(未置位, 下个 tick 重试): {}",
+                        e
+                    );
+                } else {
+                    warn!("[scheduler] EOD 补跑失败(未置位, 下个 tick 重试): {}", e);
+                }
             }
         }
     }
