@@ -24,7 +24,7 @@ use std::time::Duration as StdDuration;
 async fn test_db() -> sqlx::PgPool {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-    quant_common::test_db::connect_test_pool(&url).await
+    quant_common::db_pool::connect_test_pool(&url).await
 }
 
 /// 共享父行：data_version（prediction_set FK）+ strategy 链（backtest_task FK）

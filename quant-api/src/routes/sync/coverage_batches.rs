@@ -1945,7 +1945,7 @@ mod fourth_batch {
         dotenv::dotenv().ok();
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        let db = quant_common::test_db::connect_test_pool(&url).await;
+        let db = quant_common::db_pool::connect_test_pool(&url).await;
         crate::AppState {
             start_time: Utc::now(),
             db,

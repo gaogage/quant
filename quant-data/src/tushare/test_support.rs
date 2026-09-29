@@ -167,7 +167,7 @@ pub(crate) fn mock_config(base_url: &str) -> TushareConfig {
 pub(crate) async fn local_pool() -> sqlx::PgPool {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://gaocheng@127.0.0.1/quant".into());
-    quant_common::test_db::connect_test_pool(&url).await
+    quant_common::db_pool::connect_test_pool(&url).await
 }
 
 /// 单个连接处理：读一个 HTTP 请求 → 路由 → 写响应 → 关连接（Connection: close）

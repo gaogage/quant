@@ -9106,7 +9106,7 @@ mod tests {
     async fn test_sync_fund_basic_writes_list_date() {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://gaocheng@localhost/quant".into());
-        let pool = quant_common::test_db::connect_test_pool(&url).await;
+        let pool = quant_common::db_pool::connect_test_pool(&url).await;
         let client = crate::tushare::client::TushareClient::from_env().expect("tushare");
         let n = sync_fund_basic(&pool, &client).await.expect("sync");
         assert!(n > 0, "应同步到 ETF");
