@@ -2559,7 +2559,7 @@ mod db_tests {
             "ML预测",
         ] {
             assert!(
-                names.iter().any(|n| *n == expected),
+                names.contains(&expected),
                 "看板缺检查项 {expected}: {names:?}"
             );
         }
