@@ -19,6 +19,7 @@ mod config_env;
 mod data_version;
 mod etf_premium;
 mod etf_prices;
+mod leverage_budget;
 mod mvo_weights;
 mod nav_snapshot;
 mod paper_account_repo;
@@ -38,6 +39,10 @@ pub(crate) use config_env::{
 pub use data_version::{data_version_exists, latest_eod_data_version};
 pub use etf_premium::{apply_premium_exit_overlay, load_etf_premium_map, EtfPremium};
 pub(crate) use etf_prices::fetch_intraday_etf_prices;
+pub use leverage_budget::{
+    compute_buy_budget, compute_buy_scale, compute_required_repay, resolve_maintenance_action,
+    MaintenanceAction,
+};
 pub use mvo_weights::MvoWeightCache;
 pub(crate) use mvo_weights::{
     apply_etf_momentum_filter, compute_lw_mvo_weights, compute_vol_target_leverage,

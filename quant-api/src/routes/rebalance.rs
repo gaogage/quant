@@ -177,25 +177,26 @@ async fn check_maintenance_gate(
     let Some((maint, liq_thr, warn_thr)) = maint_info else {
         return false;
     };
-    if maint.is_infinite() {
-        return false;
-    }
-    if maint < liq_thr {
-        // 平仓线:强平(正常由每日检查处理,此处兜底)
-        let _ = force_liquidation(db, account_id, date, warn_thr + 0.05, sc_slippage_pct(sc)).await;
-        warn!(
-            "[MAINT] date={} acct={} 维保{:.3}<平仓线{} 强平+禁买",
-            date, account_id, maint, liq_thr
-        );
-        true
-    } else if maint < warn_thr {
-        warn!(
-            "[MAINT] date={} acct={} 维保{:.3}<警戒线{} 禁买",
-            date, account_id, maint, warn_thr
-        );
-        true
-    } else {
-        false
+    // 三态判定委托领域服务(R6); Infinity(无融资)由其放行
+    match crate::routes::shared::resolve_maintenance_action(maint, liq_thr, warn_thr) {
+        crate::routes::shared::MaintenanceAction::Liquidate => {
+            // 平仓线:强平(正常由每日检查处理,此处兜底)
+            let _ =
+                force_liquidation(db, account_id, date, warn_thr + 0.05, sc_slippage_pct(sc)).await;
+            warn!(
+                "[MAINT] date={} acct={} 维保{:.3}<平仓线{} 强平+禁买",
+                date, account_id, maint, liq_thr
+            );
+            true
+        }
+        crate::routes::shared::MaintenanceAction::WarnBlockBuy => {
+            warn!(
+                "[MAINT] date={} acct={} 维保{:.3}<警戒线{} 禁买",
+                date, account_id, maint, warn_thr
+            );
+            true
+        }
+        crate::routes::shared::MaintenanceAction::Normal => false,
     }
 }
 
@@ -328,10 +329,10 @@ pub async fn rebalance_account(
                 let upper = lev_f * (1.0 + band);
                 let lower = lev_f * (1.0 - band);
                 if actual_lev > upper {
-                    // 需还款: margin 降到 NAV×(lev-1) 的差额
-                    let target_margin = nav_f * (lev_f - 1.0);
-                    let repay_f = (margin_f - target_margin).max(0.0);
-                    required_repay = Decimal::from_f64_retain(repay_f).unwrap_or(Decimal::ZERO);
+                    // 需还款: 计算委托领域服务(R6, 纯函数单一真相源)
+                    required_repay =
+                        crate::routes::shared::compute_required_repay(nav_f, margin_f, lev_f, band);
+                    let repay_f: f64 = required_repay.to_string().parse().unwrap_or(0.0);
                     tracing::info!(
                         account_id,
                         actual_lev,
@@ -355,9 +356,15 @@ pub async fn rebalance_account(
             }
         }
     }
-    let credit_cap = (current_nav * (leverage_d - Decimal::ONE)).max(Decimal::ZERO);
-    // 预算扣减: 若有还款约束, 授信余量先冲抵还款额(卖出资金回流时优先补足)
-    let mut buy_budget = acct_cash + (credit_cap - acct_margin - required_repay).max(Decimal::ZERO);
+    // 预算扣减: 若有还款约束, 授信余量先冲抵还款额(卖出资金回流时优先补足)。
+    // 计算委托领域服务(R6): buy_budget = cash + max(credit_cap - margin - repay, 0)
+    let mut buy_budget = crate::routes::shared::compute_buy_budget(
+        acct_cash,
+        current_nav,
+        acct_margin,
+        leverage_d,
+        required_repay,
+    );
 
     // 任务86: 最小交易额(账号级,三层仲裁: paper_account 列 > app_config > 5000 兜底;
     // 0=关闭)。存量微调低于此值不生成单——佣金失衡阈值,与券商费率/资金规模强相关。
@@ -587,8 +594,9 @@ pub async fn rebalance_account(
                 }
             }
             let avail = buy_budget + etf_sell_est;
-            if total_need > avail && total_need > Decimal::ZERO {
-                buy_scale = avail / total_need;
+            // 缩放系数委托领域服务(R6): 需求超预算 → k=可用/需求, 充足 → 1
+            buy_scale = crate::routes::shared::compute_buy_scale(avail, total_need);
+            if buy_scale < Decimal::ONE {
                 tracing::info!(
                     account_id,
                     "[rebalance] 买入预算约束: 需求 {:.0} > 可用 {:.0}(含ETF卖出预估 {:.0}), A股+ETF 等比缩放 k={:.3}",
